@@ -1,0 +1,40 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px;
+  font-family: var(--kr-font-sans);
+  font-weight: var(--kr-weight-semibold);
+  font-size: var(--kr-text-sm);
+  line-height: 1;
+  border-radius: var(--kr-radius-full);
+  white-space: nowrap;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--kr-radius-full);
+  flex: 0 0 auto;
+}
+/* The pulse ring uses each tone's own tint (not currentColor) -- matching
+   the pill's own background so the ring reads as a soft halo, not a hard
+   outline. Set per-tone since CSS has no "parent's background" reference. */
+.cool.pulse   .dot { box-shadow: 0 0 0 3px var(--kr-cool-faint); }
+.heat.pulse   .dot { box-shadow: 0 0 0 3px var(--kr-accent-tint); }
+.idle.pulse   .dot { box-shadow: 0 0 0 3px var(--kr-ok-tint); }
+.warn.pulse   .dot { box-shadow: 0 0 0 3px var(--kr-warn-tint); }
+.danger.pulse .dot { box-shadow: 0 0 0 3px var(--kr-danger-tint); }
+
+.cool    { color: var(--kr-cool-mid); background: var(--kr-cool-faint); }
+.heat    { color: var(--kr-accent-deep); background: var(--kr-accent-tint); }
+.idle    { color: var(--kr-ok); background: var(--kr-ok-tint); }
+.warn    { color: #9A6B05; background: var(--kr-warn-tint); }
+.danger  { color: var(--kr-danger); background: var(--kr-danger-tint); }
+.neutral { color: var(--kr-ink-body); background: var(--kr-surface-page); }
+
+.cool .dot    { background: var(--kr-cool); }
+.heat .dot    { background: var(--kr-accent); }
+.idle .dot    { background: var(--kr-ok); }
+.warn .dot    { background: var(--kr-warn); }
+.danger .dot  { background: var(--kr-danger); }
+.neutral .dot { background: var(--kr-border-strong); }

@@ -1,0 +1,26 @@
+[Unit]
+Description=Krauken web/API tier
+After=network.target krauken-daemon.service
+# Not Requires=krauken-daemon.service: per the architecture, /api/v1/state
+# and history reads work directly against SQLite even if the daemon is
+# down -- the API tier must come up and stay serving regardless.
+
+[Service]
+Type=simple
+User=krauken-api
+Group=krauken
+EnvironmentFile=/etc/krauken/krauken.conf
+ExecStart=/opt/krauken/.venv/bin/krauken-api
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadOnlyPaths=/var/lib/krauken
+ReadWritePaths=/run/krauken
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

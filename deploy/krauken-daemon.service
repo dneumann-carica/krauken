@@ -1,0 +1,29 @@
+[Unit]
+Description=Krauken control daemon
+After=network.target
+# Not currently ordered After=krauken-supervisor.service: the daemon must
+# tolerate the supervisor being absent or late (BrewPi-only installs never
+# run it at all) -- see AsyncIPCClient's DaemonUnavailable handling.
+
+[Service]
+Type=simple
+User=krauken
+Group=krauken
+EnvironmentFile=/etc/krauken/krauken.conf
+ExecStart=/opt/krauken/.venv/bin/krauken-daemon
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# TODO once krauken/platforms/brewpi lands: SupplementaryGroups=dialout (to
+# open /dev/ttyUSB*). Not added now -- no code in this process touches
+# serial yet, and an unused group grant is worth adding only when it's
+# actually exercised.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/krauken /run/krauken
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

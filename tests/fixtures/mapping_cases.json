@@ -1,0 +1,160 @@
+{
+  "devices": {
+    "krauken:onboard": {
+      "display_name": "The Krauken",
+      "capabilities": ["chamber_temp", "chamber_cooling", "chamber_heating"],
+      "bundled_roles": ["chamber_temp", "chamber_cooling", "chamber_heating"]
+    },
+    "brewpi:usb0": {
+      "display_name": "BrewPi",
+      "capabilities": ["chamber_temp", "chamber_cooling", "chamber_heating"],
+      "bundled_roles": ["chamber_temp", "chamber_cooling", "chamber_heating"]
+    },
+    "tilt:purple": {
+      "display_name": "Tilt - Purple",
+      "capabilities": ["beer_temp", "beer_gravity"],
+      "bundled_roles": []
+    },
+    "plug:heating1": {
+      "display_name": "Smart plug - heating",
+      "capabilities": ["chamber_heating"],
+      "bundled_roles": []
+    },
+    "onewire:probe1": {
+      "display_name": "Probe 1",
+      "capabilities": ["beer_temp"],
+      "bundled_roles": []
+    }
+  },
+  "cases": [
+    {
+      "name": "bundle_propagation_single_role_assigned",
+      "draft": {"chamber_temp": "krauken:onboard"},
+      "expected_roles": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_cooling": "krauken:onboard",
+        "chamber_heating": "krauken:onboard",
+        "beer_temp": null,
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [],
+      "expected_blocking_codes": ["hardware_incomplete"]
+    },
+    {
+      "name": "two_bundle_devices_conflict_temp_wins",
+      "draft": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_cooling": "brewpi:usb0",
+        "chamber_heating": "brewpi:usb0"
+      },
+      "expected_roles": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_cooling": "krauken:onboard",
+        "chamber_heating": "krauken:onboard",
+        "beer_temp": null,
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [
+        {"device_id": "brewpi:usb0", "roles_cleared": ["chamber_cooling", "chamber_heating"]}
+      ],
+      "expected_blocking_codes": ["hardware_incomplete"]
+    },
+    {
+      "name": "bundle_device_collides_with_independent_smart_plug",
+      "draft": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_heating": "plug:heating1"
+      },
+      "expected_roles": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_cooling": "krauken:onboard",
+        "chamber_heating": "krauken:onboard",
+        "beer_temp": null,
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [
+        {"device_id": "plug:heating1", "roles_cleared": ["chamber_heating"]}
+      ],
+      "expected_blocking_codes": ["hardware_incomplete"]
+    },
+    {
+      "name": "fully_independent_no_bundle_device_untouched",
+      "draft": {
+        "chamber_heating": "plug:heating1",
+        "beer_temp": "tilt:purple"
+      },
+      "expected_roles": {
+        "chamber_temp": null,
+        "chamber_cooling": null,
+        "chamber_heating": "plug:heating1",
+        "beer_temp": "tilt:purple",
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [],
+      "expected_blocking_codes": ["hardware_incomplete", "hardware_incomplete"]
+    },
+    {
+      "name": "tilt_for_beer_temp_only_not_both_is_valid",
+      "draft": {
+        "chamber_temp": "krauken:onboard",
+        "beer_temp": "tilt:purple"
+      },
+      "expected_roles": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_cooling": "krauken:onboard",
+        "chamber_heating": "krauken:onboard",
+        "beer_temp": "tilt:purple",
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [],
+      "expected_blocking_codes": []
+    },
+    {
+      "name": "unqualified_assignment_blocked",
+      "draft": {
+        "chamber_temp": "krauken:onboard",
+        "beer_temp": "plug:heating1"
+      },
+      "expected_roles": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_cooling": "krauken:onboard",
+        "chamber_heating": "krauken:onboard",
+        "beer_temp": "plug:heating1",
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [],
+      "expected_blocking_codes": ["unqualified_assignment"]
+    },
+    {
+      "name": "unknown_device_blocked",
+      "draft": {
+        "chamber_temp": "nonexistent:device"
+      },
+      "expected_roles": {
+        "chamber_temp": null,
+        "chamber_cooling": null,
+        "chamber_heating": null,
+        "beer_temp": null,
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [],
+      "expected_blocking_codes": ["unknown_device", "hardware_incomplete", "hardware_incomplete", "hardware_incomplete"]
+    },
+    {
+      "name": "fully_valid_config_no_gravity",
+      "draft": {
+        "chamber_temp": "krauken:onboard",
+        "beer_temp": "onewire:probe1"
+      },
+      "expected_roles": {
+        "chamber_temp": "krauken:onboard",
+        "chamber_cooling": "krauken:onboard",
+        "chamber_heating": "krauken:onboard",
+        "beer_temp": "onewire:probe1",
+        "beer_gravity": null
+      },
+      "expected_auto_resolved": [],
+      "expected_blocking_codes": []
+    }
+  ]
+}

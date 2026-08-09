@@ -1,0 +1,10 @@
+# Copy to /etc/krauken/krauken.conf and reference from the systemd units via
+# EnvironmentFile=. See krauken/config.py for what each variable does.
+
+KRAUKEN_DB_PATH=/var/lib/krauken/krauken.db
+KRAUKEN_DAEMON_SOCKET=/run/krauken/daemon.sock
+KRAUKEN_SUPERVISOR_SOCKET=/run/krauken/supervisor.sock
+KRAUKEN_HEARTBEAT_INTERVAL_S=60
+# 1 enables the /api/v1/dev/* endpoints (Manual driver dev panel). Leave
+# unset/0 in any deployment that isn't actively being developed against.
+KRAUKEN_DEV_PANEL=0

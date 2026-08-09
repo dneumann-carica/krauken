@@ -1,0 +1,146 @@
+.root {
+  width: 100%;
+  /* The scrub drag (FermentationChart.tsx's onPointerDown/Move) is a
+     mousedown-and-move gesture over the whole chart, which is exactly
+     what the browser's native text-selection drag gesture looks like --
+     without this, dragging across the legend/axis labels/ribbon text
+     highlights it like a text selection instead of just scrubbing. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.legend {
+  display: flex;
+  gap: var(--kr-space-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--kr-space-2);
+  font: var(--kr-type-caption);
+  color: var(--kr-ink-body);
+}
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.swatch {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+.swatchDashed {
+  background-image: linear-gradient(to right, currentColor 50%, transparent 50%);
+  background-size: 6px 3px;
+  height: 3px;
+  width: 14px;
+}
+.swatchDotted {
+  /* Mirrors the chart's own gap-bridge styling (dasharray "0.1 4",
+     round linecap) -- small round dots, not the dashed rectangles
+     swatchDashed uses for the projection/gravity/setpoint lines. */
+  background-image: radial-gradient(circle, currentColor 1.5px, transparent 1.5px);
+  background-size: 5px 3px;
+  height: 3px;
+  width: 14px;
+}
+
+.ribbon {
+  position: relative;
+  height: 38px;
+  margin-bottom: 6px;
+}
+.ribbonSeg {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  box-sizing: border-box;
+  border-top: 3px solid var(--kr-border-strong);
+  border-radius: 0 0 var(--kr-radius-sm) var(--kr-radius-sm);
+  padding: 6px 8px 7px;
+  overflow: hidden;
+}
+.ribbonName {
+  font-weight: var(--kr-weight-bold);
+  font-size: var(--kr-text-xs);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--kr-ink-body);
+}
+.ribbonSpan {
+  font-family: var(--kr-font-mono);
+  font-size: 11px;
+  color: var(--kr-ink-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ribbonPending {
+  background: var(--kr-surface-sunken);
+  border-top-color: var(--kr-border-strong);
+}
+.ribbonDone {
+  background: var(--kr-surface-sunken);
+  border-top-color: var(--kr-cool);
+}
+.ribbonActive {
+  background: var(--kr-accent-faint);
+  border-top-color: var(--kr-accent);
+}
+.ribbonActive .ribbonName { color: var(--kr-ink); }
+.ribbonEnded {
+  background: var(--kr-surface-sunken);
+  border-top-color: var(--kr-ink);
+}
+.ribbonEnded .ribbonName { color: var(--kr-ink); }
+
+.plotWrap {
+  width: 100%;
+  overflow-x: auto;
+}
+.plot {
+  background: var(--kr-plot-bg);
+  border-radius: var(--kr-radius-md);
+  cursor: crosshair;
+}
+
+.axisLine { stroke: var(--kr-border); stroke-width: 1; }
+.axisLabel { font: var(--kr-type-caption); fill: var(--kr-ink-muted); }
+.gridLine { stroke: var(--kr-border); stroke-width: 1; stroke-dasharray: 2 3; }
+.stageLine { stroke: var(--kr-border-strong); stroke-width: 1; stroke-dasharray: 3 4; }
+
+.caption {
+  margin-top: var(--kr-space-2);
+  font: var(--kr-type-caption);
+  color: var(--kr-ink-body);
+}
+
+.futureRegion { fill: var(--kr-surface-sunken); }
+.nowLine { stroke: var(--kr-ink); stroke-width: 1.5; }
+/* Scrub crosshair: same weight as nowLine (they're both "a moment in
+   time" markers) but in the accent color, distinct enough that the two
+   are never confused when both happen to be visible at once (an active
+   fermentation being scrubbed near "now"). pointer-events:none so the
+   line itself is never what receives the drag. */
+.scrubLine { stroke: var(--kr-accent); stroke-width: 1.5; pointer-events: none; }
+.scrubLabel {
+  font: var(--kr-weight-bold) 10px/1 var(--kr-font-sans);
+  letter-spacing: 0.02em;
+  fill: var(--kr-accent);
+  pointer-events: none;
+}
+
+/* Gap bridges: one neutral ink for every series (not each series' own
+   color, unlike the projection's "2 3" colored dashes) -- large sparse
+   round dots read as a structurally different mark, not just a smaller
+   dash, so a gap and a projection are never confusable at a glance, even
+   in grayscale/forced-colors. --kr-ink-muted is fine here (unlike for
+   text/copy, see colors.css) -- this is a decorative stroke, not copy,
+   and de-emphasis is exactly the point. */
+.gapPath { stroke: var(--kr-ink-muted); stroke-width: 2.25; stroke-dasharray: 0.1 6; stroke-linecap: round; opacity: 0.85; }
+.nowLabel {
+  font: var(--kr-weight-bold) 10px/1 var(--kr-font-sans);
+  letter-spacing: 0.08em;
+  fill: var(--kr-ink);
+}

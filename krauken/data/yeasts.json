@@ -1,0 +1,46 @@
+{
+  "us05": {
+    "name": "SafAle US-05 - American ale",
+    "stage_defaults": {
+      "primary": {"temp_f": 66.0},
+      "free_rise": {"temp_from_f": 66.0, "temp_to_f": 70.0},
+      "diacetyl_rest": {"temp_f": 70.0},
+      "conditioning": {"temp_f": 68.0},
+      "cold_crash": {"temp_from_f": 68.0, "temp_to_f": 38.0}
+    }
+  },
+  "london3": {
+    "name": "London Ale III - hazy IPA",
+    "stage_defaults": {
+      "primary": {"temp_f": 68.0},
+      "free_rise": {"temp_from_f": 68.0, "temp_to_f": 72.0},
+      "diacetyl_rest": {"temp_f": 72.0},
+      "conditioning": {"temp_f": 68.0},
+      "cold_crash": {"temp_from_f": 68.0, "temp_to_f": 38.0}
+    }
+  },
+  "w3470": {
+    "name": "W-34/70 - lager",
+    "stage_defaults": {
+      "primary": {"temp_f": 50.0},
+      "free_rise": {"temp_from_f": 50.0, "temp_to_f": 58.0},
+      "diacetyl_rest": {"temp_f": 58.0},
+      "conditioning": {"temp_f": 48.0},
+      "cold_crash": {"temp_from_f": 48.0, "temp_to_f": 34.0}
+    }
+  },
+  "belle_saison": {
+    "name": "Belle Saison - farmhouse",
+    "stage_defaults": {
+      "primary": {"temp_f": 70.0},
+      "free_rise": {"temp_from_f": 70.0, "temp_to_f": 78.0},
+      "diacetyl_rest": {"temp_f": 78.0},
+      "conditioning": {"temp_f": 68.0},
+      "cold_crash": {"temp_from_f": 68.0, "temp_to_f": 38.0}
+    }
+  },
+  "custom": {
+    "name": "Custom profile - no preset",
+    "stage_defaults": {}
+  }
+}

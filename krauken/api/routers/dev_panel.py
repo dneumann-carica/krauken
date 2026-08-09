@@ -1,0 +1,79 @@
+"""The Manual driver's dev panel: lets a developer hand-set exactly what
+the Manual chamber/beer/gravity "sensors" report, so the control loop's
+response to a specific reading (or a lost one) can be exercised without
+real hardware -- see platforms/manual/live.py's module docstring.
+
+Gated behind Config.dev_panel_enabled (KRAUKEN_DEV_PANEL=1) -- off by
+default, since a zero-auth LAN device shouldn't let just anyone on the
+network start feeding the control loop fake readings.
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+
+from krauken.api import deps
+from krauken.api.schemas import (
+    ClockResponse,
+    ManualReadingResponse,
+    ManualReadingsResponse,
+    ManualSetReadingRequest,
+    SimulatorReadingResponse,
+    SimulatorSetProbe2Request,
+)
+from krauken.contracts.errors import DevPanelDisabled
+from krauken.ipc.client import AsyncIPCClient
+
+router = APIRouter()
+
+
+def _require_enabled() -> None:
+    if not deps.get_config().dev_panel_enabled:
+        raise DevPanelDisabled("the dev panel is disabled -- set KRAUKEN_DEV_PANEL=1 to enable it")
+
+
+@router.get("/dev/manual", response_model=ManualReadingsResponse)
+async def get_manual_readings(client: AsyncIPCClient = Depends(deps.daemon)) -> ManualReadingsResponse:
+    _require_enabled()
+    result = await client.call("manual.get_readings")
+    return ManualReadingsResponse(**result)
+
+
+@router.put("/dev/manual/{field}", response_model=ManualReadingResponse)
+async def set_manual_reading(
+    field: str, body: ManualSetReadingRequest, client: AsyncIPCClient = Depends(deps.daemon)
+) -> ManualReadingResponse:
+    _require_enabled()
+    # exclude_unset, not exclude_none -- explicitly setting a field to null
+    # (e.g. temp_f: null) is a real dev-panel action (simulate a sensor
+    # that stopped reporting); omitting the field entirely means "leave it
+    # alone". Only the daemon-side op actually knows which fields are valid
+    # for which target (chamber/beer/gravity), so an unsupported field for
+    # this `field` still round-trips here and gets rejected there.
+    values = body.model_dump(exclude_unset=True)
+    result = await client.call("manual.set_reading", {"field": field, "values": values})
+    return ManualReadingResponse(**result)
+
+
+@router.get("/dev/simulator", response_model=SimulatorReadingResponse)
+async def get_simulator_readings(client: AsyncIPCClient = Depends(deps.daemon)) -> SimulatorReadingResponse:
+    _require_enabled()
+    result = await client.call("simulator.get_readings")
+    return SimulatorReadingResponse(**result)
+
+
+@router.put("/dev/simulator/probe2", response_model=SimulatorReadingResponse)
+async def set_simulator_probe2(
+    body: SimulatorSetProbe2Request, client: AsyncIPCClient = Depends(deps.daemon)
+) -> SimulatorReadingResponse:
+    _require_enabled()
+    args = body.model_dump(exclude_unset=True)
+    await client.call("simulator.set_probe2", args)
+    result = await client.call("simulator.get_readings")
+    return SimulatorReadingResponse(**result)
+
+
+@router.get("/dev/clock", response_model=ClockResponse)
+async def get_clock(client: AsyncIPCClient = Depends(deps.daemon)) -> ClockResponse:
+    _require_enabled()
+    result = await client.call("dev_panel.get_clock")
+    return ClockResponse(**result)

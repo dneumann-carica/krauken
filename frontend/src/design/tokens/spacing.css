@@ -1,0 +1,29 @@
+/* Krauken's own spacing tokens -- 4px base grid, recreated from the Arpio
+reference. --kr-touch-* are new (not in the Arpio source): the handoff
+README calls out a 44px minimum touch target / 48px primary-action target
+for phone layouts -- encoded here so every primitive can reference one
+name instead of every component re-deciding it. */
+
+:root {
+  --kr-space-0:  0;
+  --kr-space-1:  4px;
+  --kr-space-2:  8px;
+  --kr-space-3:  12px;
+  --kr-space-4:  16px;
+  --kr-space-5:  20px;
+  --kr-space-6:  24px;
+  --kr-space-8:  32px;
+  --kr-space-10: 40px;
+  --kr-space-12: 48px;
+  --kr-space-16: 64px;
+
+  --kr-container-max: 960px;
+  --kr-gutter: var(--kr-space-6);
+
+  --kr-control-sm: 32px;
+  --kr-control-md: 40px;
+  --kr-control-lg: 48px;
+
+  --kr-touch-min:     44px;
+  --kr-touch-primary: 48px;
+}

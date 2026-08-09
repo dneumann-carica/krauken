@@ -1,0 +1,14 @@
+.dialog {
+  padding: 0;
+  border: none;
+  background: var(--kr-surface);
+  border-radius: var(--kr-radius-lg);
+  box-shadow: var(--kr-shadow-lg);
+  max-width: min(640px, calc(100vw - var(--kr-space-8)));
+  max-height: calc(100vh - var(--kr-space-10));
+  overflow-y: auto;
+}
+
+.dialog::backdrop {
+  background: rgba(38, 45, 76, 0.5);
+}

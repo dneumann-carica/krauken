@@ -1,0 +1,182 @@
+"""Daemon composition root. One factory, two parameterizations: production
+(__main__.py, ProductionClock/SimulatorClock auto-selected by _select_clock
+below, real db path) and tests/scenarios (krauken.daemon.testing,
+SimulatorClock, a tmp db) -- no `if TESTING:` branches anywhere in the
+daemon itself.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import datetime
+import logging
+from pathlib import Path
+from typing import Any
+
+from krauken.contracts.clock import Clock, ProductionClock, SimulatorClock
+from krauken.contracts.control_constants import ControlTuning
+from krauken.daemon.control_loop import DEFAULT_CONTROL_TICK_INTERVAL_S, control_tick
+from krauken.daemon.control_state import ControlState
+from krauken.db import queries, writes
+from krauken.db.connection import open_ro, open_rw
+from krauken.db.migrate import migrate
+from krauken.ipc.server import IPCServer
+from krauken.platforms.manual.live import ManualPanel
+from krauken.platforms.registry import build_registry
+from krauken.platforms.simulator.live import SimPlantEngine
+
+# Imported for their @op-decorated side effects (registers hardware.*/
+# settings.*/fermentation.*/manual.* ops into krauken.ipc.server.OPS) -- not
+# otherwise referenced in this module.
+from krauken.daemon.ops import hardware as _hardware_ops  # noqa: F401
+from krauken.daemon.ops import settings as _settings_ops  # noqa: F401
+from krauken.daemon.ops import fermentation as _fermentation_ops  # noqa: F401
+from krauken.daemon.ops import dev_panel as _dev_panel_ops  # noqa: F401
+
+log = logging.getLogger("krauken.daemon")
+
+
+class DaemonContext:
+    """Passed as `ctx` to every IPC op handler."""
+
+    def __init__(self, *, db_path: Path, clock: Clock, control_tuning: ControlTuning | None = None):
+        self.db_path = db_path
+        self.clock = clock
+        self.conn = open_rw(db_path)
+        # M2 live drivers -- always constructed (cheap, inert until a role
+        # actually resolves to one via daemon/drivers.py), one shared
+        # instance per process so every device that shares a platform
+        # shares its one conceptual state (see live.py's module docstrings).
+        # Built before the registry so discover() can read live off them
+        # instead of a fixed snapshot (see platforms/registry.py).
+        self.sim_engine = SimPlantEngine(clock, tuning=control_tuning or ControlTuning())
+        self.manual_panel = ManualPanel(clock)
+        self.registry = build_registry(manual_panel=self.manual_panel, sim_engine=self.sim_engine)
+        # Serializes actual SQLite writes from background tasks (a scan's
+        # device upserts) against each other and against control-tick
+        # writes -- separate from IPCServer.state_lock, which only covers
+        # the duration of a single op *call*, not a whole background job.
+        self.db_lock = asyncio.Lock()
+        self.jobs: dict[str, Any] = {}
+        self.control_state = ControlState()
+
+
+class Daemon:
+    def __init__(
+        self,
+        *,
+        ctx: DaemonContext,
+        socket_path: Path,
+        heartbeat_interval_s: float,
+        control_tick_interval_s: float = DEFAULT_CONTROL_TICK_INTERVAL_S,
+    ):
+        self.ctx = ctx
+        self.heartbeat_interval_s = heartbeat_interval_s
+        self.control_tick_interval_s = control_tick_interval_s
+        self.server = IPCServer(socket_path, ctx)
+        self._heartbeat_task: asyncio.Task | None = None
+        self._control_task: asyncio.Task | None = None
+        self._stopping = asyncio.Event()
+
+    async def start(self) -> None:
+        await self.server.start()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._control_task = asyncio.create_task(self._control_loop())
+        log.info("daemon started")
+
+    async def stop(self) -> None:
+        self._stopping.set()
+        for task in (self._heartbeat_task, self._control_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        await self.server.stop()
+        self.ctx.conn.close()
+        log.info("daemon stopped")
+
+    async def run_forever(self) -> None:
+        await self.start()
+        try:
+            await self._stopping.wait()
+        finally:
+            await self.stop()
+
+    async def _heartbeat_loop(self) -> None:
+        # Only writes the generic "alive" heartbeat when nothing else is --
+        # once a fermentation is active, the control loop keeps live_state
+        # fresh with real telemetry every tick, and a slower heartbeat
+        # blindly overwriting that moments later with a bare {"status":
+        # "alive"} would make the UI's live view flicker back to nothing.
+        #
+        # Paces itself with a REAL asyncio.sleep(), not ctx.clock.sleep() --
+        # this loop's own cadence is a process-liveness concern (like the
+        # IPC layer's timeouts, contracts/clock.py's docstring), not
+        # simulated fermentation time. Under SimulatorClock (which never
+        # really waits), racing the SAME shared clock forward independently
+        # of the control loop's own pacing was a real, confirmed bug: since
+        # this branch is nearly a no-op once a fermentation is active, it
+        # could complete vastly more iterations per unit of real scheduling
+        # time than the control loop's much heavier tick could, dragging
+        # the shared clock ahead unpredictably between one control tick and
+        # the next -- producing huge, inconsistent dt_s values and a
+        # runaway chamber-temp oscillation that had nothing to do with the
+        # physics coefficients themselves. The timestamp written still uses
+        # ctx.clock.now(), so the recorded event stays consistent with the
+        # fermentation's own simulated timeline -- only this loop's WAKE
+        # cadence is real.
+        while True:
+            async with self.ctx.db_lock:
+                if queries.active_fermentation(self.ctx.conn) is None:
+                    as_of = datetime.datetime.fromtimestamp(
+                        self.ctx.clock.now(), tz=datetime.timezone.utc
+                    ).isoformat()
+                    writes.write_live_state(self.ctx.conn, as_of, {"status": "alive"})
+            await asyncio.sleep(self.heartbeat_interval_s)
+
+    async def _control_loop(self) -> None:
+        # Runs under server.state_lock so a tick never interleaves with an
+        # in-progress mutating IPC op (see ipc/server.py's module
+        # docstring) -- e.g. a fermentation.terminate call and a tick can't
+        # both be mid-write against the same fermentation at once.
+        while True:
+            async with self.server.state_lock:
+                await control_tick(self.ctx)
+            await self.ctx.clock.sleep(self.control_tick_interval_s)
+
+
+def _select_clock(db_path: Path) -> Clock:
+    """SimulatorClock iff every currently-mapped hardware role uses the
+    simulator platform (an unmapped optional role, e.g. gravity, doesn't
+    count against this) -- otherwise ProductionClock, since Manual (and any
+    future real hardware platform) depends on genuine real-time pacing that
+    a never-waits clock would break. Evaluated once, here, at daemon
+    startup -- not hot-swapped mid-session. Changing your hardware mapping
+    across this line requires a daemon restart to take effect, consistent
+    with how KRAUKEN_CONTROL_TICK_INTERVAL_S and other daemon-level config
+    already require one."""
+    conn = open_ro(db_path)
+    try:
+        mapped_platforms = {row["platform"] for row in queries.hardware_config(conn) if row["platform"] is not None}
+    finally:
+        conn.close()
+    if mapped_platforms and mapped_platforms == {"simulator"}:
+        return SimulatorClock()
+    return ProductionClock()
+
+
+def build_daemon(
+    *,
+    db_path: Path,
+    clock: Clock | None = None,
+    socket_path: Path,
+    heartbeat_interval_s: float = 60.0,
+    control_tick_interval_s: float = DEFAULT_CONTROL_TICK_INTERVAL_S,
+    control_tuning: ControlTuning | None = None,
+) -> Daemon:
+    migrate(db_path)
+    ctx = DaemonContext(db_path=db_path, clock=clock or _select_clock(db_path), control_tuning=control_tuning)
+    return Daemon(
+        ctx=ctx, socket_path=socket_path, heartbeat_interval_s=heartbeat_interval_s,
+        control_tick_interval_s=control_tick_interval_s,
+    )

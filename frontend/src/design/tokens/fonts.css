@@ -1,0 +1,16 @@
+/* Krauken's webfonts.
+ *
+ * KNOWN M1 GAP, flagged deliberately rather than silently done: the real
+ * Figtree/Inter/JetBrains Mono font FILES are not embedded yet. The Arpio
+ * reference pulls them from a Google Fonts CDN @import, which this project
+ * intentionally does NOT do -- a LAN-only appliance in a garage may have no
+ * internet, and an unstyled-fallback flash of text on every load would be
+ * a worse outcome than a clean system-font fallback.
+ *
+ * typography.css's font stacks already fall back to the OS's native
+ * sans-serif (San Francisco / Segoe UI / Roboto) and monospace, so the app
+ * is fully usable and reasonably close visually without this. To finish
+ * this properly: download the three families' .woff2 files, place them in
+ * frontend/public/fonts/, and add @font-face rules here pointing at them
+ * locally -- no CDN involved.
+ */

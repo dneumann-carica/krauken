@@ -1,0 +1,22 @@
+@import "./design/tokens/colors.css";
+@import "./design/tokens/typography.css";
+@import "./design/tokens/spacing.css";
+@import "./design/tokens/effects.css";
+@import "./design/tokens/fonts.css";
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  background: var(--kr-surface-page);
+  color: var(--kr-ink-body);
+  font: var(--kr-type-body);
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--kr-font-display);
+  color: var(--kr-ink);
+  margin: 0;
+}

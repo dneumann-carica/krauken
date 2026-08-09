@@ -1,0 +1,73 @@
+/* Krauken's own color tokens. Values are recreated from the Arpio design
+system (used only as a visual reference so the mockups render -- see
+plans/design_handoff_krauken_ui/README.md), under Krauken's own names.
+No Arpio branding: the Arpio names/aliases are gone entirely, not kept as
+fallbacks -- a `var(--orange)` anywhere in this codebase should be a build
+error, not a silent success. Several series-specific tokens are renamed for
+what they MEAN on this product (cool/heat/gravity/plan), not what they meant
+on Arpio's marketing site. */
+
+:root {
+  /* ---- Brand accent (was Arpio's --orange) ------------------ */
+  --kr-accent:       #FF4002;
+  --kr-accent-deep:  #E03601;
+  --kr-accent-tint:  #FFE7DF;
+  --kr-accent-faint: #FFF3EF;
+  --kr-accent-ink:   #A32A02;
+
+  /* ---- Series semantics -------------------------------------
+     Chamber/cooling series (was Arpio's --light-blue) */
+  --kr-cool:       #81B1E6;
+  --kr-cool-mid:   #5E95D6;
+  --kr-cool-light: #C5DCF4;
+  --kr-cool-faint: #ECF3FB;
+
+  /* Heating uses the accent family; gravity/plan get their own */
+  --kr-heat:       var(--kr-accent);
+  --kr-heat-mid:   var(--kr-accent-deep);
+
+  --kr-gravity:    #363E61;   /* was --bright-navy */
+  --kr-plan:       #ABB8C3;   /* was --logo-gray -- setpoint/plan dashed line */
+
+  /* rgb triples for rgba(...) duty-cycle wash alpha blending */
+  --kr-wash-cool-rgb: 129 177 230;
+  --kr-wash-heat-rgb: 255 64 2;
+
+  /* ---- Ink & surfaces ---------------------------------------- */
+  --kr-ink:            #262D4C;   /* was --navy */
+  --kr-ink-body:       #3F4757;   /* was --gray-700 -- secondary copy on ANY surface uses this,
+                                      never --kr-ink-muted (contrast rule from the handoff README) */
+  --kr-ink-muted:      #7E8A99;   /* was --gray-500 */
+  --kr-surface:        #FFFFFF;
+  --kr-surface-sunken: #F7F8FA;   /* was --gray-50 -- inset panels */
+  --kr-surface-page:   #F0F2F4;   /* was --bright-gray */
+  --kr-plot-bg:        #FCFDFE;   /* chart plot area background */
+  --kr-border:         #E2E6EB;   /* was --gray-200 */
+  --kr-border-strong:  #CBD2DB;   /* was --gray-300 */
+
+  /* ---- Status -------------------------------------------------- */
+  --kr-ok:           #1F8A5B;
+  --kr-ok-tint:      #E3F3EC;
+  --kr-warn:         #E8A317;
+  --kr-warn-tint:    #FCF1D9;
+  --kr-danger:       #D7263D;
+  --kr-danger-tint:  #FBE4E7;
+  --kr-danger-faint: #FDF1ED;
+
+  --kr-focus-ring:   #C5DCF4;
+  --kr-focus-border: #81B1E6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --kr-ink:            #E7EAF2;
+    --kr-ink-body:       #C7CCDA;
+    --kr-ink-muted:      #8B94A8;
+    --kr-surface:        #14172A;
+    --kr-surface-sunken: #1B1E33;
+    --kr-surface-page:   #0E1020;
+    --kr-plot-bg:        #171B30;
+    --kr-border:         #2A2E45;
+    --kr-border-strong:  #3B4059;
+  }
+}

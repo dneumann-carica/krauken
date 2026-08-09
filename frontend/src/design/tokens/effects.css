@@ -1,0 +1,27 @@
+/* Krauken's own radius/border/shadow/motion tokens, recreated from the
+Arpio reference. */
+
+:root {
+  --kr-radius-xs:   4px;
+  --kr-radius-sm:   6px;
+  --kr-radius-md:   10px;
+  --kr-radius-lg:   14px;
+  --kr-radius-xl:   20px;
+  --kr-radius-full: 999px;
+
+  --kr-border-width:        1px;
+  --kr-border-width-strong: 1.5px;
+
+  --kr-shadow-xs: 0 1px 2px rgba(38, 45, 76, 0.06);
+  --kr-shadow-sm: 0 1px 3px rgba(38, 45, 76, 0.08), 0 1px 2px rgba(38, 45, 76, 0.04);
+  --kr-shadow-md: 0 4px 12px rgba(38, 45, 76, 0.08), 0 2px 4px rgba(38, 45, 76, 0.04);
+  --kr-shadow-lg: 0 12px 28px rgba(38, 45, 76, 0.12), 0 4px 8px rgba(38, 45, 76, 0.05);
+
+  --kr-ring-focus: 0 0 0 3px var(--kr-focus-ring);
+
+  --kr-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --kr-ease-out:      cubic-bezier(0.16, 1, 0.3, 1);
+
+  --kr-dur-fast: 120ms;
+  --kr-dur-base: 180ms;
+}

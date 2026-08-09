@@ -1,0 +1,36 @@
+.root { text-align: left; }
+.alignCenter { text-align: center; }
+.alignRight { text-align: right; }
+
+.value {
+  font-family: var(--kr-font-display);
+  font-weight: var(--kr-weight-extra);
+  font-size: var(--kr-text-4xl);
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.accentOrange { color: var(--kr-accent); }
+.accentNavy   { color: var(--kr-ink); }
+.accentBlue   { color: var(--kr-cool-mid); }
+.accentGreen  { color: var(--kr-ok); }
+.accentPlan   { color: var(--kr-plan); }
+
+.label {
+  margin-top: var(--kr-space-2);
+  font-family: var(--kr-font-sans);
+  font-weight: var(--kr-weight-bold);
+  font-size: var(--kr-text-base);
+  line-height: 1.2;
+  color: var(--kr-ink);
+}
+.sublabel {
+  margin-top: 2px;
+  font-family: var(--kr-font-sans);
+  font-size: var(--kr-text-sm);
+  line-height: 1.4;
+  /* Per the UI handoff README's stated contrast rule: secondary copy uses
+     --kr-ink-body, never --kr-ink-muted (the latter is too low-contrast
+     for body text against these surfaces). */
+  color: var(--kr-ink-body);
+}

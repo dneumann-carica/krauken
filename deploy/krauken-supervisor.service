@@ -1,0 +1,30 @@
+[Unit]
+Description=Krauken hardware supervisor (Krauken PCB only -- not used on a BrewPi-only install)
+After=network.target
+
+# NOT YET FUNCTIONAL: krauken/supervisor/ has no service.py entry point
+# yet (GPIO/board-ID-loopback/thermostat work lands in a later milestone --
+# see the project plan). Drafted now so the hardening posture is decided
+# ahead of time rather than bolted on later. Do not enable this unit yet.
+
+[Service]
+Type=simple
+User=krauken
+SupplementaryGroups=gpio
+EnvironmentFile=/etc/krauken/krauken.conf
+ExecStart=/opt/krauken/.venv/bin/krauken-supervisor
+RuntimeDirectory=krauken
+StateDirectory=krauken
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
+WatchdogSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+DeviceAllow=/dev/gpiochip0 rw
+
+[Install]
+WantedBy=multi-user.target

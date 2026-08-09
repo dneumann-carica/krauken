@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+
+frontend/node_modules/
+frontend/dist/
+krauken/api/_static/
+
+.DS_Store
+.playwright-mcp/
+
+# Arpio's own proprietary design-system reference material -- not this
+# project's IP, never goes to a personal repo.
+plans/design_handoff_krauken_ui/
