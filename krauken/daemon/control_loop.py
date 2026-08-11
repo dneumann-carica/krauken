@@ -124,7 +124,8 @@ async def _control_tick_locked(ctx: Any) -> None:
     beer_ok = health.beer_temp_ok and beer_reading is not None and beer_reading.temp_f is not None
     if beer_ok:
         mode = beer_relay_demand(beer_reading.temp_f, beer_target, ctx.control_state.last_relay_mode)
-        chamber_target = chamber_target_for(mode, beer_target)
+        ramp_rate = stages_mod.target_rate_f_per_h(current, elapsed_h)
+        chamber_target = chamber_target_for(mode, beer_target, ramp_rate)
         target_source = "profile"
         ctx.control_state.last_relay_mode = mode
         ctx.control_state.last_chamber_target_f = chamber_target
@@ -156,11 +157,20 @@ async def _control_tick_locked(ctx: Any) -> None:
             gate.update(absolute_h, beer_reading.temp_f, current["hold_temp_f"])
         else:
             gate.reset()
+    elif current["end_mode"] == "gravity_below":
+        if gate is None:
+            gate = stages_mod.GravityBelowGate()
+            ctx.control_state.gates[current["id"]] = gate
+        if health.gravity_ok and gravity_reading is not None and gravity_reading.gravity_sg is not None:
+            gate.update(absolute_h, gravity_reading.gravity_sg, current["gravity_hi"])
+        else:
+            gate.reset()  # a stale/missing reading must not count toward "stable"
 
     finished, reason = stages_mod.stage_finished(
         current, elapsed_h, absolute_h,
         gravity_gate=gate if current["end_mode"] == "gravity" else None,
         temp_hold_gate=gate if current["end_mode"] == "temp_hold" else None,
+        gravity_below_gate=gate if current["end_mode"] == "gravity_below" else None,
     )
     if finished:
         writes.mark_criteria_met(ctx.conn, current["id"], now_iso)

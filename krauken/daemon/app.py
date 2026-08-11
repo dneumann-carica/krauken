@@ -140,8 +140,27 @@ class Daemon:
         # docstring) -- e.g. a fermentation.terminate call and a tick can't
         # both be mid-write against the same fermentation at once.
         while True:
-            async with self.server.state_lock:
-                await control_tick(self.ctx)
+            try:
+                async with self.server.state_lock:
+                    await control_tick(self.ctx)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One bad tick must never permanently kill control. Left
+                # uncaught, an exception here propagates straight out of
+                # this loop's `while True` and silently ends _control_task
+                # for the rest of the process's life -- silently, because
+                # `self` keeps its own reference to the task (see start()
+                # below), so it's never garbage collected either, and
+                # asyncio's own "Task exception was never retrieved"
+                # logging only fires from Task.__del__. The daemon's own
+                # /health still reports "ok" (that only checks the IPC
+                # socket, not this loop), so a real fermentation could sit
+                # completely uncontrolled -- no heating, no cooling, no new
+                # samples -- with nothing in the log to say why. Log it and
+                # keep ticking instead; whatever caused this one tick to
+                # fail gets another chance next tick.
+                log.exception("control tick failed -- will retry next tick")
             await self.ctx.clock.sleep(self.control_tick_interval_s)
 
 
@@ -161,7 +180,22 @@ def _select_clock(db_path: Path) -> Clock:
     finally:
         conn.close()
     if mapped_platforms and mapped_platforms == {"simulator"}:
-        return SimulatorClock()
+        # Anchored to real wall-clock "now" at construction time, not
+        # SimulatorClock's own start=0.0 default (1970-01-01) -- it still
+        # never really waits (ticks race forward exactly as before), this
+        # only changes what "now" MEANS at the moment the clock is built.
+        # Without this, every daemon restart resets the simulated clock
+        # back to epoch 0, so a batch started in a freshly-restarted
+        # process gets a started_at in 1970/71/etc. -- confusingly BEFORE
+        # older real batches from a process that had been running longer,
+        # and jarringly before the demo batches, whose dates come from a
+        # separate pipeline (db/seed.py) that already anchors to real
+        # "now" at seed time for exactly this readability reason (see that
+        # module's docstring). daemon/testing.py's build_scenario_daemon()
+        # made the identical choice for its own DEFAULT_SCENARIO_START_TS,
+        # for the identical reason -- this just extends it to the real
+        # daemon's own startup path, which never got the same treatment.
+        return SimulatorClock(start=datetime.datetime.now(datetime.timezone.utc).timestamp())
     return ProductionClock()
 
 

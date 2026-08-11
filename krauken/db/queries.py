@@ -109,7 +109,7 @@ def fermentations_list(
     conn: sqlite3.Connection, *, status: str | None = None, limit: int = 50
 ) -> list[dict[str, Any]]:
     sql = (
-        "SELECT f.*, p.yeast_name FROM fermentations f JOIN profiles p ON p.id = f.profile_id"
+        "SELECT f.*, p.yeast_id, p.yeast_name FROM fermentations f JOIN profiles p ON p.id = f.profile_id"
     )
     params: list[Any] = []
     if status is not None:
@@ -123,7 +123,7 @@ def fermentations_list(
 
 def fermentation_detail(conn: sqlite3.Connection, fermentation_id: int) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT f.*, p.yeast_name, p.name AS profile_name FROM fermentations f "
+        "SELECT f.*, p.yeast_id, p.yeast_name, p.name AS profile_name FROM fermentations f "
         "JOIN profiles p ON p.id = f.profile_id WHERE f.id = ?",
         (fermentation_id,),
     ).fetchone()

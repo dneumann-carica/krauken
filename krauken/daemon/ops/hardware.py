@@ -51,3 +51,13 @@ async def _test_status(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
 @op("hardware.test_cancel", mutating=True)
 async def _test_cancel(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
     return await tests_runtime.cancel_test(ctx, args["test_id"])
+
+
+@op("hardware.chamber_status")
+async def _chamber_status(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
+    return await hardware.chamber_status(ctx, dict(args))
+
+
+@op("hardware.stop_chamber", mutating=True)
+async def _stop_chamber(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
+    return await hardware.stop_chamber(ctx, dict(args))

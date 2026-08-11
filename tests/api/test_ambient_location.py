@@ -17,7 +17,7 @@ from krauken.platforms.simulator.plant import AmbientParams
 
 STAGES = [
     {
-        "stage_type": "primary", "name": "Primary", "temp_mode": "constant", "temp_f": 68.0,
+        "name": "Primary", "temp_mode": "constant", "temp_f": 68.0,
         "end_mode": "time", "end_hours": 999.0, "advance_mode": "manual",
     },
 ]

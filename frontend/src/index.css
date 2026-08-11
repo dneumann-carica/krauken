@@ -8,6 +8,19 @@
   color-scheme: light dark;
 }
 
+/* Without this, every `width: 100%` element that also carries padding/
+   border (inputs, selects, full-width buttons -- all over this app) renders
+   WIDER than its box, since the browser default (content-box) adds
+   padding+border on top of that 100% rather than inside it. That's what's
+   been causing fields to visibly bleed into their neighbors (e.g. the
+   fermentation-plan dialog's batch-name/yeast row) -- a couple of
+   components had already worked around it locally (FermentationChart,
+   GettingStartedView) by setting border-box themselves; this is the fix at
+   the root instead of another one-off patch. */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
   background: var(--kr-surface-page);

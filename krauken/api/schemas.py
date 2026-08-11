@@ -17,9 +17,41 @@ class HealthResponse(BaseModel):
     uptime_s: float
 
 
+class StageInput(BaseModel):
+    """The authored half of a stage -- runtime columns (state/started_at/
+    etc) aren't inputs, the control loop owns those.
+
+    Freeform: no stage_type enum. `name` is the sole label (and the sole
+    identity for a not-yet-created stage) -- there's no fixed set of named
+    slots a plan has to fill, so a yeast preset's default_stages list (see
+    YeastPreset below) can be any length/order/composition, including no
+    diacetyl-rest-shaped entry at all for a strain that doesn't need one.
+    """
+
+    name: str = Field(min_length=1)
+    temp_mode: Literal["constant", "stepped"]
+    temp_f: float | None = None
+    temp_from_f: float | None = None
+    temp_to_f: float | None = None
+    ramp_hours: float | None = None
+    end_mode: Literal["time", "temp_hold", "gravity", "gravity_below"]
+    end_hours: float | None = None
+    hold_temp_f: float | None = None
+    hold_hours: float | None = None
+    gravity_hi: float | None = None
+    gravity_stable_hours: float | None = None
+    min_hours: float | None = None
+    max_hours: float | None = None
+    advance_mode: Literal["auto", "manual"] = "auto"
+
+
 class YeastPreset(BaseModel):
     name: str
-    stage_defaults: dict[str, dict[str, float]]
+    # The new-fermentation dialog's starting plan for this strain, verbatim
+    # -- literal StageInput templates, not flags for the UI to interpret
+    # (e.g. a diacetyl-negative strain's list just has no diacetyl-rest-
+    # shaped entry in it; nothing downstream branches on "why").
+    default_stages: list[StageInput]
 
 
 class YeastPresetsResponse(BaseModel):
@@ -135,6 +167,7 @@ class FermentationSummary(BaseModel):
     abv_pct: float | None
     simulated: bool
     demo: bool
+    yeast_id: str | None
     yeast_name: str | None
 
 
@@ -142,7 +175,6 @@ class StageResponse(BaseModel):
     id: int
     fermentation_id: int
     seq: int
-    stage_type: str
     name: str
     temp_mode: str
     temp_f: float | None
@@ -153,7 +185,6 @@ class StageResponse(BaseModel):
     end_hours: float | None
     hold_temp_f: float | None
     hold_hours: float | None
-    gravity_lo: float | None
     gravity_hi: float | None
     gravity_stable_hours: float | None
     min_hours: float | None
@@ -175,29 +206,6 @@ class AlertResponse(BaseModel):
     field: str
     since: str
     message: str
-
-
-class StageInput(BaseModel):
-    """The authored half of a stage -- runtime columns (state/started_at/
-    etc) aren't inputs, the control loop owns those."""
-
-    stage_type: Literal["primary", "free_rise", "diacetyl_rest", "conditioning", "cold_crash"]
-    name: str
-    temp_mode: Literal["constant", "stepped"]
-    temp_f: float | None = None
-    temp_from_f: float | None = None
-    temp_to_f: float | None = None
-    ramp_hours: float | None = None
-    end_mode: Literal["time", "temp_hold", "gravity"]
-    end_hours: float | None = None
-    hold_temp_f: float | None = None
-    hold_hours: float | None = None
-    gravity_lo: float | None = None
-    gravity_hi: float | None = None
-    gravity_stable_hours: float | None = None
-    min_hours: float | None = None
-    max_hours: float | None = None
-    advance_mode: Literal["auto", "manual"] = "auto"
 
 
 class FermentationStartRequest(BaseModel):
@@ -227,6 +235,17 @@ class TerminateResponse(BaseModel):
     terminated: bool
 
 
+class StopChamberResponse(BaseModel):
+    stopped: bool
+
+
+class ChamberStatusResponse(BaseModel):
+    # Null whenever there's nothing to release: unmapped, or mapped but
+    # currently holding no target. See daemon/hardware.py's chamber_status().
+    commanded_target_f: float | None
+    mapped: bool
+
+
 class UpdateStagesRequest(BaseModel):
     stages: dict[str, dict[str, Any]]
 
@@ -242,6 +261,28 @@ class SetStageEnabledRequest(BaseModel):
 class SetStageEnabledResponse(BaseModel):
     stage_id: int
     enabled: bool
+
+
+class InsertStageRequest(BaseModel):
+    # None appends at the end; otherwise the new stage lands immediately
+    # after this existing stage (which must still be live -- see
+    # daemon/fermentation.py's insert_stage).
+    after_stage_id: int | None = None
+    stage: StageInput
+
+
+class InsertStageResponse(BaseModel):
+    stage_id: int
+
+
+class ReorderStagesRequest(BaseModel):
+    # Every currently pending/skipped stage id, in the requested order --
+    # a permutation of the full reorderable set, not a partial list.
+    stage_ids: list[int]
+
+
+class ReorderStagesResponse(BaseModel):
+    stage_ids: list[int]
 
 
 class DutyResponse(BaseModel):

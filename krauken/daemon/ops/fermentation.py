@@ -32,3 +32,13 @@ async def _update_stages(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
 @op("fermentation.set_stage_enabled", mutating=True)
 async def _set_stage_enabled(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
     return await fermentation.set_stage_enabled(ctx, dict(args))
+
+
+@op("fermentation.insert_stage", mutating=True)
+async def _insert_stage(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
+    return await fermentation.insert_stage(ctx, dict(args))
+
+
+@op("fermentation.reorder_stages", mutating=True)
+async def _reorder_stages(ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
+    return await fermentation.reorder_stages(ctx, dict(args))

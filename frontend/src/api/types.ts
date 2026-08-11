@@ -42,6 +42,7 @@ export interface FermentationSummary {
   abv_pct: number | null;
   simulated: boolean;
   demo: boolean;
+  yeast_id: string | null;
   yeast_name: string | null;
 }
 
@@ -49,7 +50,6 @@ export interface StageResponse {
   id: number;
   fermentation_id: number;
   seq: number;
-  stage_type: string;
   name: string;
   temp_mode: string;
   temp_f: number | null;
@@ -60,7 +60,6 @@ export interface StageResponse {
   end_hours: number | null;
   hold_temp_f: number | null;
   hold_hours: number | null;
-  gravity_lo: number | null;
   gravity_hi: number | null;
   gravity_stable_hours: number | null;
   min_hours: number | null;
@@ -224,18 +223,16 @@ export interface SeriesResponse {
 }
 
 export interface StageInput {
-  stage_type: "primary" | "free_rise" | "diacetyl_rest" | "conditioning" | "cold_crash";
   name: string;
   temp_mode: "constant" | "stepped";
   temp_f?: number | null;
   temp_from_f?: number | null;
   temp_to_f?: number | null;
   ramp_hours?: number | null;
-  end_mode: "time" | "temp_hold" | "gravity";
+  end_mode: "time" | "temp_hold" | "gravity" | "gravity_below";
   end_hours?: number | null;
   hold_temp_f?: number | null;
   hold_hours?: number | null;
-  gravity_lo?: number | null;
   gravity_hi?: number | null;
   gravity_stable_hours?: number | null;
   min_hours?: number | null;
@@ -266,6 +263,17 @@ export interface TerminateResponse {
   terminated: boolean;
 }
 
+export interface StopChamberResponse {
+  stopped: boolean;
+}
+
+export interface ChamberStatusResponse {
+  // Null whenever there's nothing to release: unmapped, or mapped but
+  // currently holding no target.
+  commanded_target_f: number | null;
+  mapped: boolean;
+}
+
 export interface UpdateStagesResponse {
   updated_stage_ids: number[];
 }
@@ -275,9 +283,32 @@ export interface SetStageEnabledResponse {
   enabled: boolean;
 }
 
+export interface InsertStageRequest {
+  // null/omitted appends at the end; otherwise the new stage lands
+  // immediately after this existing stage.
+  after_stage_id?: number | null;
+  stage: StageInput;
+}
+
+export interface InsertStageResponse {
+  stage_id: number;
+}
+
+export interface ReorderStagesRequest {
+  // Every currently pending/skipped stage id, in the requested order -- a
+  // permutation of the full reorderable set, not a partial list.
+  stage_ids: number[];
+}
+
+export interface ReorderStagesResponse {
+  stage_ids: number[];
+}
+
 export interface YeastPreset {
   name: string;
-  stage_defaults: Record<string, Record<string, number>>;
+  // The new-fermentation dialog's starting plan for this strain, verbatim
+  // -- literal StageInput templates, not flags for the UI to interpret.
+  default_stages: StageInput[];
 }
 
 export interface YeastPresetsResponse {

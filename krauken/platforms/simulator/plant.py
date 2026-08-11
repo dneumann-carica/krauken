@@ -182,15 +182,24 @@ def advance_physics(state: PlantState, p: PlantParams, dt_h: float, drive_to: fl
     return PlantState(t_h=state.t_h + dt_h, beer_temp_f=new_beer, chamber_temp_f=new_chamber, gravity=new_gravity, mode=mode)
 
 
-def step(state: PlantState, p: PlantParams, dt_h: float, beer_target_f: float) -> PlantState:
-    """Convenience entry point for the offline demo generator: makes its
-    own cascade decision (no relay-timing protection -- see
-    advance_physics's docstring) and then integrates. chamber_target_for()
-    always returns a real target now, never None (see its own docstring --
-    idle governs gently at the beer target rather than de-energizing), so
-    there's no ambient-fallback branch to pick between here anymore."""
+def step(
+    state: PlantState, p: PlantParams, dt_h: float, beer_target_f: float, ramp_rate_f_per_h: float = 0.0
+) -> PlantState:
+    """Convenience entry point for the chart's forward-projection preview
+    (contracts/projection.py): makes its own cascade decision (no relay-
+    timing protection -- see advance_physics's docstring) and then
+    integrates. chamber_target_for() always returns a real target now,
+    never None (see its own docstring -- idle governs gently at the beer
+    target rather than de-energizing), so there's no ambient-fallback
+    branch to pick between here anymore.
+
+    ramp_rate_f_per_h passes through to chamber_target_for's feedforward --
+    the caller supplies contracts.stages.target_rate_f_per_h(stage, t) so
+    a projected cold-crash-style ramp gets the same more-aggressive chamber
+    push the real control loop now applies, not a stale fixed-clamp preview
+    of a lag the daemon no longer actually produces."""
     mode = beer_relay_demand(state.beer_temp_f, beer_target_f, state.mode)
-    drive_to = chamber_target_for(mode, beer_target_f)
+    drive_to = chamber_target_for(mode, beer_target_f, ramp_rate_f_per_h)
     return advance_physics(state, p, dt_h, drive_to, mode)
 
 

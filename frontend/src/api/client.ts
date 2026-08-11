@@ -1,6 +1,7 @@
 import type {
   AdvanceStageResponse,
   AlertResponse,
+  ChamberStatusResponse,
   DeviceResponse,
   FermentationDetail,
   FermentationStartRequest,
@@ -8,17 +9,21 @@ import type {
   FermentationSummary,
   HealthResponse,
   ClockResponse,
+  InsertStageResponse,
   ManualReading,
   ManualReadingsResponse,
   MappingGetResponse,
   MappingSaveResponse,
+  ReorderStagesResponse,
   ScanStartResponse,
   ScanStatusResponse,
   SeriesResponse,
   SetStageEnabledResponse,
   SettingResponse,
   SimulatorReading,
+  StageInput,
   StateResponse,
+  StopChamberResponse,
   TerminateResponse,
   TestAction,
   TestResponse,
@@ -84,6 +89,8 @@ export const api = {
     request<TestResponse>(`/hardware/devices/${deviceId}/test/${testId}`),
   cancelTest: (deviceId: string, testId: string) =>
     request<TestResponse>(`/hardware/devices/${deviceId}/test/${testId}/cancel`, { method: "POST" }),
+  getChamberStatus: () => request<ChamberStatusResponse>("/hardware/chamber_status"),
+  stopChamber: () => request<StopChamberResponse>("/hardware/stop_chamber", { method: "POST" }),
 
   getSetting: (key: string) => request<SettingResponse>(`/settings/${key}`),
   saveSetting: (key: string, value: unknown) =>
@@ -108,6 +115,16 @@ export const api = {
     request<SetStageEnabledResponse>(`/fermentations/${fermentationId}/stages/${stageId}/enabled`, {
       method: "PUT",
       body: JSON.stringify({ enabled }),
+    }),
+  insertStage: (fermentationId: number, stage: StageInput, afterStageId?: number | null) =>
+    request<InsertStageResponse>(`/fermentations/${fermentationId}/stages`, {
+      method: "POST",
+      body: JSON.stringify({ after_stage_id: afterStageId ?? null, stage }),
+    }),
+  reorderStages: (fermentationId: number, stageIds: number[]) =>
+    request<ReorderStagesResponse>(`/fermentations/${fermentationId}/stages/order`, {
+      method: "PUT",
+      body: JSON.stringify({ stage_ids: stageIds }),
     }),
   getAlerts: (fermentationId: number) => request<AlertResponse[]>(`/fermentations/${fermentationId}/alerts`),
 

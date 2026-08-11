@@ -45,7 +45,7 @@ def test_reset_clears_the_accumulating_window_but_not_an_already_locked_value():
     d = OGDetector()
     d.update(0.0, 1.052)
     d.reset()  # a stale reading before locking -- clears the window
-    assert d.window.readings == []
+    assert len(d.window.readings) == 0
     assert d.locked_og is None
 
     for t in (1.0, 1.1, 1.2, 1.3, 1.4, 1.5):

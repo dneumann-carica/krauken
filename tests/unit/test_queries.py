@@ -20,7 +20,7 @@ from krauken.db.connection import open_rw
 from krauken.db.migrate import migrate
 
 STAGE = {
-    "stage_type": "primary", "name": "Primary", "temp_mode": "constant", "temp_f": 66.0,
+    "name": "Primary", "temp_mode": "constant", "temp_f": 66.0,
     "end_mode": "time", "end_hours": 100.0, "advance_mode": "auto",
 }
 

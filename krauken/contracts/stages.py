@@ -51,6 +51,22 @@ def target_temp_f(stage: Mapping[str, Any], elapsed_h: float) -> float:
     return stage["temp_from_f"] + (stage["temp_to_f"] - stage["temp_from_f"]) * frac
 
 
+def target_rate_f_per_h(stage: Mapping[str, Any], elapsed_h: float) -> float:
+    """The stage's own authored target's instantaneous rate of change --
+    zero for a constant-mode stage, and zero for a stepped one too once
+    elapsed_h has passed ramp_hours (the target has arrived and holds, per
+    target_temp_f's own clamp above). Feeds the cascade's ramp feedforward
+    (contracts.cascade.chamber_target_for) -- entirely separate from
+    stage_finished's own completion criteria, which don't care how fast
+    the target itself is moving."""
+    if stage["temp_mode"] != "stepped":
+        return 0.0
+    ramp_hours = stage["ramp_hours"]
+    if not ramp_hours or ramp_hours <= 0 or elapsed_h >= ramp_hours:
+        return 0.0
+    return (stage["temp_to_f"] - stage["temp_from_f"]) / ramp_hours
+
+
 @dataclass
 class GravityGate:
     """Satisfied once gravity has gone FLAT -- self-relative, stopped
@@ -117,6 +133,34 @@ class TempHoldGate:
         self.stable_since_h = None
 
 
+@dataclass
+class GravityBelowGate:
+    """Same shape as TempHoldGate: satisfied once gravity has sat at or
+    below a threshold continuously for hold_hours. Deliberately NOT
+    GravityGate -- this makes no claim about flatness. Gravity can still be
+    actively dropping the entire window and this is satisfied regardless,
+    as long as it never climbs back above the threshold; a real hydrometer/
+    Tilt reading can wobble slightly even while genuinely below the line,
+    but that's what health/failsafe handling (reset() on a stale reading)
+    is for, not a tolerance band here -- unlike GravityGate's self-relative
+    noise floor, "at or below" is already exact."""
+
+    stable_since_h: float | None = None
+
+    def update(self, t_h: float, gravity: float, threshold: float) -> None:
+        if gravity <= threshold:
+            if self.stable_since_h is None:
+                self.stable_since_h = t_h
+        else:
+            self.stable_since_h = None
+
+    def satisfied(self, t_h: float, hold_hours: float) -> bool:
+        return self.stable_since_h is not None and (t_h - self.stable_since_h) >= hold_hours
+
+    def reset(self) -> None:
+        self.stable_since_h = None
+
+
 def stage_finished(
     stage: Mapping[str, Any],
     elapsed_h: float,
@@ -124,6 +168,7 @@ def stage_finished(
     *,
     gravity_gate: GravityGate | None = None,
     temp_hold_gate: TempHoldGate | None = None,
+    gravity_below_gate: GravityBelowGate | None = None,
 ) -> tuple[bool, str]:
     """Returns (finished, reason) -- reason is only meaningful when
     finished is True; it becomes fermentation_stages.end_actual_reason.
@@ -155,4 +200,8 @@ def stage_finished(
         if temp_hold_gate is None:
             return False, "temp_hold"
         return temp_hold_gate.satisfied(t_h, stage["hold_hours"]), "temp_hold"
+    if stage["end_mode"] == "gravity_below":
+        if gravity_below_gate is None:
+            return False, "gravity_below"
+        return gravity_below_gate.satisfied(t_h, stage["hold_hours"]), "gravity_below"
     return False, "time"

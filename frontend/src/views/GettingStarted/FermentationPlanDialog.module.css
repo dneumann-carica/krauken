@@ -29,6 +29,19 @@
   overflow-y: auto;
   overflow-x: hidden;
 }
+/* Every flex item defaults to flex-shrink:1 with min-height:auto (its own
+   content-based floor) -- once enough stages push .content past its
+   max-height, the browser closes that gap by shrinking children before
+   ever falling back to the scrollbar overflow-y already exists for.
+   Large-content children (a stage card) barely move; the "+ Add stage"
+   button, with almost no content, gets crushed nearly to its text-line
+   height (measured: 17px vs. its intended 32px) -- which is exactly why
+   it looked fine standing alone (nothing to shrink against) but smushed
+   under a full US-05 stage list. Nothing here should ever compress --
+   scrolling is what overflow-y:auto is already for. */
+.content > * {
+  flex-shrink: 0;
+}
 
 .topRow {
   display: flex;
@@ -40,10 +53,6 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-.ogHint {
-  font: var(--kr-type-small);
-  color: var(--kr-ink-muted);
 }
 .fieldLabel {
   font-weight: var(--kr-weight-bold);
@@ -69,7 +78,25 @@
   border-color: var(--kr-accent);
   box-shadow: 0 0 0 3px var(--kr-accent-faint);
 }
-
+/* Native <select> arrows sit almost flush against the box's own right
+   edge (browser-controlled inset, not ours to pad) -- appearance:none
+   plus a hand-drawn chevron (same path as the batch-menu's own, see
+   GettingStartedView.module.css) gives this real breathing room instead,
+   consistently across browsers. */
+.select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%237E8A99' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right var(--kr-space-3) center;
+  background-size: 12px 12px;
+  padding-right: calc(var(--kr-space-3) * 2 + 12px);
+}
+@media (prefers-color-scheme: dark) {
+  .select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4' fill='none' stroke='%238B94A8' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  }
+}
 .stageList {
   display: flex;
   flex-direction: column;
@@ -90,10 +117,65 @@
   justify-content: space-between;
   gap: var(--kr-space-3);
 }
-.stageName {
+.stageActions {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-space-2);
+  flex: 0 0 auto;
+}
+.moveButtons {
+  display: flex;
+  gap: 4px;
+}
+/* Shared by the move buttons and the icon-only remove button -- same
+   narrow, icon-appropriate footprint instead of the default .sm text
+   button's wider horizontal padding, so all three read as one family of
+   controls rather than two different button styles side by side. The
+   `button` type selector isn't decorative -- a bare .iconButton class has
+   the same specificity as Button.module.css's own .sm and could lose the
+   padding override depending on bundling order; button.iconButton always
+   wins regardless. */
+button.iconButton {
+  min-width: 32px;
+  padding: 0 var(--kr-space-2);
+}
+.stageNameButton {
+  display: block;
+  background: none;
+  border: 1.5px solid transparent;
+  border-radius: var(--kr-radius-sm);
+  padding: 2px 4px;
+  margin: -2px 0 0 -4px;
+  text-align: left;
+  font-family: inherit;
   font-weight: var(--kr-weight-bold);
   font-size: var(--kr-text-md);
   color: var(--kr-ink);
+  cursor: pointer;
+}
+.stageNameButton:hover:not(:disabled) {
+  border-color: var(--kr-border);
+  background: var(--kr-surface-hover, var(--kr-accent-faint));
+}
+.stageNameButton:disabled {
+  cursor: default;
+}
+.stageNameInput {
+  display: block;
+  width: 100%;
+  font-family: inherit;
+  font-weight: var(--kr-weight-bold);
+  font-size: var(--kr-text-md);
+  color: var(--kr-ink);
+  background: var(--kr-surface);
+  border: 1.5px solid var(--kr-accent);
+  border-radius: var(--kr-radius-sm);
+  padding: 2px 4px;
+  margin: -2px 0 0 -4px;
+}
+.stageNameInput:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--kr-accent-faint);
 }
 .stageSummary {
   font-family: var(--kr-font-mono);
@@ -125,6 +207,13 @@
 .inputRow .input {
   width: 72px;
   flex: 0 0 auto;
+}
+/* Gravity values ("1.016") need more room than the 72px every other
+   number field uses -- .input.gravityInput's extra class matches
+   .inputRow .input's own specificity, so source order decides; this rule
+   comes after it, and wins. */
+.inputRow .input.gravityInput {
+  width: 96px;
 }
 .unit {
   font: var(--kr-type-small);

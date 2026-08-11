@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 from krauken.contracts.gravity_stability import GravityStabilityWindow
 
 
@@ -68,5 +70,78 @@ def test_reset_clears_the_window():
     w = GravityStabilityWindow()
     w.update(t_h=0.0, gravity_sg=1.050, window_h=1.0)
     w.reset()
-    assert w.readings == []
+    assert len(w.readings) == 0
     assert w.latest() is None
+
+
+class _NaiveReferenceWindow:
+    """The pre-optimization implementation, kept ONLY as a slow-but-obviously-
+    correct oracle for the randomized cross-check below -- rebuilds a plain
+    list and recomputes max()/min() from scratch on every call, which is
+    exactly the O(n)-per-call cost the real GravityStabilityWindow no longer
+    pays (see that class's own docstring)."""
+
+    def __init__(self) -> None:
+        self.readings: list[tuple[float, float]] = []
+
+    def update(self, t_h: float, gravity_sg: float, window_h: float) -> None:
+        self.readings.append((t_h, gravity_sg))
+        cutoff = t_h - window_h
+        self.readings = [(t, g) for t, g in self.readings if t >= cutoff]
+
+    def is_flat(self, t_h: float, window_h: float, tolerance_sg: float) -> bool:
+        if not self.readings:
+            return False
+        oldest_t_h = self.readings[0][0]
+        if (t_h - oldest_t_h) < window_h:
+            return False
+        values = [g for _, g in self.readings]
+        return (max(values) - min(values)) <= tolerance_sg
+
+    def mean(self) -> float | None:
+        if not self.readings:
+            return None
+        values = [g for _, g in self.readings]
+        return sum(values) / len(values)
+
+    def latest(self) -> float | None:
+        return self.readings[-1][1] if self.readings else None
+
+
+def test_matches_the_naive_reference_implementation_across_a_long_randomized_sequence():
+    # The sliding-window-max/min rewrite's whole point is behavioral
+    # equivalence with the old O(n)-per-call list-rebuild approach, just
+    # faster -- cross-checking against that exact old logic (kept above as
+    # a deliberately-slow oracle) over a long, varied, seeded-random
+    # sequence is a much stronger correctness guarantee than hand-picked
+    # example cases alone, especially for a monotonic-deque implementation
+    # (an off-by-one in when an entry gets popped is an easy, classic
+    # mistake that a handful of examples can easily miss).
+    rng = random.Random(20260810)
+    fast = GravityStabilityWindow()
+    slow = _NaiveReferenceWindow()
+    t_h = 0.0
+    gravity_sg = 1.050
+    window_h = 2.0
+    tolerance_sg = 0.002
+    for i in range(2000):
+        t_h += rng.uniform(0.01, 0.3)
+        # A mix of tight noise, occasional spikes, and duplicate values --
+        # duplicates specifically exercise the monotonic deques' tie-
+        # breaking (<=/>=, not strict <>), and spikes exercise an entry
+        # that's briefly the window's max/min before aging back out.
+        if rng.random() < 0.05:
+            gravity_sg += rng.uniform(-0.05, 0.05)
+        elif rng.random() < 0.3:
+            pass  # repeat the exact same value
+        else:
+            gravity_sg += rng.uniform(-0.0015, 0.0015)
+
+        fast.update(t_h, gravity_sg, window_h)
+        slow.update(t_h, gravity_sg, window_h)
+
+        assert fast.latest() == slow.latest(), f"latest() mismatch at i={i}, t_h={t_h}"
+        assert fast.mean() == slow.mean(), f"mean() mismatch at i={i}, t_h={t_h}"
+        assert fast.is_flat(t_h, window_h, tolerance_sg) == slow.is_flat(t_h, window_h, tolerance_sg), (
+            f"is_flat() mismatch at i={i}, t_h={t_h}"
+        )

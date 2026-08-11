@@ -10,6 +10,10 @@ from krauken.api.schemas import (
     FermentationStartRequest,
     FermentationStartResponse,
     FermentationSummary,
+    InsertStageRequest,
+    InsertStageResponse,
+    ReorderStagesRequest,
+    ReorderStagesResponse,
     SeriesResponse,
     SetStageEnabledRequest,
     SetStageEnabledResponse,
@@ -88,6 +92,27 @@ async def update_stages(
         "fermentation.update_stages", {"fermentation_id": fermentation_id, "stages": body.stages}
     )
     return UpdateStagesResponse(**result)
+
+
+@router.post("/fermentations/{fermentation_id}/stages", response_model=InsertStageResponse)
+async def insert_stage(
+    fermentation_id: int, body: InsertStageRequest, client: AsyncIPCClient = Depends(deps.daemon)
+) -> InsertStageResponse:
+    result = await client.call(
+        "fermentation.insert_stage",
+        {"fermentation_id": fermentation_id, "after_stage_id": body.after_stage_id, "stage": body.stage.model_dump()},
+    )
+    return InsertStageResponse(**result)
+
+
+@router.put("/fermentations/{fermentation_id}/stages/order", response_model=ReorderStagesResponse)
+async def reorder_stages(
+    fermentation_id: int, body: ReorderStagesRequest, client: AsyncIPCClient = Depends(deps.daemon)
+) -> ReorderStagesResponse:
+    result = await client.call(
+        "fermentation.reorder_stages", {"fermentation_id": fermentation_id, "stage_ids": body.stage_ids}
+    )
+    return ReorderStagesResponse(**result)
 
 
 @router.put("/fermentations/{fermentation_id}/stages/{stage_id}/enabled", response_model=SetStageEnabledResponse)

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from krauken.contracts.stages import GravityGate, TempHoldGate, stage_finished, target_temp_f
+from krauken.contracts.stages import (
+    GravityBelowGate,
+    GravityGate,
+    TempHoldGate,
+    stage_finished,
+    target_rate_f_per_h,
+    target_temp_f,
+)
 
 
 def test_target_temp_constant():
@@ -13,6 +20,23 @@ def test_target_temp_ramps_linearly_then_clamps_at_the_end():
     assert target_temp_f(stage, elapsed_h=0.0) == 66.0
     assert target_temp_f(stage, elapsed_h=12.0) == 68.0
     assert target_temp_f(stage, elapsed_h=100.0) == 70.0  # past ramp_hours -- clamped, not extrapolated
+
+
+def test_target_rate_is_zero_for_a_constant_stage():
+    stage = {"temp_mode": "constant", "temp_f": 66.0}
+    assert target_rate_f_per_h(stage, elapsed_h=5.0) == 0.0
+
+
+def test_target_rate_is_the_ramps_slope_while_still_ramping():
+    stage = {"temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0}
+    assert target_rate_f_per_h(stage, elapsed_h=0.0) == -0.3125
+    assert target_rate_f_per_h(stage, elapsed_h=50.0) == -0.3125
+
+
+def test_target_rate_is_zero_once_the_ramp_has_arrived():
+    stage = {"temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0}
+    assert target_rate_f_per_h(stage, elapsed_h=96.0) == 0.0
+    assert target_rate_f_per_h(stage, elapsed_h=200.0) == 0.0
 
 
 def test_time_end_mode():
@@ -97,4 +121,34 @@ def test_temp_hold_gate_resets_when_beer_drifts_outside_the_band():
     gate = TempHoldGate()
     gate.update(t_h=0.0, beer_temp_f=70.0, hold_temp_f=70.0)
     gate.update(t_h=3.0, beer_temp_f=71.5, hold_temp_f=70.0)  # drifted out -- resets
+    assert gate.satisfied(t_h=6.0, hold_hours=6.0) is False
+
+
+def test_gravity_below_end_mode():
+    stage = {"end_mode": "gravity_below", "gravity_hi": 1.020, "hold_hours": 6.0}
+    gate = GravityBelowGate()
+    gate.update(t_h=0.0, gravity=1.018, threshold=1.020)  # already at/below the line
+    finished, reason = stage_finished(stage, elapsed_h=0.0, t_h=0.0, gravity_below_gate=gate)
+    assert (finished, reason) == (False, "gravity_below")
+
+    finished, reason = stage_finished(stage, elapsed_h=6.0, t_h=6.0, gravity_below_gate=gate)
+    assert (finished, reason) == (True, "gravity_below")
+
+
+def test_gravity_below_gate_is_satisfied_even_while_still_actively_dropping():
+    """The whole point of this gate vs. GravityGate: no flatness claim.
+    Gravity keeps declining the entire window and this is satisfied
+    anyway, as long as it never climbs back above the threshold."""
+    gate = GravityBelowGate()
+    gravity = 1.020
+    for t in (0.0, 2.0, 4.0, 6.0):
+        gate.update(t_h=t, gravity=gravity, threshold=1.020)
+        gravity -= 0.003  # steadily dropping the whole window
+    assert gate.satisfied(t_h=6.0, hold_hours=6.0) is True
+
+
+def test_gravity_below_gate_resets_when_gravity_climbs_back_above_the_threshold():
+    gate = GravityBelowGate()
+    gate.update(t_h=0.0, gravity=1.019, threshold=1.020)
+    gate.update(t_h=3.0, gravity=1.021, threshold=1.020)  # climbed back above -- resets
     assert gate.satisfied(t_h=6.0, hold_hours=6.0) is False

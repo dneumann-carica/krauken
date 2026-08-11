@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
-import type { FermentationStartRequest, TestAction } from "./types";
+import type { FermentationStartRequest, StageInput, TestAction } from "./types";
 
 export function useAppState() {
   return useQuery({
@@ -162,6 +162,32 @@ export function useTerminateFermentation() {
   });
 }
 
+// Independent of any specific fermentation -- there's exactly one physical
+// chamber, and whether it's currently holding a setpoint is a live fact
+// about IT, not a historical fact about whichever batch last commanded it.
+// Only relevant when nothing's running (a live fermentation's chamber is
+// trivially "on" the whole time, and there's no "orphaned target" question
+// to ask), so callers gate `enabled` on !activeFermentationId themselves --
+// see GettingStartedView's ChamberOrphanedBanner.
+export function useChamberStatus(enabled: boolean) {
+  return useQuery({
+    queryKey: ["hardware", "chamberStatus"],
+    queryFn: api.getChamberStatus,
+    enabled,
+    refetchInterval: enabled ? 15_000 : false,
+  });
+}
+
+export function useStopChamber() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.stopChamber(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["hardware", "chamberStatus"] });
+    },
+  });
+}
+
 export function useUpdateStages() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -179,6 +205,36 @@ export function useSetStageEnabled() {
   return useMutation({
     mutationFn: ({ fermentationId, stageId, enabled }: { fermentationId: number; stageId: number; enabled: boolean }) =>
       api.setStageEnabled(fermentationId, stageId, enabled),
+    onSuccess: (_data, { fermentationId }) => {
+      queryClient.invalidateQueries({ queryKey: ["fermentation", fermentationId] });
+      queryClient.invalidateQueries({ queryKey: ["series", fermentationId] });
+    },
+  });
+}
+
+// Committed immediately (same "structural changes commit right away, field
+// edits are deferred until Save" split useSetStageEnabled already uses) --
+// adding a stage to a running fermentation is a real, one-way lifecycle
+// event, not draft state to hold until a bigger form submits.
+export function useInsertStage() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      fermentationId, stage, afterStageId,
+    }: { fermentationId: number; stage: StageInput; afterStageId?: number | null }) =>
+      api.insertStage(fermentationId, stage, afterStageId),
+    onSuccess: (_data, { fermentationId }) => {
+      queryClient.invalidateQueries({ queryKey: ["fermentation", fermentationId] });
+      queryClient.invalidateQueries({ queryKey: ["series", fermentationId] });
+    },
+  });
+}
+
+export function useReorderStages() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ fermentationId, stageIds }: { fermentationId: number; stageIds: number[] }) =>
+      api.reorderStages(fermentationId, stageIds),
     onSuccess: (_data, { fermentationId }) => {
       queryClient.invalidateQueries({ queryKey: ["fermentation", fermentationId] });
       queryClient.invalidateQueries({ queryKey: ["series", fermentationId] });

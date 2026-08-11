@@ -8,6 +8,13 @@ import asyncio
 
 from httpx import AsyncClient
 
+from krauken.daemon.app import Daemon
+from krauken.daemon.control_loop import control_tick
+
+STAGES = [
+    {"name": "Primary", "temp_mode": "constant", "temp_f": 68.0, "end_mode": "time", "end_hours": 4.0, "advance_mode": "auto"},
+]
+
 
 async def _scan_and_wait(client: AsyncClient) -> dict:
     resp = await client.post("/api/v1/hardware/scan")
@@ -118,3 +125,78 @@ async def test_conflicting_bundle_devices_auto_resolve(client: AsyncClient):
     assert body["roles"]["chamber_heating"] == "manual:chamber"
     assert len(body["auto_resolved"]) == 1
     assert body["auto_resolved"][0]["device_id"] == "simulator:chamber"
+
+
+async def test_chamber_status_is_unmapped_before_any_role_is_saved(client: AsyncClient):
+    resp = await client.get("/api/v1/hardware/chamber_status")
+    assert resp.status_code == 200
+    assert resp.json() == {"commanded_target_f": None, "mapped": False}
+
+
+async def test_chamber_status_reports_no_target_when_mapped_but_nothing_ever_commanded(client: AsyncClient):
+    await _scan_and_wait(client)
+    await client.put("/api/v1/hardware/mapping", json={"roles": {"chamber_temp": "simulator:chamber", "beer_temp": "simulator:tilt"}})
+
+    resp = await client.get("/api/v1/hardware/chamber_status")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mapped"] is True
+    assert body["commanded_target_f"] is None
+
+
+async def test_stop_chamber_is_blocked_while_a_fermentation_is_active(client: AsyncClient):
+    await _scan_and_wait(client)
+    await client.put("/api/v1/hardware/mapping", json={"roles": {"chamber_temp": "simulator:chamber", "beer_temp": "simulator:tilt"}})
+    await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
+
+    resp = await client.post("/api/v1/hardware/stop_chamber")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "fermentation_already_active"
+
+
+async def test_stop_chamber_is_a_safe_no_op_when_nothing_is_mapped(client: AsyncClient):
+    resp = await client.post("/api/v1/hardware/stop_chamber")
+    assert resp.status_code == 200
+    assert resp.json()["stopped"] is True
+
+
+async def test_stop_chamber_clears_the_commanded_target_and_status_reflects_it(client: AsyncClient, daemon: Daemon):
+    await _scan_and_wait(client)
+    await client.put("/api/v1/hardware/mapping", json={"roles": {"chamber_temp": "simulator:chamber", "beer_temp": "simulator:tilt"}})
+    start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
+    fermentation_id = start.json()["fermentation_id"]
+
+    async with daemon.server.state_lock:
+        await control_tick(daemon.ctx)  # commands a real chamber target at least once
+    assert daemon.ctx.sim_engine._chamber_target_f is not None
+
+    await client.post(f"/api/v1/fermentations/{fermentation_id}/advance")  # only stage -- completes it
+
+    status_before = (await client.get("/api/v1/hardware/chamber_status")).json()
+    assert status_before["mapped"] is True
+    assert status_before["commanded_target_f"] is not None
+
+    resp = await client.post("/api/v1/hardware/stop_chamber")
+    assert resp.status_code == 200
+    assert resp.json()["stopped"] is True
+
+    # The actual point of this feature: the driver was really told to
+    # de-energize, not just some flag flipped.
+    assert daemon.ctx.sim_engine._chamber_target_f is None
+
+    status_after = (await client.get("/api/v1/hardware/chamber_status")).json()
+    assert status_after["commanded_target_f"] is None
+    assert status_after["mapped"] is True  # still mapped -- just idle now
+
+
+async def test_stop_chamber_is_idempotent(client: AsyncClient, daemon: Daemon):
+    await _scan_and_wait(client)
+    await client.put("/api/v1/hardware/mapping", json={"roles": {"chamber_temp": "simulator:chamber", "beer_temp": "simulator:tilt"}})
+    start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
+    fermentation_id = start.json()["fermentation_id"]
+    await client.post(f"/api/v1/fermentations/{fermentation_id}/advance")
+
+    first = await client.post("/api/v1/hardware/stop_chamber")
+    second = await client.post("/api/v1/hardware/stop_chamber")
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json() == {"stopped": True}

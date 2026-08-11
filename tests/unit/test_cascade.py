@@ -40,3 +40,37 @@ def test_chamber_target_holds_at_beer_target_when_idle():
     # docstring for why de-energizing produced a long-idle-then-spike
     # pattern in a real run.
     assert chamber_target_for("idle", 68.0) == 68.0
+
+
+def test_chamber_target_ramp_feedforward_leaves_a_held_target_unchanged():
+    # rate 0 (the default, and what a "constant" stage always has) -- same
+    # plain clamp as before, no behavior change for the common case.
+    assert chamber_target_for("cool", 68.0, ramp_rate_f_per_h=0.0) == 63.0
+    assert chamber_target_for("heat", 68.0, ramp_rate_f_per_h=0.0) == 72.0
+
+
+def test_chamber_target_ramp_feedforward_widens_the_clamp_for_a_fast_ramp():
+    # A cold-crash-style ramp (68->38F over 96h -> -0.3125F/h) needs more
+    # than the plain 5F clamp to keep the beer from permanently lagging the
+    # moving target -- see the module docstring's derivation. -0.3125/0.05
+    # = 6.25, so the chamber should be pushed 6.25F below the target here,
+    # not just 5F.
+    assert chamber_target_for("cool", 68.0, ramp_rate_f_per_h=-0.3125) == 68.0 - 6.25
+
+
+def test_chamber_target_ramp_feedforward_never_narrows_a_slow_ramps_clamp():
+    # A slow ramp (rate/coupling < the plain clamp) shouldn't get LESS
+    # aggressive than today's plain-clamp behavior -- max(), not replace.
+    assert chamber_target_for("cool", 68.0, ramp_rate_f_per_h=-0.01) == 63.0
+
+
+def test_chamber_target_ramp_feedforward_is_symmetric_for_heating():
+    assert chamber_target_for("heat", 68.0, ramp_rate_f_per_h=0.3125) == 68.0 + 6.25
+
+
+def test_chamber_target_clamps_to_the_absolute_safety_envelope():
+    # An extreme, badly-authored ramp (e.g. a huge drop over very few
+    # hours) shouldn't ask real equipment for an absurd target -- the
+    # feedforward is bounded by the same absolute envelope the rest of the
+    # control stack assumes.
+    assert chamber_target_for("cool", 40.0, ramp_rate_f_per_h=-5.0) == 28.0

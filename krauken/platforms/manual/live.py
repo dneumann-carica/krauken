@@ -97,6 +97,9 @@ class ManualChamberDriver:
     async def set_target(self, temp_f: float | None) -> None:
         self._panel.chamber.commanded_target_f = temp_f
 
+    async def commanded_target(self) -> float | None:
+        return self._panel.chamber.commanded_target_f
+
 
 class ManualBeerTempSource:
     """Also the driver returned when beer_temp is mapped onto the chamber

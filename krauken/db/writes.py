@@ -116,14 +116,14 @@ def create_stage(
     state: str = "pending", started_at: str | None = None,
 ) -> int:
     cur = conn.execute(
-        "INSERT INTO fermentation_stages (fermentation_id, seq, stage_type, name, temp_mode, temp_f, "
-        "temp_from_f, temp_to_f, ramp_hours, end_mode, end_hours, hold_temp_f, hold_hours, gravity_lo, "
+        "INSERT INTO fermentation_stages (fermentation_id, seq, name, temp_mode, temp_f, "
+        "temp_from_f, temp_to_f, ramp_hours, end_mode, end_hours, hold_temp_f, hold_hours, "
         "gravity_hi, gravity_stable_hours, min_hours, max_hours, advance_mode, state, started_at) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            fermentation_id, seq, stage["stage_type"], stage["name"], stage["temp_mode"], stage.get("temp_f"),
+            fermentation_id, seq, stage["name"], stage["temp_mode"], stage.get("temp_f"),
             stage.get("temp_from_f"), stage.get("temp_to_f"), stage.get("ramp_hours"), stage["end_mode"],
-            stage.get("end_hours"), stage.get("hold_temp_f"), stage.get("hold_hours"), stage.get("gravity_lo"),
+            stage.get("end_hours"), stage.get("hold_temp_f"), stage.get("hold_hours"),
             stage.get("gravity_hi"), stage.get("gravity_stable_hours"), stage.get("min_hours"),
             stage.get("max_hours"), stage["advance_mode"], state, started_at,
         ),
@@ -194,6 +194,8 @@ def terminate_fermentation(
         "UPDATE fermentations SET status = 'terminated', ended_at = ?, end_reason = ?, fg = ? WHERE id = ?",
         (ended_at, end_reason, fg, fermentation_id),
     )
+
+
 
 
 def insert_sample(

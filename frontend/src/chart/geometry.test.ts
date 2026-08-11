@@ -6,6 +6,7 @@ import {
   gapBreakIndices,
   gravityScale,
   nearestIndex,
+  projectStageSchedule,
   ribbonSegments,
   tempScale,
   timeScale,
@@ -38,6 +39,19 @@ describe("tempScale", () => {
   it("falls back to a sane default range when every value is null", () => {
     const { min, max } = tempScale([null, null], 200);
     expect(max).toBeGreaterThan(min);
+  });
+
+  it("handles a very long-running fermentation's sample count without blowing the call stack", () => {
+    // Math.min(...values)/Math.max(...values) throws "Maximum call stack
+    // size exceeded" somewhere in the tens of thousands of spread
+    // arguments -- a real fermentation that's been sampling on change for
+    // months (a stage stuck well past its predicted duration, say) can
+    // genuinely reach six figures of points.
+    const values = Array.from({ length: 150_000 }, (_, i) => 60 + (i % 20));
+    expect(() => tempScale(values, 200)).not.toThrow();
+    const { min, max } = tempScale(values, 200);
+    expect(min).toBe(58);
+    expect(max).toBe(81);
   });
 });
 
@@ -151,6 +165,81 @@ describe("dutyColumns", () => {
 
   it("returns an empty array for an empty series", () => {
     expect(dutyColumns([], [], 100)).toEqual([]);
+  });
+});
+
+describe("projectStageSchedule", () => {
+  function stage(overrides: Record<string, unknown>) {
+    return {
+      id: 1,
+      name: "Stage",
+      state: "pending",
+      started_at: null,
+      ended_at: null,
+      seq: 1,
+      end_mode: "time",
+      advance_mode: "auto",
+      max_hours: null,
+      end_hours: 24,
+      hold_hours: null,
+      gravity_stable_hours: null,
+      ...overrides,
+    };
+  }
+
+  it("lays out every stage, including ones that haven't started", () => {
+    const stages = [
+      stage({ id: 1, name: "Primary", seq: 1, state: "running", started_at: "2026-01-01T00:00:00Z", advance_mode: "auto" }),
+      stage({ id: 2, name: "Free rise", seq: 2, state: "pending" }),
+      stage({ id: 3, name: "Cold crash", seq: 3, state: "pending" }),
+    ];
+    const out = projectStageSchedule(stages);
+    expect(out.map((s) => s.name)).toEqual(["Primary", "Free rise", "Cold crash"]);
+  });
+
+  it("clamps a RUNNING stage's segment to end exactly at `now` once its guessed end is already behind it, shifting everything after it later instead of dropping it", () => {
+    // The real bug this pins: a manual-advance stage that's already met its
+    // own criteria (so its own guessed 24h end has long since passed) used
+    // to either get subsequent stages laid out right at that stale,
+    // already-past position (reading as "already past cold crash"), get
+    // dropped from the ribbon entirely (an earlier, overcorrected fix), or
+    // stretch a fresh guess PAST now (another earlier fix -- looked like
+    // "there's more work left in this stage" when the honest answer is "we
+    // don't know, it could end any moment"). The right behavior: end this
+    // stage's segment exactly at now, and lay out the rest of the plan
+    // starting right there.
+    const stages = [
+      stage({ id: 1, name: "Primary", seq: 1, state: "running", started_at: "2026-01-01T00:00:00Z", advance_mode: "manual" }),
+      stage({ id: 2, name: "Free rise", seq: 2, state: "pending" }),
+      stage({ id: 3, name: "Cold crash", seq: 3, state: "pending" }),
+    ];
+    // 96h after Primary started -- 72h past its own 24h guess.
+    const now = "2026-01-05T00:00:00Z";
+    const out = projectStageSchedule(stages, now);
+    expect(out.map((s) => s.name)).toEqual(["Primary", "Free rise", "Cold crash"]);
+    const primary = out[0];
+    expect(primary.ended_at).toBe(new Date(now).toISOString());
+    // Free rise starts exactly where Primary was clamped to, not its
+    // original (already-passed) guessed end.
+    expect(out[1].started_at).toBe(primary.ended_at);
+  });
+
+  it("does not stretch a stage whose guessed end is still ahead of `now`", () => {
+    const stages = [stage({ id: 1, name: "Primary", seq: 1, state: "running", started_at: "2026-01-01T00:00:00Z" })];
+    const now = "2026-01-01T06:00:00Z"; // 6h in -- well inside the 24h guess
+    const out = projectStageSchedule(stages, now);
+    expect(out[0].ended_at).toBe("2026-01-02T00:00:00.000Z");
+  });
+
+  it("never stretches a finished/skipped stage even if its real end is in the past relative to `now`", () => {
+    const stages = [
+      stage({
+        id: 1, name: "Primary", seq: 1, state: "finished",
+        started_at: "2026-01-01T00:00:00Z", ended_at: "2026-01-01T12:00:00Z",
+      }),
+    ];
+    const out = projectStageSchedule(stages, "2026-02-01T00:00:00Z");
+    expect(out[0].ended_at).toBe("2026-01-01T12:00:00Z");
   });
 });
 

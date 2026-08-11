@@ -225,6 +225,9 @@ class SimChamberDriver:
     async def set_target(self, temp_f: float | None) -> None:
         self._engine.set_chamber_target(temp_f)
 
+    async def commanded_target(self) -> float | None:
+        return self._engine._chamber_target_f
+
 
 class SimBeerTempSource:
     def __init__(self, engine: SimPlantEngine):

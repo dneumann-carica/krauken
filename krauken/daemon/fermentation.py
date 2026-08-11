@@ -23,10 +23,11 @@ from krauken.contracts.errors import (
 )
 from krauken.contracts.roles import Role, resolve
 from krauken.db import queries, writes
+from krauken.db.connection import transaction
 
 EDITABLE_STAGE_FIELDS = {
     "name", "temp_mode", "temp_f", "temp_from_f", "temp_to_f", "ramp_hours", "end_mode", "end_hours",
-    "hold_temp_f", "hold_hours", "gravity_lo", "gravity_hi", "gravity_stable_hours", "min_hours", "max_hours",
+    "hold_temp_f", "hold_hours", "gravity_hi", "gravity_stable_hours", "min_hours", "max_hours",
     "advance_mode",
 }
 
@@ -59,24 +60,25 @@ async def start_fermentation(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
             )
 
         now = _iso_now(ctx.clock)
-        profile_id = writes.create_profile(
-            ctx.conn, name=f"{name} profile", yeast_id=args.get("yeast_id"), yeast_name=args.get("yeast_name"),
-            definition=stages, created_at=now,
-        )
-        fermentation_id = writes.create_fermentation(
-            ctx.conn, name=name, profile_id=profile_id, started_at=now, og=args.get("og"),
-            simulated=_is_simulated(devices, resolution), created_at=now,
-        )
-
-        stage_ids = []
-        for seq, stage in enumerate(stages):
-            state = "running" if seq == 0 else "pending"
-            started_at = now if seq == 0 else None
-            stage_ids.append(
-                writes.create_stage(ctx.conn, fermentation_id=fermentation_id, seq=seq, stage=stage, state=state, started_at=started_at)
+        with transaction(ctx.conn):
+            profile_id = writes.create_profile(
+                ctx.conn, name=f"{name} profile", yeast_id=args.get("yeast_id"), yeast_name=args.get("yeast_name"),
+                definition=stages, created_at=now,
+            )
+            fermentation_id = writes.create_fermentation(
+                ctx.conn, name=name, profile_id=profile_id, started_at=now, og=args.get("og"),
+                simulated=_is_simulated(devices, resolution), created_at=now,
             )
 
-        writes.record_event(ctx.conn, fermentation_id=fermentation_id, ts=now, type="fermentation_started", payload={"name": name})
+            stage_ids = []
+            for seq, stage in enumerate(stages):
+                state = "running" if seq == 0 else "pending"
+                started_at = now if seq == 0 else None
+                stage_ids.append(
+                    writes.create_stage(ctx.conn, fermentation_id=fermentation_id, seq=seq, stage=stage, state=state, started_at=started_at)
+                )
+
+            writes.record_event(ctx.conn, fermentation_id=fermentation_id, ts=now, type="fermentation_started", payload={"name": name})
 
     ctx.control_state.reset()
     # Re-anchors the Simulator's plant to "now" and resets chamber/beer/relay
@@ -94,29 +96,30 @@ async def advance(
 ) -> dict[str, Any] | None:
     """Finishes `current` and starts the next stage, or completes the
     fermentation if there is none. Caller already holds ctx.db_lock."""
-    if criteria_met:
-        writes.mark_criteria_met(ctx.conn, current["id"], now)
-    writes.finish_stage(ctx.conn, current["id"], ended_at=now, end_actual_reason=reason)
-    ctx.control_state.gates.pop(current["id"], None)
+    with transaction(ctx.conn):
+        if criteria_met:
+            writes.mark_criteria_met(ctx.conn, current["id"], now)
+        writes.finish_stage(ctx.conn, current["id"], ended_at=now, end_actual_reason=reason)
+        ctx.control_state.gates.pop(current["id"], None)
 
-    stages = queries.fermentation_stages(ctx.conn, fermentation_id)
-    # Skip over any stage the user turned off in the running-profile editor
-    # (state == 'skipped', never started) -- it's already terminal, so
-    # advancing must land on the next stage that's actually meant to run,
-    # not silently un-skip it by starting it.
-    next_stage = next((s for s in stages if s["seq"] > current["seq"] and s["state"] != "skipped"), None)
-    if next_stage is not None:
-        writes.start_stage(ctx.conn, next_stage["id"], now)
-        writes.record_event(
-            ctx.conn, fermentation_id=fermentation_id, ts=now, type="stage_advanced",
-            payload={"from": current["name"], "to": next_stage["name"], "reason": reason},
-        )
-        return next_stage
+        stages = queries.fermentation_stages(ctx.conn, fermentation_id)
+        # Skip over any stage the user turned off in the running-profile editor
+        # (state == 'skipped', never started) -- it's already terminal, so
+        # advancing must land on the next stage that's actually meant to run,
+        # not silently un-skip it by starting it.
+        next_stage = next((s for s in stages if s["seq"] > current["seq"] and s["state"] != "skipped"), None)
+        if next_stage is not None:
+            writes.start_stage(ctx.conn, next_stage["id"], now)
+            writes.record_event(
+                ctx.conn, fermentation_id=fermentation_id, ts=now, type="stage_advanced",
+                payload={"from": current["name"], "to": next_stage["name"], "reason": reason},
+            )
+            return next_stage
 
-    latest = queries.latest_sample(ctx.conn, fermentation_id)
-    writes.complete_fermentation(ctx.conn, fermentation_id, ended_at=now, fg=(latest["gravity"] if latest else None))
-    writes.record_event(ctx.conn, fermentation_id=fermentation_id, ts=now, type="fermentation_completed", payload={})
-    return None
+        latest = queries.latest_sample(ctx.conn, fermentation_id)
+        writes.complete_fermentation(ctx.conn, fermentation_id, ended_at=now, fg=(latest["gravity"] if latest else None))
+        writes.record_event(ctx.conn, fermentation_id=fermentation_id, ts=now, type="fermentation_completed", payload={})
+        return None
 
 
 async def advance_stage_manual(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -145,19 +148,21 @@ async def terminate_fermentation(ctx: Any, args: dict[str, Any]) -> dict[str, An
         if fermentation is None or fermentation["id"] != fermentation_id:
             raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
         now = _iso_now(ctx.clock)
-        current = queries.current_stage(ctx.conn, fermentation_id)
-        if current is not None:
-            writes.finish_stage(ctx.conn, current["id"], ended_at=now, end_actual_reason="terminated", finished_state="skipped")
-        latest = queries.latest_sample(ctx.conn, fermentation_id)
-        writes.terminate_fermentation(
-            ctx.conn, fermentation_id, ended_at=now, end_reason=reason, fg=(latest["gravity"] if latest else None)
-        )
-        writes.record_event(
-            ctx.conn, fermentation_id=fermentation_id, ts=now, type="fermentation_terminated", severity="warning",
-            payload={"reason": reason},
-        )
+        with transaction(ctx.conn):
+            current = queries.current_stage(ctx.conn, fermentation_id)
+            if current is not None:
+                writes.finish_stage(ctx.conn, current["id"], ended_at=now, end_actual_reason="terminated", finished_state="skipped")
+            latest = queries.latest_sample(ctx.conn, fermentation_id)
+            writes.terminate_fermentation(
+                ctx.conn, fermentation_id, ended_at=now, end_reason=reason, fg=(latest["gravity"] if latest else None)
+            )
+            writes.record_event(
+                ctx.conn, fermentation_id=fermentation_id, ts=now, type="fermentation_terminated", severity="warning",
+                payload={"reason": reason},
+            )
     ctx.control_state.reset()
     return {"terminated": True}
+
 
 
 async def update_stages(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -175,24 +180,133 @@ async def update_stages(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
 
         existing = {s["id"]: s for s in queries.fermentation_stages(ctx.conn, fermentation_id)}
         applied = []
-        for stage_id, fields in updates.items():
-            stage = existing.get(stage_id)
-            if stage is None:
-                raise ValidationError(f"stage {stage_id} does not belong to fermentation {fermentation_id}")
-            if stage["state"] in ("finished", "skipped"):
-                raise ValidationError(f"stage {stage_id!r} ({stage['name']}) is already {stage['state']} and can't be edited")
-            unknown = set(fields) - EDITABLE_STAGE_FIELDS
-            if unknown:
-                raise ValidationError(f"stage {stage_id}: unsupported fields {sorted(unknown)}")
-            writes.update_stage_fields(ctx.conn, stage_id, fields)
-            applied.append(stage_id)
+        with transaction(ctx.conn):
+            for stage_id, fields in updates.items():
+                stage = existing.get(stage_id)
+                if stage is None:
+                    raise ValidationError(f"stage {stage_id} does not belong to fermentation {fermentation_id}")
+                if stage["state"] in ("finished", "skipped"):
+                    raise ValidationError(f"stage {stage_id!r} ({stage['name']}) is already {stage['state']} and can't be edited")
+                unknown = set(fields) - EDITABLE_STAGE_FIELDS
+                if unknown:
+                    raise ValidationError(f"stage {stage_id}: unsupported fields {sorted(unknown)}")
+                writes.update_stage_fields(ctx.conn, stage_id, fields)
+                applied.append(stage_id)
 
-        now = _iso_now(ctx.clock)
-        writes.record_event(
-            ctx.conn, fermentation_id=fermentation_id, ts=now, type="profile_edited",
-            payload={"stage_ids": applied},
-        )
+            now = _iso_now(ctx.clock)
+            writes.record_event(
+                ctx.conn, fermentation_id=fermentation_id, ts=now, type="profile_edited",
+                payload={"stage_ids": applied},
+            )
     return {"updated_stage_ids": applied}
+
+
+async def insert_stage(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Adds a brand-new stage to the active fermentation's remaining plan --
+    the one thing the running-profile editor couldn't do before now
+    (update_stages only edits an existing row's fields; set_stage_enabled
+    only flips pending<->skipped on one that already exists). `after_stage_id
+    = None` appends at the very end; otherwise the new stage lands
+    immediately after that stage, which must itself still be live
+    (running/pending/skipped) -- inserting relative to already-finished
+    history is meaningless and rejected.
+
+    Every stage at/after the insertion point shifts up by one seq to make
+    room, processed highest-seq-first so no intermediate UPDATE ever
+    collides with the (fermentation_id, seq) unique index -- by the time a
+    given row's target seq is written, the row that used to hold it has
+    already moved out of the way."""
+    fermentation_id = args["fermentation_id"]
+    after_stage_id = args.get("after_stage_id")
+    stage = args["stage"]
+
+    async with ctx.db_lock:
+        fermentation = queries.active_fermentation(ctx.conn)
+        if fermentation is None or fermentation["id"] != fermentation_id:
+            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+
+        stages = queries.fermentation_stages(ctx.conn, fermentation_id)
+        by_id = {s["id"]: s for s in stages}
+
+        if after_stage_id is None:
+            insert_seq = stages[-1]["seq"] + 1
+        else:
+            after = by_id.get(after_stage_id)
+            if after is None:
+                raise ValidationError(f"stage {after_stage_id} does not belong to fermentation {fermentation_id}")
+            if after["state"] == "finished":
+                raise ValidationError(
+                    f"stage {after_stage_id!r} ({after['name']}) has already finished -- can't insert after history"
+                )
+            insert_seq = after["seq"] + 1
+
+        with transaction(ctx.conn):
+            for s in sorted((s for s in stages if s["seq"] >= insert_seq), key=lambda s: -s["seq"]):
+                writes.update_stage_fields(ctx.conn, s["id"], {"seq": s["seq"] + 1})
+
+            now = _iso_now(ctx.clock)
+            stage_id = writes.create_stage(
+                ctx.conn, fermentation_id=fermentation_id, seq=insert_seq, stage=stage, state="pending",
+            )
+            writes.record_event(
+                ctx.conn, fermentation_id=fermentation_id, ts=now, type="stage_inserted",
+                payload={"stage_id": stage_id, "name": stage["name"], "after_stage_id": after_stage_id},
+            )
+    return {"stage_id": stage_id}
+
+
+async def reorder_stages(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
+    """Reassigns seq among the active fermentation's not-yet-decided stages
+    (pending or skipped) to match the client's requested order. The
+    currently running stage and anything already finished keep their
+    historical seq permanently -- neither can be reordered, and nothing
+    reorderable can ever end up ahead of them (see module docstring's
+    "sole intervention mechanism" note -- this extends that same
+    mechanism, it doesn't add a second way to rewrite history).
+
+    `stage_ids` must be exactly that reorderable set, as a permutation --
+    not a partial list, not stages from a different fermentation, no
+    duplicates.
+
+    A two-pass update (every affected row to a negative sentinel first,
+    then to its final seq), not a clever single-pass order: unlike
+    insert_stage's pure shift-by-one (where each target seq is guaranteed
+    vacant by construction), an arbitrary permutation can send two rows'
+    values through each other in either direction, and no single
+    processing order avoids every possible collision against the
+    (fermentation_id, seq) unique index. Stage ids are always positive, so
+    -id can never collide with a real seq or with another vacated row's
+    sentinel."""
+    fermentation_id = args["fermentation_id"]
+    requested_ids = args["stage_ids"]
+
+    async with ctx.db_lock:
+        fermentation = queries.active_fermentation(ctx.conn)
+        if fermentation is None or fermentation["id"] != fermentation_id:
+            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+
+        stages = queries.fermentation_stages(ctx.conn, fermentation_id)
+        reorderable = [s for s in stages if s["state"] in ("pending", "skipped")]
+        reorderable_ids = [s["id"] for s in reorderable]
+        if sorted(requested_ids) != sorted(reorderable_ids) or len(requested_ids) != len(set(requested_ids)):
+            raise ValidationError(
+                f"stage_ids must be exactly the fermentation's reorderable stages {reorderable_ids} "
+                f"(got {requested_ids})"
+            )
+
+        target_seqs = [s["seq"] for s in reorderable]  # same seq values -- just a new id assignment
+        with transaction(ctx.conn):
+            for s in reorderable:
+                writes.update_stage_fields(ctx.conn, s["id"], {"seq": -s["id"]})
+            for stage_id, seq in zip(requested_ids, target_seqs):
+                writes.update_stage_fields(ctx.conn, stage_id, {"seq": seq})
+
+            now = _iso_now(ctx.clock)
+            writes.record_event(
+                ctx.conn, fermentation_id=fermentation_id, ts=now, type="stages_reordered",
+                payload={"stage_ids": requested_ids},
+            )
+    return {"stage_ids": requested_ids}
 
 
 async def set_stage_enabled(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -218,23 +332,24 @@ async def set_stage_enabled(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
             raise ValidationError(f"stage {stage_id} does not belong to fermentation {fermentation_id}")
 
         now = _iso_now(ctx.clock)
-        if not enabled:
-            if stage["state"] != "pending":
-                raise ValidationError(
-                    f"stage {stage_id!r} ({stage['name']}) is not pending -- only a not-yet-reached stage can be turned off"
-                )
-            writes.finish_stage(ctx.conn, stage_id, ended_at=now, end_actual_reason="skipped", finished_state="skipped")
-            event_type = "stage_skipped"
-        else:
-            if stage["state"] != "skipped" or stage["started_at"] is not None:
-                raise ValidationError(
-                    f"stage {stage_id!r} ({stage['name']}) can't be turned back on -- it isn't a not-yet-reached stage that was turned off"
-                )
-            writes.reenable_stage(ctx.conn, stage_id)
-            event_type = "stage_reenabled"
+        with transaction(ctx.conn):
+            if not enabled:
+                if stage["state"] != "pending":
+                    raise ValidationError(
+                        f"stage {stage_id!r} ({stage['name']}) is not pending -- only a not-yet-reached stage can be turned off"
+                    )
+                writes.finish_stage(ctx.conn, stage_id, ended_at=now, end_actual_reason="skipped", finished_state="skipped")
+                event_type = "stage_skipped"
+            else:
+                if stage["state"] != "skipped" or stage["started_at"] is not None:
+                    raise ValidationError(
+                        f"stage {stage_id!r} ({stage['name']}) can't be turned back on -- it isn't a not-yet-reached stage that was turned off"
+                    )
+                writes.reenable_stage(ctx.conn, stage_id)
+                event_type = "stage_reenabled"
 
-        writes.record_event(
-            ctx.conn, fermentation_id=fermentation_id, ts=now, type=event_type,
-            payload={"stage_id": stage_id, "name": stage["name"]},
-        )
+            writes.record_event(
+                ctx.conn, fermentation_id=fermentation_id, ts=now, type=event_type,
+                payload={"stage_id": stage_id, "name": stage["name"]},
+            )
     return {"stage_id": stage_id, "enabled": enabled}

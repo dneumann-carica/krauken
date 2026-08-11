@@ -50,8 +50,24 @@ export function tempScale(
   padding = 2,
 ): { toY: (v: number) => number; min: number; max: number; tickStep: number } {
   const present = values.filter((v): v is number => v !== null && Number.isFinite(v));
-  const dataMin = present.length ? Math.min(...present) : 60;
-  const dataMax = present.length ? Math.max(...present) : 70;
+  // Plain loop, not Math.min(...present)/Math.max(...present) -- spreading
+  // an array into call arguments hits the engine's own argument-count
+  // limit (V8: "Maximum call stack size exceeded") somewhere in the tens
+  // of thousands of elements, which a long-running fermentation's sample
+  // count can genuinely reach (every control tick samples on change, and
+  // ticks keep accumulating for as long as a batch runs, however long
+  // that turns out to be -- see contracts/projection.py's stretch logic,
+  // which now explicitly allows a stage to run indefinitely).
+  let dataMin = 60;
+  let dataMax = 70;
+  if (present.length) {
+    dataMin = present[0];
+    dataMax = present[0];
+    for (const v of present) {
+      if (v < dataMin) dataMin = v;
+      if (v > dataMax) dataMax = v;
+    }
+  }
   const min = Math.floor(dataMin - padding);
   const max = Math.ceil(dataMax + padding);
   const span = max - min || 1;
@@ -277,7 +293,6 @@ export interface ScheduledStage extends RawScheduledStage {
 
 interface DurationFields {
   seq: number;
-  stage_type: string;
   end_mode: string;
   advance_mode: string;
   max_hours: number | null;
@@ -286,23 +301,28 @@ interface DurationFields {
   gravity_stable_hours: number | null;
 }
 
-// Sizing-only fallback for stages whose real duration can't be known ahead
+// Sizing-only fallback for a stage whose real duration can't be known ahead
 // of time (gravity-gated, no cap set) -- used purely to give the ribbon a
-// proportional width to draw, never surfaced as displayed text. Matches the
-// reference design's own default-recipe total (456h across 5 stages).
-const STAGE_TYPE_FALLBACK_HOURS: Record<string, number> = {
-  primary: 96,
-  free_rise: 24,
-  diacetyl_rest: 72,
-  conditioning: 168,
-  cold_crash: 96,
-};
+// proportional width to draw, never surfaced as displayed text. Used to be
+// looked up per stage_type (a fixed, known set of 5); stages are freeform
+// now, so this is just one flat guess -- it was never anything more
+// precise than that anyway.
+//
+// MUST match contracts/projection.py's OPEN_ENDED_STAGE_HORIZON_H, and this
+// function's own field priority must match that module's _stage_horizon_h
+// exactly -- the backend's forward-projection preview sizes the SAME
+// pending stage from the SAME authored fields, and the two are independent
+// implementations (no shared runtime between this TS frontend and the
+// Python backend). A mismatch doesn't just make one side's guess worse, it
+// makes the projection's dashed lines visibly drift away from this ribbon's
+// own boundaries.
+const UNKNOWN_DURATION_FALLBACK_HOURS = 96;
 
 function plannedDurationHours(s: DurationFields): number {
   if (s.max_hours != null) return s.max_hours;
-  if (s.end_mode === "time") return s.end_hours ?? STAGE_TYPE_FALLBACK_HOURS[s.stage_type] ?? 24;
-  if (s.end_mode === "temp_hold") return s.hold_hours ?? STAGE_TYPE_FALLBACK_HOURS[s.stage_type] ?? 24;
-  return STAGE_TYPE_FALLBACK_HOURS[s.stage_type] ?? 24;
+  if (s.end_mode === "time") return s.end_hours ?? UNKNOWN_DURATION_FALLBACK_HOURS;
+  if (s.end_mode === "temp_hold" || s.end_mode === "gravity_below") return s.hold_hours ?? UNKNOWN_DURATION_FALLBACK_HOURS;
+  return UNKNOWN_DURATION_FALLBACK_HOURS;
 }
 
 /** A stage's real end is only tellable ahead of time when it's on a fixed
@@ -319,11 +339,32 @@ function isDurationDisplayable(s: { end_mode: string; advance_mode: string }): b
  * of only the part that's already happened, and the last stage's segment
  * always reaches the same right edge the rest of the chart's x-domain
  * does. Whether that duration is safe to *display* as text is a separate
- * question -- see `durationKnown` on the returned stages and `isDurationDisplayable`. */
-export function projectStageSchedule<T extends DurationFields & RawScheduledStage>(stages: T[]): ScheduledStage[] {
+ * question -- see `durationKnown` on the returned stages and `isDurationDisplayable`.
+ *
+ * `nowIso`, when given, keeps a not-yet-finished stage's guessed end from
+ * ever landing in the past: a stage's predicted duration is just a guess
+ * (manual advancement, a slow-to-flatten gravity read, ... can all run
+ * longer -- or shorter -- than it), so once elapsed time blows past that
+ * guess the stage's segment is clamped to end exactly at "now" instead of
+ * pretending it already ended on schedule -- NOT stretched further out
+ * past now, which would draw a phantom continuation of the current stage
+ * (and its dashed preview) right where the next stage should visually
+ * begin, reading as "there's more work left here" when the honest answer
+ * is "we don't know, it could end any moment." Every stage after it still
+ * gets laid out, just starting from that same "now" point instead of the
+ * stage's own stale guess -- the ribbon's layout may shift as a result,
+ * but the whole plan stays visible the same way it always has. See
+ * contracts/projection.py's matching clamp, which keeps the dashed
+ * preview line consistent with this (it starts the NEXT stage's preview
+ * right at "now" too, not a continuation of the current one). */
+export function projectStageSchedule<T extends DurationFields & RawScheduledStage>(
+  stages: T[],
+  nowIso?: string,
+): ScheduledStage[] {
   const ordered = [...stages].sort((a, b) => a.seq - b.seq);
   const out: ScheduledStage[] = [];
   let cursor: string | null = null;
+  const nowMs = nowIso != null ? new Date(nowIso).getTime() : null;
   for (const s of ordered) {
     const start: string | null = s.started_at ?? cursor;
     if (start == null) break;
@@ -332,7 +373,9 @@ export function projectStageSchedule<T extends DurationFields & RawScheduledStag
     let durationKnown = terminal;
     if (end == null) {
       const durH = plannedDurationHours(s);
-      end = new Date(new Date(start).getTime() + durH * 3_600_000).toISOString();
+      let endMs: number = new Date(start).getTime() + durH * 3_600_000;
+      if (nowMs != null && !terminal && endMs <= nowMs) endMs = nowMs;
+      end = new Date(endMs).toISOString();
       durationKnown = isDurationDisplayable(s);
     }
     out.push({ id: s.id, name: s.name, state: s.state, started_at: start, ended_at: end, durationKnown });

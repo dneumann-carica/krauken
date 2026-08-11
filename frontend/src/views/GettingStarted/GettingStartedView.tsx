@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { FermentationChart } from "../../chart/FermentationChart";
 import type { PillTone } from "../../design/primitives";
 import { Button, Card, Dialog, MetricStat, StatusPill, Switch, Tag } from "../../design/primitives";
@@ -7,15 +7,18 @@ import {
   useAdvanceStage,
   useAlerts,
   useAppState,
+  useChamberStatus,
   useFermentation,
   useFermentations,
   useSeries,
+  useStopChamber,
   useTerminateFermentation,
   useUpdateStages,
 } from "../../api/queries";
-import type { RoleStatus, StageResponse } from "../../api/types";
+import type { FermentationSummary, RoleStatus, StageResponse } from "../../api/types";
 import type { Role } from "../../hardware/resolve";
 import { ROLE_LABELS } from "../../hardware/roleLabels";
+import type { CloneSource } from "./FermentationPlanDialog";
 import { FermentationPlanDialog } from "./FermentationPlanDialog";
 import styles from "./GettingStartedView.module.css";
 
@@ -64,8 +67,50 @@ function elapsedInMode(ts: string[], modes: string[]): number | null {
   return end - start;
 }
 
+function fmtMenuDate(iso: string, includeYear: boolean): string {
+  return new Date(iso).toLocaleDateString(
+    undefined,
+    includeYear ? { month: "short", day: "numeric", year: "numeric" } : { month: "short", day: "numeric" },
+  );
+}
+
+// The title-menu batch list's secondary line -- "Active" for the one
+// currently running (a date range would just show "started, still going",
+// which is what "Active" already says more plainly), a real start–end
+// range for anything finished. The end date gets its year appended once
+// it's no longer this year -- otherwise last December's batch and one
+// from three weeks ago both just read "Dec 30", indistinguishable at a
+// glance. The start date never does; a range implies "same era as its own
+// end date" well enough on its own.
+function fmtMenuDateRange(f: FermentationSummary): string {
+  if (f.status === "active") return "Active";
+  if (!f.ended_at) return fmtMenuDate(f.started_at, false);
+  // Not just "ended before this year" -- an accelerated SimulatorClock
+  // batch can just as easily race PAST the current year into next year
+  // (started from a real-now anchor, then ticked through weeks of
+  // simulated time in seconds). Either direction is equally ambiguous
+  // without a year shown, and equally capable of producing a menu order
+  // that looks wrong at a glance if you assume everything's "this year."
+  const differentYear = new Date(f.ended_at).getFullYear() !== new Date().getFullYear();
+  return `${fmtMenuDate(f.started_at, false)} – ${fmtMenuDate(f.ended_at, differentYear)}`;
+}
+
 function fmtHours(hours: number): string {
   return hours >= 24 ? `${(hours / 24).toFixed(hours % 24 === 0 ? 0 : 1)} days` : `${hours}h`;
+}
+
+// Days+hours, not a raw hour count or a fractional day -- "452h elapsed"
+// isn't something a human parses at a glance, and "18.8 days" isn't much
+// better. Used for actual ELAPSED durations specifically; a PLANNED
+// duration (fmtHours above, e.g. "4d" in the stage ribbon) reads fine as a
+// single rounded unit since it's describing a round authored number, not
+// an arbitrary elapsed one.
+function fmtDaysHours(hours: number): string {
+  const totalHours = Math.round(hours);
+  const days = Math.floor(totalHours / 24);
+  const rem = totalHours % 24;
+  if (days === 0) return `${rem}h`;
+  return rem === 0 ? `${days}d` : `${days}d ${rem}h`;
 }
 
 function criteriaDescription(stage: StageResponse): string {
@@ -113,21 +158,95 @@ export function GettingStartedView() {
   const navigate = useNavigate();
   const state = useAppState();
   const fermentations = useFermentations();
-  const [viewedId, setViewedId] = useState<number>();
-  const batchId = viewedId ?? fermentations.data?.[0]?.id;
+  // Only meaningful when nothing's running -- a live fermentation's chamber
+  // is trivially "on" the whole time it's active, so there's no "orphaned
+  // target" question to ask until it's the only thing still holding one.
+  // Called unconditionally (Rules of Hooks) even though `state.data` may
+  // still be loading here -- `enabled` just leans permissive until the
+  // guards below resolve it for real; chamberOrphaned re-derives the
+  // authoritative answer from `hasActiveBatch` once they have.
+  const chamberStatus = useChamberStatus(state.data?.active_fermentation_id == null);
+  // The viewed batch lives in the URL, not plain component state -- a
+  // refresh must keep showing whatever you were looking at, not silently
+  // fall back to the default. Only in the absence of that (a fresh load
+  // with no ?batch= at all) does it pick a default, and that default
+  // prefers whatever's actively running over merely "most recently
+  // started" -- fermentations_list sorts by started_at, which a
+  // SimulatorClock-driven batch can't be trusted to place correctly
+  // relative to wall-clock-timed ones.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const viewedIdParam = searchParams.get("batch");
+  const parsedViewedId = viewedIdParam !== null ? Number(viewedIdParam) : NaN;
+  const defaultBatchId = state.data?.active_fermentation_id ?? fermentations.data?.[0]?.id;
+  const batchId = Number.isFinite(parsedViewedId) ? parsedViewedId : defaultBatchId;
   const isLive = state.data?.active_fermentation_id !== undefined && state.data?.active_fermentation_id === batchId;
   const detail = useFermentation(batchId, { live: isLive });
   const series = useSeries(batchId, { live: isLive });
   const alerts = useAlerts(isLive ? batchId : undefined, { live: isLive });
 
+  // Independent polling intervals (state every 5s, detail/series on their
+  // own slower cadences while live) mean isLive can flip false the moment a
+  // batch completes, stopping detail/series polling, BEFORE their own next
+  // scheduled poll would have picked up the truly-final state -- the
+  // observed symptom was the chart freezing mid-stage with a stale NOW
+  // marker and projection that never cleared. One extra fetch right on the
+  // true->false transition closes that gap; nothing needs to keep polling
+  // after that, since the daemon's completion writes (final sample, status,
+  // stage state) all land in the same control tick, not staggered later.
+  // Deliberately NOT alerts: unlike detail/series (always queried on
+  // batchId, gated only on *polling* via live:isLive), alerts is gated on
+  // *identity* too (isLive ? batchId : undefined) since it's never shown
+  // for a non-live batch -- calling .refetch() on it here bypasses its own
+  // enabled:false and fires with fermentationId already undefined.
+  const wasLiveRef = useRef(isLive);
+  useEffect(() => {
+    if (wasLiveRef.current && !isLive) {
+      detail.refetch();
+      series.refetch();
+    }
+    wasLiveRef.current = isLive;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLive]);
+
   const advanceStage = useAdvanceStage();
   const terminateFermentation = useTerminateFermentation();
+  const stopChamber = useStopChamber();
   const updateStages = useUpdateStages();
 
   const [showStartForm, setShowStartForm] = useState(false);
   const [showEditProfile, setShowEditProfile] = useState(false);
+  const [showViewProfile, setShowViewProfile] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
+  // Set alongside showStartForm to seed the "new" dialog from an existing
+  // batch's plan instead of a yeast preset -- "Clone as new batch," from
+  // either the header action or the read-only view dialog. Cleared on
+  // close so a later plain "Start a new fermentation" doesn't reuse it.
+  const [cloneFrom, setCloneFrom] = useState<CloneSource | null>(null);
   const menuRef = useRef<HTMLDetailsElement>(null);
+
+  // Native <details> has no "click outside to close" behavior of its own --
+  // only reopening the <summary> toggles it back off. A capturing pointerdown
+  // listener on the whole document, closing whenever the click lands outside
+  // the element, is the standard way to bolt that on. Attached unconditionally
+  // (not just while open) since it's cheap and the element itself is stable
+  // for the component's whole lifetime -- no need to add/remove it every
+  // open/close cycle.
+  useEffect(() => {
+    function onPointerDown(e: PointerEvent) {
+      const el = menuRef.current;
+      if (el && el.open && e.target instanceof Node && !el.contains(e.target)) {
+        el.removeAttribute("open");
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, []);
+
+  function openCloneDialog(source: CloneSource) {
+    setCloneFrom(source);
+    setShowViewProfile(false);
+    setShowStartForm(true);
+  }
 
   // Chart scrubbing (mouse-down/touch-drag on FermentationChart, see its
   // onScrub prop): while set, the stat tiles below show this sample's
@@ -149,7 +268,17 @@ export function GettingStartedView() {
   const appState = state.data!;
   const batch = detail.data;
   const seriesData = series.data;
-  const canStartNew = appState.can_start_fermentation && appState.active_fermentation_id === null;
+  const hasActiveBatch = appState.active_fermentation_id !== null;
+  const canStartNew = appState.can_start_fermentation && !hasActiveBatch;
+  const chamberOrphaned = !hasActiveBatch && chamberStatus.data?.commanded_target_f != null;
+  // The two blocking reasons are mutually exclusive in practice (you can't
+  // be missing hardware AND mid-batch in a way that matters here), but
+  // check the real one rather than always blaming hardware -- a batch
+  // already being active reads very differently to a brewer than "go set
+  // up your probes."
+  const cannotStartReason = hasActiveBatch
+    ? "Finish or terminate the current batch first"
+    : "Unlocks once hardware is mapped";
 
   const lastBeer = seriesData ? lastDefined(seriesData.beer_temp_f) : null;
   const lastChamber = seriesData ? lastDefined(seriesData.chamber_temp_f) : null;
@@ -208,6 +337,23 @@ export function GettingStartedView() {
 
   return (
     <main className={styles.page}>
+      {chamberOrphaned && (
+        <div className={styles.banner}>
+          <div className={styles.bannerBody}>
+            <div className={styles.bannerTitleRow}>
+              <Tag tone="orange" size="sm">
+                Chamber still on
+              </Tag>
+              <span className={styles.bannerTitle}>No fermentation is running, but the chamber is still holding a setpoint</span>
+            </div>
+            <div className={styles.bannerText}>Once you've removed the fermented beer from the chamber, turn off the chamber.</div>
+          </div>
+          <Button variant="primary" disabled={stopChamber.isPending} onClick={() => stopChamber.mutate()}>
+            {stopChamber.isPending ? "Turning off…" : "Turn off chamber"}
+          </Button>
+        </div>
+      )}
+
       {appState.setup_needed && (
         <div className={styles.banner}>
           <div className={styles.bannerBody}>
@@ -273,11 +419,12 @@ export function GettingStartedView() {
                 onClick={() => {
                   if (!canStartNew) return;
                   closeMenu();
+                  setCloneFrom(null);
                   setShowStartForm(true);
                 }}
               >
                 <span>Start a new fermentation</span>
-                {!canStartNew && <span className={styles.titleMenuNote}>Unlocks once hardware is mapped</span>}
+                {!canStartNew && <span className={styles.titleMenuNote}>{cannotStartReason}</span>}
               </button>
               <div className={styles.titleMenuDivider} />
               <div className={styles.titleMenuLabel}>Fermentations</div>
@@ -288,11 +435,12 @@ export function GettingStartedView() {
                     type="button"
                     className={`${styles.titleMenuItem} ${f.id === batchId ? styles.titleMenuItemActive : ""}`}
                     onClick={() => {
-                      setViewedId(f.id);
+                      setSearchParams({ batch: String(f.id) });
                       closeMenu();
                     }}
                   >
-                    {f.name}
+                    <span>{f.name}</span>
+                    <span className={styles.titleMenuNote}>{fmtMenuDateRange(f)}</span>
                   </button>
                 ))
               ) : (
@@ -308,6 +456,11 @@ export function GettingStartedView() {
               <StatusPill tone={modeTone}>{modeLabel}</StatusPill>
               {elapsedDisplay != null && <span className={styles.statusElapsed}>{elapsedDisplay}</span>}
             </span>
+          )}
+          {batch && !isLive && (
+            <Button variant="outline" size="sm" onClick={() => setShowViewProfile(true)}>
+              View profile
+            </Button>
           )}
           {isLive && batch && (
             <Button variant="outline" size="sm" onClick={() => setShowEndConfirm(true)}>
@@ -434,7 +587,7 @@ export function GettingStartedView() {
               <span className={styles.legendHeat}>heating</span>. White means neither.
             </span>
             <span className={styles.legendMono}>
-              Duty cycle, {seriesData.duty.window_hours}h elapsed — cool {seriesData.duty.cool_pct}% &middot; heat{" "}
+              Duty cycle, {fmtDaysHours(seriesData.duty.window_hours)} elapsed — cool {seriesData.duty.cool_pct}% &middot; heat{" "}
               {seriesData.duty.heat_pct}% &middot; idle {seriesData.duty.idle_pct}%
             </span>
           </div>
@@ -456,7 +609,20 @@ export function GettingStartedView() {
         <span className={styles.hardwareCta}>Set up hardware →</span>
       </Link>
 
-      <FermentationPlanDialog mode="new" open={showStartForm} onClose={() => setShowStartForm(false)} onStarted={() => setShowStartForm(false)} />
+      <FermentationPlanDialog
+        mode="new"
+        open={showStartForm}
+        cloneFrom={cloneFrom}
+        onClose={() => {
+          setShowStartForm(false);
+          setCloneFrom(null);
+        }}
+        onStarted={(fermentationId) => {
+          setShowStartForm(false);
+          setCloneFrom(null);
+          setSearchParams({ batch: String(fermentationId) });
+        }}
+      />
 
       {batch && (
         <FermentationPlanDialog
@@ -466,6 +632,16 @@ export function GettingStartedView() {
           fermentationId={batch.id}
           stages={batch.stages}
           onSaved={() => setShowEditProfile(false)}
+        />
+      )}
+
+      {batch && (
+        <FermentationPlanDialog
+          mode="view"
+          open={showViewProfile}
+          onClose={() => setShowViewProfile(false)}
+          fermentation={{ name: batch.name, yeast_id: batch.yeast_id, stages: batch.stages }}
+          onClone={() => openCloneDialog({ name: batch.name, yeast_id: batch.yeast_id, stages: batch.stages })}
         />
       )}
 

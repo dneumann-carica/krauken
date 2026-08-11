@@ -1,46 +1,130 @@
 {
   "us05": {
     "name": "SafAle US-05 - American ale",
-    "stage_defaults": {
-      "primary": {"temp_f": 66.0},
-      "free_rise": {"temp_from_f": 66.0, "temp_to_f": 70.0},
-      "diacetyl_rest": {"temp_f": 70.0},
-      "conditioning": {"temp_f": 68.0},
-      "cold_crash": {"temp_from_f": 68.0, "temp_to_f": 38.0}
-    }
+    "default_stages": [
+      {
+        "name": "Primary fermentation", "temp_mode": "constant", "temp_f": 66.0,
+        "end_mode": "gravity", "gravity_hi": 1.016, "gravity_stable_hours": 24.0,
+        "max_hours": 240.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Free rise", "temp_mode": "stepped", "temp_from_f": 66.0, "temp_to_f": 70.0, "ramp_hours": 24.0,
+        "end_mode": "time", "end_hours": 24.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Diacetyl rest", "temp_mode": "constant", "temp_f": 70.0,
+        "end_mode": "time", "end_hours": 48.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Conditioning", "temp_mode": "constant", "temp_f": 68.0,
+        "end_mode": "time", "end_hours": 168.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Cold crash", "temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0,
+        "end_mode": "time", "end_hours": 96.0, "advance_mode": "auto"
+      }
+    ]
   },
   "london3": {
     "name": "London Ale III - hazy IPA",
-    "stage_defaults": {
-      "primary": {"temp_f": 68.0},
-      "free_rise": {"temp_from_f": 68.0, "temp_to_f": 72.0},
-      "diacetyl_rest": {"temp_f": 72.0},
-      "conditioning": {"temp_f": 68.0},
-      "cold_crash": {"temp_from_f": 68.0, "temp_to_f": 38.0}
-    }
+    "default_stages": [
+      {
+        "name": "Primary fermentation", "temp_mode": "constant", "temp_f": 68.0,
+        "end_mode": "gravity", "gravity_hi": 1.016, "gravity_stable_hours": 24.0,
+        "max_hours": 240.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Free rise", "temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 72.0, "ramp_hours": 24.0,
+        "end_mode": "time", "end_hours": 24.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Diacetyl rest", "temp_mode": "constant", "temp_f": 72.0,
+        "end_mode": "time", "end_hours": 48.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Conditioning", "temp_mode": "constant", "temp_f": 68.0,
+        "end_mode": "time", "end_hours": 168.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Cold crash", "temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0,
+        "end_mode": "time", "end_hours": 96.0, "advance_mode": "auto"
+      }
+    ]
   },
   "w3470": {
     "name": "W-34/70 - lager",
-    "stage_defaults": {
-      "primary": {"temp_f": 50.0},
-      "free_rise": {"temp_from_f": 50.0, "temp_to_f": 58.0},
-      "diacetyl_rest": {"temp_f": 58.0},
-      "conditioning": {"temp_f": 48.0},
-      "cold_crash": {"temp_from_f": 48.0, "temp_to_f": 34.0}
-    }
+    "default_stages": [
+      {
+        "name": "Primary fermentation", "temp_mode": "constant", "temp_f": 50.0,
+        "end_mode": "gravity", "gravity_hi": 1.016, "gravity_stable_hours": 24.0,
+        "max_hours": 240.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Free rise", "temp_mode": "stepped", "temp_from_f": 50.0, "temp_to_f": 58.0, "ramp_hours": 24.0,
+        "end_mode": "time", "end_hours": 24.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Diacetyl rest", "temp_mode": "constant", "temp_f": 58.0,
+        "end_mode": "time", "end_hours": 48.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Conditioning", "temp_mode": "constant", "temp_f": 48.0,
+        "end_mode": "time", "end_hours": 168.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Cold crash", "temp_mode": "stepped", "temp_from_f": 48.0, "temp_to_f": 34.0, "ramp_hours": 96.0,
+        "end_mode": "time", "end_hours": 96.0, "advance_mode": "auto"
+      }
+    ]
   },
   "belle_saison": {
     "name": "Belle Saison - farmhouse",
-    "stage_defaults": {
-      "primary": {"temp_f": 70.0},
-      "free_rise": {"temp_from_f": 70.0, "temp_to_f": 78.0},
-      "diacetyl_rest": {"temp_f": 78.0},
-      "conditioning": {"temp_f": 68.0},
-      "cold_crash": {"temp_from_f": 68.0, "temp_to_f": 38.0}
-    }
+    "default_stages": [
+      {
+        "name": "Primary fermentation", "temp_mode": "constant", "temp_f": 70.0,
+        "end_mode": "gravity", "gravity_hi": 1.016, "gravity_stable_hours": 24.0,
+        "max_hours": 240.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Free rise", "temp_mode": "stepped", "temp_from_f": 70.0, "temp_to_f": 78.0, "ramp_hours": 24.0,
+        "end_mode": "time", "end_hours": 24.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Diacetyl rest", "temp_mode": "constant", "temp_f": 78.0,
+        "end_mode": "time", "end_hours": 48.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Conditioning", "temp_mode": "constant", "temp_f": 68.0,
+        "end_mode": "time", "end_hours": 168.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Cold crash", "temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0,
+        "end_mode": "time", "end_hours": 96.0, "advance_mode": "auto"
+      }
+    ]
+  },
+  "lutra_kveik": {
+    "name": "Omega Lutra Kveik - fast, clean, no d-rest",
+    "default_stages": [
+      {
+        "name": "Primary fermentation", "temp_mode": "constant", "temp_f": 70.0,
+        "end_mode": "gravity", "gravity_hi": 1.014, "gravity_stable_hours": 12.0,
+        "max_hours": 72.0, "advance_mode": "auto"
+      },
+      {
+        "name": "Crash and clarify", "temp_mode": "stepped", "temp_from_f": 70.0, "temp_to_f": 38.0, "ramp_hours": 24.0,
+        "end_mode": "time", "end_hours": 48.0, "advance_mode": "auto"
+      }
+    ]
   },
   "custom": {
     "name": "Custom profile - no preset",
-    "stage_defaults": {}
+    "default_stages": [
+      {
+        "name": "Primary fermentation", "temp_mode": "constant", "temp_f": 68.0,
+        "end_mode": "gravity", "gravity_hi": 1.016, "gravity_stable_hours": 24.0,
+        "max_hours": 240.0, "advance_mode": "auto"
+      }
+    ]
   }
 }

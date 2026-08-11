@@ -9,7 +9,6 @@ function stage(overrides: Partial<StageResponse>): StageResponse {
     id: 1,
     fermentation_id: 1,
     seq: 1,
-    stage_type: "ferment",
     name: "Primary",
     temp_mode: "fixed",
     temp_f: 68,
@@ -20,7 +19,6 @@ function stage(overrides: Partial<StageResponse>): StageResponse {
     end_hours: null,
     hold_temp_f: null,
     hold_hours: null,
-    gravity_lo: null,
     gravity_hi: null,
     gravity_stable_hours: null,
     min_hours: null,
@@ -65,7 +63,10 @@ describe("FermentationChart", () => {
     expect(screen.getByRole("img", { name: /fermentation temperature/i })).toBeInTheDocument();
     expect(screen.getByText("Primary")).toBeInTheDocument();
     expect(screen.getByText("Gravity")).toBeInTheDocument();
-    expect(screen.getByText(/72h elapsed/)).toBeInTheDocument();
+    // Duty-cycle summary text lives in GettingStartedView now, not here --
+    // it used to be shown twice (once inline under the graph, once again
+    // in the page's own legend/caption block below), so this component
+    // dropped its own copy rather than keep two sources of the same number.
   });
 
   it("collapses the gravity axis and legend entry when no gravity is mapped", () => {
@@ -104,13 +105,14 @@ describe("FermentationChart", () => {
       />,
     );
     expect(screen.getByText("NOW")).toBeInTheDocument();
-    // target, gravity, chamber, beer -- one projected dashed path per series
-    // that has a real (non-null) history, gravity included.
-    expect(container.querySelectorAll("path[stroke-dasharray='2 3']")).toHaveLength(4);
-    // The projected gravity path specifically -- a forward preview of
-    // gravity existed on the wire (contracts/projection.py, ProjectionResponse)
-    // well before the chart actually drew it; this pins that it now does.
-    expect(container.querySelector("path[stroke='var(--kr-gravity)'][stroke-dasharray='2 3']")).toBeInTheDocument();
+    // target, chamber, beer -- one projected dashed path per series that's
+    // actually safe to extrapolate. Gravity deliberately has no projected
+    // path even though it rode along on the wire (contracts/projection.py
+    // holds it flat at its last known value) -- a flat dashed line reads as
+    // a genuine prediction, not the "we don't know" it actually is. See
+    // contracts/projection.py's module docstring.
+    expect(container.querySelectorAll("path[stroke-dasharray='2 3']")).toHaveLength(3);
+    expect(container.querySelector("path[stroke='var(--kr-gravity)'][stroke-dasharray='2 3']")).not.toBeInTheDocument();
   });
 
   it("renders no NOW marker when the series has no projection (a completed batch)", () => {

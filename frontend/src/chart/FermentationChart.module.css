@@ -7,6 +7,11 @@
      highlights it like a text selection instead of just scrubbing. */
   user-select: none;
   -webkit-user-select: none;
+  /* iOS Safari's long-press callout (Copy/Share/Look Up) is a separate
+     mechanism from Android/Chrome's 'contextmenu' event (suppressed in
+     FermentationChart.tsx's onContextMenu) -- touch-and-hold to start a
+     scrub would otherwise trigger it there instead. */
+  -webkit-touch-callout: none;
 }
 .legend {
   display: flex;
@@ -109,12 +114,6 @@
 .axisLabel { font: var(--kr-type-caption); fill: var(--kr-ink-muted); }
 .gridLine { stroke: var(--kr-border); stroke-width: 1; stroke-dasharray: 2 3; }
 .stageLine { stroke: var(--kr-border-strong); stroke-width: 1; stroke-dasharray: 3 4; }
-
-.caption {
-  margin-top: var(--kr-space-2);
-  font: var(--kr-type-caption);
-  color: var(--kr-ink-body);
-}
 
 .futureRegion { fill: var(--kr-surface-sunken); }
 .nowLine { stroke: var(--kr-ink); stroke-width: 1.5; }

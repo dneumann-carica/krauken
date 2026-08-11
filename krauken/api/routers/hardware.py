@@ -5,12 +5,14 @@ from fastapi import APIRouter, Depends
 
 from krauken.api import deps
 from krauken.api.schemas import (
+    ChamberStatusResponse,
     DeviceResponse,
     MappingGetResponse,
     MappingSaveRequest,
     MappingSaveResponse,
     ScanStartResponse,
     ScanStatusResponse,
+    StopChamberResponse,
     TestResponse,
     TestStartRequest,
 )
@@ -83,3 +85,15 @@ async def cancel_test(
 ) -> TestResponse:
     result = await client.call("hardware.test_cancel", {"test_id": test_id})
     return TestResponse(**result)
+
+
+@router.get("/hardware/chamber_status", response_model=ChamberStatusResponse)
+async def get_chamber_status(client: AsyncIPCClient = Depends(deps.daemon)) -> ChamberStatusResponse:
+    result = await client.call("hardware.chamber_status")
+    return ChamberStatusResponse(**result)
+
+
+@router.post("/hardware/stop_chamber", response_model=StopChamberResponse)
+async def stop_chamber(client: AsyncIPCClient = Depends(deps.daemon)) -> StopChamberResponse:
+    result = await client.call("hardware.stop_chamber")
+    return StopChamberResponse(**result)

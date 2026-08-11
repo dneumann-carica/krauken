@@ -1,0 +1,12 @@
+-- Tracks whether anyone has explicitly told the chamber controller to stop
+-- maintaining a completed/terminated batch's last setpoint (see
+-- daemon/fermentation.py's stop_chamber()). Nothing in the control loop
+-- ever does this on its own once a fermentation ends -- see control_loop.py's
+-- module docstring for why (it just stops ticking entirely, leaving the
+-- chamber driver's last-commanded target exactly where it was) -- so this
+-- column is the durable record of a deliberate, separate user action, not
+-- something derivable from status/ended_at alone.
+--
+-- Plain ADD COLUMN, no rebuild-and-swap needed -- nullable, no CHECK
+-- constraint involves it.
+ALTER TABLE fermentations ADD COLUMN chamber_stopped_at TEXT;

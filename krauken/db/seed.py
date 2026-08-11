@@ -1,30 +1,45 @@
-"""Demo-batch generation. Runs the shipped US-05 yeast profile through the
-plant model (platforms/simulator/plant.py) for its full duration and
-persists real fermentations/fermentation_stages/samples/events rows -- not
-fixtured data. The sampling policy (daemon/sampler.py) decides which
-computed ticks actually become `samples` rows, so this demo batch exercises
-the real variable-interval storage policy, not evenly-spaced fake data.
+"""Demo-batch generation. Runs the shipped US-05 yeast profile through a
+REAL daemon -- the exact same build_daemon()/control_loop.py production
+uses, with a SimulatorClock racing through time as fast as possible (see
+daemon/testing.py's build_scenario_daemon()) -- rather than a separately-
+invented physics approximation, so this demo batch is a genuine exercise
+of whatever relay-timing protection, gravity-stability/OG-detection, and
+plant physics are actually tuned into the system at any given moment, not
+a second copy that silently drifts out of sync with them. (An earlier
+version of this module did exactly that: it drove platforms/simulator/
+plant.py's step() directly, in its own loop, with none of
+contracts/protection.py's relay-timing state machine, none of the active-
+vs-idle chamber coefficient split, no gravity jitter, and a hardcoded OG
+-- every one of the physics fixes made against the real simulator this
+project went through simply didn't apply to the shipped demo batch.)
+
+Runs the simulation into a throwaway scratch database (so the hardware
+scan/mapping it needs doesn't leak into hardware_config/devices in the
+REAL target database -- a fresh install must still show "no hardware
+mapped yet"), then copies just the resulting profile/fermentation/stages/
+samples/events rows into the target db, with a timestamp shift so the
+batch reads as "already finished, ending right about now," and fresh,
+non-colliding ids -- the same fresh-id-per-table pattern this project's
+own scratch-run import tooling already uses.
 
 This is a one-shot administrative script (run once at build/deploy time,
-via `krauken-db seed-demo`), not part of the live daemon's control loop --
-calling datetime.now() directly here is fine; the "always use the injected
-Clock" rule is specifically about the control loop's test-compression
-requirement, which doesn't apply to a script that runs once and exits.
+via `krauken-db seed-demo`), not part of the live daemon's own control
+loop -- calling datetime.now() directly here, and spinning up an entire
+throwaway daemon+socket, is fine for a script that runs once and exits.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
-from krauken.contracts.stages import GravityGate, stage_finished, target_temp_f
-from krauken.daemon.sampler import SampleCandidate, SamplingPolicy
-from krauken.db.connection import open_rw
-from krauken.platforms.simulator import plant
-
-DT_H = 1.0 / 60.0  # 1 simulated minute per internal step
-SAFETY_CAP_H = 800.0  # generation stops here even if a gate never satisfies (should never trigger)
+from krauken.daemon.testing import build_scenario_daemon
+from krauken.db.connection import open_ro, open_rw
+from krauken.ipc.client import AsyncIPCClient
 
 # The five stages exactly as the mockup's blankPlan() defines them --
 # primary is the only one that can't be disabled. max_hours is set on every
@@ -34,167 +49,218 @@ SAFETY_CAP_H = 800.0  # generation stops here even if a gate never satisfies (sh
 # decisions).
 DEMO_STAGES: list[dict[str, Any]] = [
     {
-        "stage_type": "primary", "name": "Primary fermentation",
+        "name": "Primary fermentation",
         "temp_mode": "constant", "temp_f": 66.0,
         "end_mode": "gravity", "gravity_hi": 1.016,
         "gravity_stable_hours": 24.0, "max_hours": 240.0,
         "advance_mode": "auto",
     },
     {
-        "stage_type": "free_rise", "name": "Free rise",
+        "name": "Free rise",
         "temp_mode": "stepped", "temp_from_f": 66.0, "temp_to_f": 70.0, "ramp_hours": 24.0,
         "end_mode": "time", "end_hours": 24.0,
         "advance_mode": "auto",
     },
     {
-        "stage_type": "diacetyl_rest", "name": "Diacetyl rest",
+        "name": "Diacetyl rest",
         "temp_mode": "constant", "temp_f": 70.0,
         "end_mode": "time", "end_hours": 48.0,
         "advance_mode": "auto",
     },
     {
-        "stage_type": "conditioning", "name": "Conditioning",
+        "name": "Conditioning",
         "temp_mode": "constant", "temp_f": 68.0,
         "end_mode": "time", "end_hours": 168.0,
         "advance_mode": "auto",
     },
     {
-        "stage_type": "cold_crash", "name": "Cold crash",
+        "name": "Cold crash",
         "temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0,
         "end_mode": "time", "end_hours": 96.0,
         "advance_mode": "auto",
     },
 ]
 
+# Overall safety cap on simulated time, checked in the polling loop below --
+# catches a stuck gate (gravity never stabilizing, OG never locking), not a
+# normal completion path. Matches the old generator's own SAFETY_CAP_H.
+MAX_SIMULATED_HOURS = 800.0
+# 5 simulated minutes/tick -- coarse enough to keep tick count reasonable
+# over a multi-week profile, fine enough to stay well under the sampler's
+# gap-detection threshold (see tests/scenarios/test_full_fermentation.py's
+# own docstring for the exact math this was tuned against).
+CONTROL_TICK_INTERVAL_S = 300.0
 
-def _simulate() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Returns (stage_results, sample_rows). stage_results carries each
-    stage's actual started/ended-at (as hours-from-start, converted to real
-    timestamps by the caller) and end_actual_reason."""
-    params = plant.PlantParams(total_hours=SAFETY_CAP_H)
-    state = plant.initial_state(params)
-    policy = SamplingPolicy()
 
-    stage_results = []
-    sample_rows = []
-    last_written: SampleCandidate | None = None
-    stage_start_h = 0.0
-    gate = GravityGate()
+async def _scan_and_wait(client: AsyncIPCClient) -> None:
+    result = await client.call("hardware.scan_start")
+    scan_id = result["scan_id"]
+    for _ in range(50):
+        status = await client.call("hardware.scan_status", {"scan_id": scan_id})
+        if status["state"] == "complete":
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("scan never completed")
 
-    for stage_idx, stage in enumerate(DEMO_STAGES):
+
+async def _generate(scratch_db: Path, socket_path: Path) -> int:
+    """Runs a real daemon through the demo profile inside `scratch_db`,
+    end to end via IPC exactly as a real client would -- returns the
+    resulting fermentation_id."""
+    daemon, clock = build_scenario_daemon(
+        db_path=scratch_db, socket_path=socket_path, control_tick_interval_s=CONTROL_TICK_INTERVAL_S,
+    )
+    await daemon.start()
+    client = AsyncIPCClient(socket_path)
+    try:
+        await _scan_and_wait(client)
+        mapping = await client.call(
+            "hardware.mapping_save",
+            {"roles": {
+                "chamber_temp": "simulator:chamber",
+                "beer_temp": "simulator:tilt",
+                "beer_gravity": "simulator:tilt",
+            }},
+        )
+        if not mapping["valid"]:
+            raise RuntimeError(f"demo hardware mapping came back invalid: {mapping}")
+
+        yeasts = json.loads((Path(__file__).parent.parent / "data" / "yeasts.json").read_text())
+        yeast = yeasts["us05"]
+        started = await client.call(
+            "fermentation.start",
+            {
+                "name": "Sample batch - Citra Pale Ale", "stages": DEMO_STAGES,
+                "yeast_id": "us05", "yeast_name": yeast["name"],
+                # Auto-detected, same as any real fermentation started
+                # without one -- see contracts/og_detection.py -- not
+                # hardcoded, so the demo batch is an honest exercise of
+                # that too.
+                "og": None,
+            },
+        )
+        fermentation_id = started["fermentation_id"]
+        start_now = clock.now()
+
         while True:
-            elapsed_h = state.t_h - stage_start_h
-            target = target_temp_f(stage, elapsed_h)
-            state = plant.step(state, params, DT_H, target)
-
-            if stage["end_mode"] == "gravity":
-                gate.update(state.t_h, state.gravity, stage["gravity_stable_hours"])
-
-            candidate = SampleCandidate(
-                ts=state.t_h * 3600.0, beer_temp_f=state.beer_temp_f, chamber_temp_f=state.chamber_temp_f,
-                gravity=state.gravity, chamber_mode=state.mode,
-            )
-            reason = policy.should_write(candidate, last_written)
-            if reason is not None:
-                sample_rows.append(
-                    {
-                        "t_h": state.t_h, "beer_temp_f": state.beer_temp_f, "chamber_temp_f": state.chamber_temp_f,
-                        "gravity": state.gravity, "chamber_mode": state.mode, "effective_target_f": target,
-                        "write_reason": reason, "stage_idx": stage_idx,
-                    }
-                )
-                last_written = candidate
-
-            finished, reason_code = stage_finished(stage, elapsed_h, state.t_h, gravity_gate=gate)
-            if finished or state.t_h >= SAFETY_CAP_H:
-                stage_results.append({"stage_idx": stage_idx, "start_h": stage_start_h, "end_h": state.t_h, "end_actual_reason": reason_code})
-                stage_start_h = state.t_h
+            await asyncio.sleep(0.01)  # cooperative yield -- SimulatorClock does the actual compression
+            async with daemon.ctx.db_lock:
+                row = daemon.ctx.conn.execute(
+                    "SELECT status FROM fermentations WHERE id = ?", (fermentation_id,)
+                ).fetchone()
+            if row["status"] != "active":
                 break
+            elapsed_h = (clock.now() - start_now) / 3600.0
+            if elapsed_h > MAX_SIMULATED_HOURS:
+                raise RuntimeError(
+                    f"demo batch generation did not complete within {MAX_SIMULATED_HOURS} simulated "
+                    f"hours (last status: {row['status']}) -- likely a stuck stage-advance or gate bug"
+                )
+        return fermentation_id
+    finally:
+        await daemon.stop()
 
-    return stage_results, sample_rows
+
+def _next_id(conn, table: str) -> int:
+    row = conn.execute(f"SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM {table}").fetchone()
+    return row["next_id"]
+
+
+def _copy_into(scratch_db: Path, target_db_path: Path, fermentation_id: int) -> None:
+    """Copies just the one fermentation's profile/stages/samples/events
+    rows out of the scratch db into the target db, with fresh ids and a
+    timestamp shift so the batch reads as ending right about now."""
+    src = open_ro(scratch_db)
+    fermentation = dict(src.execute("SELECT * FROM fermentations WHERE id = ?", (fermentation_id,)).fetchone())
+    profile = dict(src.execute("SELECT * FROM profiles WHERE id = ?", (fermentation["profile_id"],)).fetchone())
+    stages = [dict(r) for r in src.execute(
+        "SELECT * FROM fermentation_stages WHERE fermentation_id = ? ORDER BY seq", (fermentation_id,)
+    ).fetchall()]
+    samples = [dict(r) for r in src.execute(
+        "SELECT * FROM samples WHERE fermentation_id = ? ORDER BY ts", (fermentation_id,)
+    ).fetchall()]
+    events = [dict(r) for r in src.execute(
+        "SELECT * FROM events WHERE fermentation_id = ? ORDER BY ts", (fermentation_id,)
+    ).fetchall()]
+    src.close()
+
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    shift = now - datetime.datetime.fromisoformat(fermentation["ended_at"])
+
+    def shifted(ts: str | None) -> str | None:
+        return (datetime.datetime.fromisoformat(ts) + shift).isoformat() if ts is not None else None
+
+    dst = open_rw(target_db_path)
+    try:
+        new_profile_id = _next_id(dst, "profiles")
+        new_fermentation_id = _next_id(dst, "fermentations")
+        stage_id_map: dict[int, int] = {}
+        next_stage_id = _next_id(dst, "fermentation_stages")
+        for s in stages:
+            stage_id_map[s["id"]] = next_stage_id
+            next_stage_id += 1
+        next_sample_id = _next_id(dst, "samples")
+        next_event_id = _next_id(dst, "events")
+
+        dst.execute("BEGIN")
+        dst.execute(
+            "INSERT INTO profiles (id, name, yeast_id, yeast_name, definition, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (new_profile_id, profile["name"], profile["yeast_id"], profile["yeast_name"],
+             profile["definition"], shifted(profile["created_at"]), shifted(profile["updated_at"])),
+        )
+        dst.execute(
+            "INSERT INTO fermentations (id, name, profile_id, status, started_at, ended_at, end_reason, og, fg, "
+            "simulated, demo, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            (new_fermentation_id, fermentation["name"], new_profile_id, fermentation["status"],
+             shifted(fermentation["started_at"]), shifted(fermentation["ended_at"]), fermentation["end_reason"],
+             fermentation["og"], fermentation["fg"], fermentation["simulated"], fermentation["notes"],
+             shifted(fermentation["created_at"])),
+        )
+        for s in stages:
+            dst.execute(
+                "INSERT INTO fermentation_stages (id, fermentation_id, seq, name, temp_mode, temp_f, "
+                "temp_from_f, temp_to_f, ramp_hours, end_mode, end_hours, hold_temp_f, hold_hours, "
+                "gravity_hi, gravity_stable_hours, min_hours, max_hours, advance_mode, state, started_at, ended_at, "
+                "criteria_met_at, end_actual_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (stage_id_map[s["id"]], new_fermentation_id, s["seq"], s["name"], s["temp_mode"],
+                 s["temp_f"], s["temp_from_f"], s["temp_to_f"], s["ramp_hours"], s["end_mode"], s["end_hours"],
+                 s["hold_temp_f"], s["hold_hours"], s["gravity_hi"], s["gravity_stable_hours"],
+                 s["min_hours"], s["max_hours"], s["advance_mode"], s["state"], shifted(s["started_at"]),
+                 shifted(s["ended_at"]), shifted(s["criteria_met_at"]), s["end_actual_reason"]),
+            )
+        for s in samples:
+            dst.execute(
+                "INSERT INTO samples (id, fermentation_id, ts, beer_temp_f, chamber_temp_f, gravity, chamber_mode, "
+                "effective_target_f, target_source, beer_temp_ok, chamber_temp_ok, gravity_ok, stage_id, "
+                "write_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (next_sample_id, new_fermentation_id, shifted(s["ts"]), s["beer_temp_f"], s["chamber_temp_f"],
+                 s["gravity"], s["chamber_mode"], s["effective_target_f"], s["target_source"], s["beer_temp_ok"],
+                 s["chamber_temp_ok"], s["gravity_ok"], stage_id_map.get(s["stage_id"]), s["write_reason"]),
+            )
+            next_sample_id += 1
+        for e in events:
+            dst.execute(
+                "INSERT INTO events (id, fermentation_id, ts, type, severity, payload) VALUES (?, ?, ?, ?, ?, ?)",
+                (next_event_id, new_fermentation_id, shifted(e["ts"]), e["type"], e["severity"], e["payload"]),
+            )
+            next_event_id += 1
+        dst.execute("COMMIT")
+    except Exception:
+        dst.execute("ROLLBACK")
+        raise
+    finally:
+        dst.close()
 
 
 def seed_demo_batch(db_path: Path | str) -> None:
-    stage_results, sample_rows = _simulate()
-    total_hours = stage_results[-1]["end_h"]
-
-    now = datetime.datetime.now(tz=datetime.timezone.utc)
-    started_at = now - datetime.timedelta(hours=total_hours)
-
-    def h_to_iso(h: float) -> str:
-        return (started_at + datetime.timedelta(hours=h)).isoformat()
-
-    yeasts = json.loads((Path(__file__).parent.parent / "data" / "yeasts.json").read_text())
-    yeast = yeasts["us05"]
-
-    conn = open_rw(db_path)
+    db_path = Path(db_path)
+    short_tmp = Path(tempfile.mkdtemp(prefix="krseed-"))  # AF_UNIX path-length limit -- see tests/api/conftest.py
+    scratch_db = short_tmp / "scratch.db"
+    socket_path = short_tmp / "d.sock"
     try:
-        conn.execute("BEGIN")
-        cur = conn.execute(
-            "INSERT INTO profiles (name, yeast_id, yeast_name, definition, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("Citra Pale Ale demo profile", "us05", yeast["name"], json.dumps(DEMO_STAGES), h_to_iso(0), h_to_iso(0)),
-        )
-        profile_id = cur.lastrowid
-
-        final_gravity = sample_rows[-1]["gravity"] if sample_rows else plant.PlantParams().gravity.terminal
-        cur = conn.execute(
-            "INSERT INTO fermentations (name, profile_id, status, started_at, ended_at, end_reason, "
-            "og, fg, simulated, demo, created_at) VALUES (?, ?, 'completed', ?, ?, NULL, ?, ?, 1, 1, ?)",
-            (
-                "Sample batch - Citra Pale Ale", profile_id, h_to_iso(0), h_to_iso(total_hours),
-                plant.PlantParams().gravity.og, round(final_gravity, 4), h_to_iso(0),
-            ),
-        )
-        fermentation_id = cur.lastrowid
-
-        stage_ids = []
-        for sr in stage_results:
-            stage = DEMO_STAGES[sr["stage_idx"]]
-            cur = conn.execute(
-                "INSERT INTO fermentation_stages (fermentation_id, seq, stage_type, name, temp_mode, temp_f, "
-                "temp_from_f, temp_to_f, ramp_hours, end_mode, end_hours, hold_temp_f, hold_hours, gravity_lo, "
-                "gravity_hi, gravity_stable_hours, min_hours, max_hours, advance_mode, state, started_at, "
-                "ended_at, criteria_met_at, end_actual_reason) VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'finished', ?, ?, ?, ?)",
-                (
-                    fermentation_id, sr["stage_idx"], stage["stage_type"], stage["name"], stage["temp_mode"],
-                    stage.get("temp_f"), stage.get("temp_from_f"), stage.get("temp_to_f"), stage.get("ramp_hours"),
-                    stage["end_mode"], stage.get("end_hours"), stage.get("hold_temp_f"), stage.get("hold_hours"),
-                    stage.get("gravity_lo"), stage.get("gravity_hi"), stage.get("gravity_stable_hours"),
-                    stage.get("min_hours"), stage.get("max_hours"), stage["advance_mode"],
-                    h_to_iso(sr["start_h"]), h_to_iso(sr["end_h"]), h_to_iso(sr["end_h"]), sr["end_actual_reason"],
-                ),
-            )
-            stage_ids.append(cur.lastrowid)
-            conn.execute(
-                "INSERT INTO events (fermentation_id, ts, type, severity, payload) VALUES (?, ?, 'stage_advanced', 'info', ?)",
-                (fermentation_id, h_to_iso(sr["end_h"]), json.dumps({"reason": sr["end_actual_reason"], "stage": stage["name"]})),
-            )
-
-        for row in sample_rows:
-            conn.execute(
-                "INSERT INTO samples (fermentation_id, ts, beer_temp_f, chamber_temp_f, gravity, chamber_mode, "
-                "effective_target_f, target_source, beer_temp_ok, chamber_temp_ok, gravity_ok, stage_id, write_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'profile', 1, 1, 1, ?, ?)",
-                (
-                    fermentation_id, h_to_iso(row["t_h"]), round(row["beer_temp_f"], 2), round(row["chamber_temp_f"], 2),
-                    round(row["gravity"], 4), row["chamber_mode"], round(row["effective_target_f"], 2),
-                    stage_ids[row["stage_idx"]], row["write_reason"],
-                ),
-            )
-
-        conn.execute(
-            "INSERT INTO events (fermentation_id, ts, type, severity, payload) VALUES (?, ?, 'fermentation_started', 'info', '{}')",
-            (fermentation_id, h_to_iso(0)),
-        )
-        conn.execute(
-            "INSERT INTO events (fermentation_id, ts, type, severity, payload) VALUES (?, ?, 'fermentation_completed', 'info', '{}')",
-            (fermentation_id, h_to_iso(total_hours)),
-        )
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+        fermentation_id = asyncio.run(_generate(scratch_db, socket_path))
+        _copy_into(scratch_db, db_path, fermentation_id)
     finally:
-        conn.close()
+        shutil.rmtree(short_tmp, ignore_errors=True)

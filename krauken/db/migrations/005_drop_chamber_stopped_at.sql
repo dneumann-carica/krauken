@@ -1,0 +1,12 @@
+-- Reverts 004_chamber_stopped.sql's per-fermentation flag. The UI's "turn
+-- off the chamber" action moved from a per-batch button to a global
+-- notification (there's exactly one physical chamber; whether it's
+-- currently holding a setpoint is a live fact about IT, not a historical
+-- fact about whichever batch last commanded it) -- see
+-- daemon/hardware.py's chamber_status()/stop_chamber(), which read the
+-- driver's own commanded_target() directly instead of a persisted flag.
+--
+-- Plain DROP COLUMN (SQLite 3.35+, in place since well before this
+-- project's minimum supported version) -- no CHECK/index referenced it,
+-- so no rebuild-and-swap needed.
+ALTER TABLE fermentations DROP COLUMN chamber_stopped_at;

@@ -20,7 +20,7 @@ from krauken.ipc.client import AsyncIPCClient
 
 FULL_PROFILE_STAGES = [
     {
-        "stage_type": "primary", "name": "Primary", "temp_mode": "constant", "temp_f": 68.0,
+        "name": "Primary", "temp_mode": "constant", "temp_f": 68.0,
         # A realistic profile: gravity must (a) be at/below gravity_hi, (b)
         # stay there continuously, (c) for a full 24h -- not a shortened
         # window. See GravityGate/stage_finished in contracts/stages.py.
@@ -28,11 +28,11 @@ FULL_PROFILE_STAGES = [
         "advance_mode": "auto",
     },
     {
-        "stage_type": "diacetyl_rest", "name": "Diacetyl rest", "temp_mode": "constant", "temp_f": 72.0,
+        "name": "Diacetyl rest", "temp_mode": "constant", "temp_f": 72.0,
         "end_mode": "time", "end_hours": 48.0, "advance_mode": "auto",
     },
     {
-        "stage_type": "cold_crash", "name": "Cold crash", "temp_mode": "constant", "temp_f": 34.0,
+        "name": "Cold crash", "temp_mode": "constant", "temp_f": 34.0,
         "end_mode": "time", "end_hours": 96.0, "advance_mode": "auto",
     },
 ]
@@ -41,11 +41,11 @@ MAX_SIMULATED_DAYS = 30
 
 TEST_STAGES = [
     {
-        "stage_type": "primary", "name": "Primary", "temp_mode": "constant", "temp_f": 68.0,
+        "name": "Primary", "temp_mode": "constant", "temp_f": 68.0,
         "end_mode": "time", "end_hours": 4.0, "advance_mode": "auto",
     },
     {
-        "stage_type": "cold_crash", "name": "Cold crash", "temp_mode": "constant", "temp_f": 55.0,
+        "name": "Cold crash", "temp_mode": "constant", "temp_f": 55.0,
         "end_mode": "time", "end_hours": 2.0, "advance_mode": "auto",
     },
 ]

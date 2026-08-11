@@ -24,15 +24,17 @@ def test_demo_fermentation_is_marked_demo_and_simulated_and_completed(seeded_db:
     assert row["simulated"] == 1
     assert row["status"] == "completed"
     assert row["ended_at"] is not None
-    assert row["og"] == pytest.approx(1.052)
+    # og is auto-detected (contracts/og_detection.py), not hardcoded, so it
+    # lands close to the simulator's true OG (1.052) but not exactly on it.
+    assert row["og"] == pytest.approx(1.052, abs=0.01)
     assert 1.003 < row["fg"] < 1.008
 
 
 def test_all_five_stages_present_in_order_and_finished(seeded_db: Path):
     conn = open_ro(seeded_db)
     stages = conn.execute("SELECT * FROM fermentation_stages ORDER BY seq").fetchall()
-    assert [s["stage_type"] for s in stages] == [
-        "primary", "free_rise", "diacetyl_rest", "conditioning", "cold_crash",
+    assert [s["name"] for s in stages] == [
+        "Primary fermentation", "Free rise", "Diacetyl rest", "Conditioning", "Cold crash",
     ]
     assert all(s["state"] == "finished" for s in stages)
     assert stages[0]["end_actual_reason"] == "gravity"

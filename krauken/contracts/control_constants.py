@@ -23,6 +23,20 @@ BEER_TRIGGER_BAND_F: Final[float] = 0.5  # fire when |beer - target| exceeds thi
 BEER_RELEASE_OFFSET_F: Final[float] = 0.0  # release when beer crosses back through target
 CHAMBER_COOL_CLAMP_F: Final[float] = 5.0  # cool demand -> chamber target = beer_target - 5
 CHAMBER_HEAT_CLAMP_F: Final[float] = 4.0  # heat demand -> chamber target = beer_target + 4
+# Assumed beer<->chamber thermal responsiveness, used ONLY to size how much
+# extra the clamps above need to grow while the beer's OWN target is
+# actively ramping (see cascade.chamber_target_for's docstring) -- a fixed
+# clamp is plenty to correct a deviation from a HELD setpoint, but a target
+# that's ramping down (e.g. a cold crash) keeps moving out from under a
+# fixed-offset chamber, so the beer settles into a permanent lag behind it
+# instead of ever closing the gap. Expressed the same way plant.py's own
+# beer_chamber_coupling is (the fraction of the beer/chamber gap the beer
+# closes per hour) so the parallel reads directly, but this is a control-
+# side ASSUMPTION about a typical fermenter's thermal mass, not a physics
+# measurement pulled from the simulator -- real hardware has no such
+# constant to read, so the cascade has to assume one, exactly the way the
+# two clamps above already are assumed/tuned rather than derived.
+RAMP_FEEDFORWARD_COUPLING_PER_H: Final[float] = 0.05
 
 # --- chamber/actuator side (enforced in the Hardware Supervisor) ---
 CHAMBER_DEADBAND_F: Final[float] = 0.5  # NOT from the mock -- see module docstring; the

@@ -16,6 +16,15 @@ class ChamberDriver(Protocol):
     async def set_target(self, temp_f: float | None) -> None:
         """None = idle (no target -- chamber controller de-energizes)."""
         ...
+    async def commanded_target(self) -> float | None:
+        """Whatever the last set_target() call commanded, right now --
+        None if nothing has ever been commanded, or the most recent call
+        was set_target(None). A pure peek: unlike read_chamber(), this
+        never advances any physics/clock state, so it's safe to call from
+        an on-demand status check (e.g. "is the chamber still holding a
+        setpoint with no fermentation running") without the timing
+        concerns read_chamber()'s own docstring warns about."""
+        ...
 
 
 @runtime_checkable

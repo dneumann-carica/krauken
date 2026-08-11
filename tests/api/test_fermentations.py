@@ -43,8 +43,8 @@ async def test_get_fermentation_detail_includes_all_five_stages(client: AsyncCli
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["stages"]) == 5
-    assert [s["stage_type"] for s in body["stages"]] == [
-        "primary", "free_rise", "diacetyl_rest", "conditioning", "cold_crash",
+    assert [s["name"] for s in body["stages"]] == [
+        "Primary fermentation", "Free rise", "Diacetyl rest", "Conditioning", "Cold crash",
     ]
 
 
