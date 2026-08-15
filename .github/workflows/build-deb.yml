@@ -32,10 +32,17 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install Debian packaging tools
+        # nodejs/npm are ALSO installed here via apt, even though
+        # actions/setup-node above already put a newer Node on PATH for
+        # the actual frontend build -- dpkg-checkbuilddeps (which
+        # dpkg-buildpackage runs first) only consults dpkg's own installed-
+        # package database to satisfy debian/control's Build-Depends, not
+        # PATH, so setup-node's tool-cache install is invisible to it and
+        # the build fails with "Unmet build dependencies" without this.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            debhelper dpkg-dev devscripts build-essential
+            debhelper dpkg-dev devscripts build-essential nodejs npm
 
       # debian/rules' override_dh_auto_test creates its own throwaway venv
       # and runs the real pytest suite against THIS source, on this build
