@@ -5,6 +5,60 @@ deployment-shape conversation (packaging, CI/CD, legacy-BrewPi handling),
 `krauken-hwid` (the Krauken HAT EEPROM provisioning tool), and now the
 actual `.deb`/Actions/Pages pipeline itself.
 
+## v0.1.1: two real bugs found on the first actual install on real hardware
+
+v0.1.0 installed "successfully" (dpkg reported it as fully configured) on
+your actual brewpi.local Pi, but wasn't actually functional -- caught by
+you running the real install and pasting the output, not by me predicting
+it:
+
+1. **Systemd units were never shipped at all.** `dh_installsystemd`'s
+   default lookup only ever matches a single `debian/<package>.<EXTENSION>`
+   unit named after the package itself -- confirmed against the real
+   `dh_installsystemd(1)` man page, not assumed. It does NOT glob
+   `debian/<package>.<name>.service` for multiple, differently-named units
+   the way I'd assumed (unlike `dh_installtmpfiles`, whose simpler
+   single-file convention happened to just work, which is why that half
+   looked fine). Net effect: `dpkg -L krauken` shipped zero systemd units,
+   `systemctl status krauken-api` said "could not be found", and the API
+   was never running -- despite apt reporting a clean install. Fixed with
+   an explicit `override_dh_installsystemd` in `debian/rules` naming each
+   of the four real units. `krauken-supervisor` deliberately excluded --
+   its own unit file says "NOT YET FUNCTIONAL... do not enable this unit
+   yet", and there's no `krauken-supervisor` console script in
+   `pyproject.toml` either, so auto-enabling it would have failed to
+   start on every install.
+2. **A real, if harmless, `postinst` bug**: the introductory comment
+   explaining what the `#DEBHELPER#` marker does *spelled out the literal
+   token itself* -- `dh_installdeb`'s snippet-merging is a plain global
+   text substitution, so it matched that accidental occurrence too,
+   splicing the generated tmpfiles-create snippet into the middle of the
+   comment and leaving a stray word behind ("marker") that the shell then
+   tried to execute, printing "marker: not found" during install. Survived
+   harmlessly because it landed *before* `set -e` took effect in the
+   corrupted file, so the script kept going and everything after it (user
+   creation, venv, config) still completed -- but alarming to see, and
+   worth fixing regardless. Reworded the comment to describe the marker
+   without repeating its literal token.
+
+Diagnosed by SSHing into your actual Pi (`doug@brewpi.local`, key auth
+already set up from your own history) and reading real state directly:
+`dpkg -L krauken`'s full file manifest, the actual installed
+`/var/lib/dpkg/info/krauken.postinst` (which is what revealed the exact
+corruption, not the source file), `systemctl status`, and the real GitHub
+Actions build log (confirmed `dh_installsystemd` produced zero output,
+unlike `dh_installtmpfiles` right above it in the same log). Shipped as a
+genuine version bump to **0.1.1** in `debian/changelog`, not another
+`v0.1.0` retag -- you already have a real v0.1.0 `.deb` installed and
+running on real hardware, so silently swapping what that tag points to
+would be dishonest versioning at this point, unlike the earlier rounds
+where nothing had actually consumed the tag yet.
+
+**Still not verified**: whether the now-enabled `krauken-api`/
+`krauken-daemon`/`krauken-manual`/`krauken-simulator` units actually start
+cleanly and the web UI is reachable end-to-end on your Pi once you install
+`0.1.1` -- next step is confirming that for real.
+
 ## Both release blockers now resolved
 
 1. **Repo visibility.** Per your call, made public:

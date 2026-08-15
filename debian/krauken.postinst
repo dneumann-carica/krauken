@@ -6,11 +6,19 @@
 # pydantic-core, which a GitHub Actions x86_64 runner cross-building or
 # QEMU-emulating for armv6l cannot reliably guarantee).
 #
-# The #DEBHELPER# marker below is where dh_installsystemd/
-# dh_installtmpfiles insert their own auto-generated snippets (systemctl
-# enable/start, systemd-tmpfiles --create) -- deliberately NOT hand-rolled
-# here, since debhelper's own generated logic already handles the
-# upgrade/fresh-install/reinstall cases correctly.
+# The debhelper marker near the bottom of this file is where
+# dh_installsystemd/dh_installtmpfiles insert their own auto-generated
+# snippets (systemctl enable/start, systemd-tmpfiles --create) --
+# deliberately NOT hand-rolled here, since debhelper's own generated logic
+# already handles the upgrade/fresh-install/reinstall cases correctly.
+# NOTE: don't spell that marker's literal token out in this comment --
+# dh_installdeb's substitution is a plain global text replace, so writing
+# it here too would splice the generated snippet into the MIDDLE of this
+# comment instead of only at the real marker line below. Exactly this
+# happened once already: it left a stray, uncommented word behind that
+# the shell then tried to execute as a command ("marker: not found"),
+# printed but harmless since it landed before `set -e` took effect --
+# caught via a real install on real hardware, not by inspection.
 set -e
 
 . /usr/share/debconf/confmodule

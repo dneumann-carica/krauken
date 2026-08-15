@@ -1,3 +1,25 @@
+krauken (0.1.1) stable; urgency=high
+
+  * Fix: dh_installsystemd's default lookup only ever matches a single
+    debian/<package>.<EXTENSION> unit named after the package itself --
+    it does not glob debian/<package>.<name>.service for multiple,
+    differently-named units on its own. v0.1.0 shipped with zero
+    systemd units installed as a result (confirmed via a real install:
+    dpkg -L krauken listed no unit files, systemctl couldn't find
+    krauken-api/krauken-daemon, the API was never running). Added an
+    explicit override_dh_installsystemd in debian/rules naming each of
+    the four real units (krauken-supervisor deliberately excluded --
+    not yet functional, see its own unit file comment).
+  * Fix: krauken.postinst's own introductory comment spelled out the
+    literal #DEBHELPER# token while describing it, which
+    dh_installdeb's plain text substitution then spliced the real
+    generated snippet into -- left a stray word behind that the shell
+    printed "not found" for. Harmless in practice (landed before `set
+    -e` took effect) but alarming; reworded to not repeat the literal
+    token.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 15 Aug 2026 11:56:49 -0400
+
 krauken (0.1.0) stable; urgency=medium
 
   * Initial packaged release: control daemon, API, web UI, BrewPi/Tilt

@@ -52,14 +52,6 @@ override_dh_auto_install:
 	mkdir -p debian/krauken/opt/krauken/eeptools-src
 	cp -r vendor/rpi-utils/eeptools/* debian/krauken/opt/krauken/eeptools-src/
 
-	# systemd units and the tmpfiles.d rule are NOT copied here --
-	# debian/krauken.*.service and debian/krauken.tmpfiles (symlinks into
-	# deploy/, one source of truth) are picked up automatically by
-	# dh_installsystemd/dh_installtmpfiles as part of the plain `dh $@`
-	# sequence, which also generates the correct enable/start/create
-	# maintainer-script snippets -- more reliable than hand-rolling that
-	# logic in postinst ourselves.
-
 	# Shipped as .example, never as the live config -- postinst copies
 	# this to /etc/krauken/krauken.conf only if that doesn't already
 	# exist, so an upgrade never clobbers a real, edited config. The
@@ -67,3 +59,25 @@ override_dh_auto_install:
 	# conffile -- see debian/krauken.postinst).
 	mkdir -p debian/krauken/etc/krauken
 	cp deploy/krauken.conf.example debian/krauken/etc/krauken/krauken.conf.example
+
+# dh_installtmpfiles' default lookup (bare debian/<package>.tmpfiles, a
+# single file) just works -- but dh_installsystemd's default lookup ONLY
+# ever checks debian/<package>.<EXTENSION> (a SINGLE unit named after the
+# package itself). For multiple, differently-named units it does NOT
+# glob debian/<package>.<name>.service on its own -- each one needs its
+# own explicit --name= invocation (confirmed against the real
+# dh_installsystemd(1) man page, not assumed). Without this override,
+# dh_installsystemd silently installed nothing at all -- confirmed via a
+# real install on real hardware: `dpkg -L krauken` shipped zero systemd
+# units, `systemctl status krauken-api` said "could not be found", and
+# the API was never running despite the package reporting successful
+# install. krauken-supervisor is deliberately NOT listed here --
+# deploy/krauken-supervisor.service's own comment says "NOT YET
+# FUNCTIONAL... do not enable this unit yet" (no krauken-supervisor
+# console script exists in pyproject.toml's [project.scripts] either),
+# so auto-enabling it would fail to start on every install.
+override_dh_installsystemd:
+	dh_installsystemd --name=krauken-daemon
+	dh_installsystemd --name=krauken-api
+	dh_installsystemd --name=krauken-manual
+	dh_installsystemd --name=krauken-simulator
