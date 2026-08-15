@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Krauken</title>
+<meta name="description" content="Open-source fermentation chamber controller for BrewPi, Tilt, and the Krauken PCB -- apt install instructions and project overview.">
+<style>
+  :root {
+    --bg: #faf8f5;
+    --bg-raised: #ffffff;
+    --text: #2b2420;
+    --text-dim: #6b6058;
+    --border: #e4ddd3;
+    --accent: #a05a2c;
+    --accent-text: #ffffff;
+    --code-bg: #2b2420;
+    --code-text: #f3ede4;
+    --code-border: #453a30;
+    --link: #8a4a1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1815;
+      --bg-raised: #262019;
+      --text: #ece5db;
+      --text-dim: #a89c8d;
+      --border: #3a322a;
+      --accent: #d98b4f;
+      --accent-text: #1c1815;
+      --code-bg: #14110e;
+      --code-text: #f3ede4;
+      --code-border: #3a322a;
+      --link: #e2a06a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+  main {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 3rem 1.25rem 4rem;
+  }
+  header.hero { margin-bottom: 2.5rem; }
+  .hero h1 {
+    font-size: 2rem;
+    margin: 0 0 0.35rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .hero p.tagline {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 1.05rem;
+  }
+  .badges {
+    margin-top: 0.9rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.8rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    background: var(--bg-raised);
+  }
+  section { margin-bottom: 2.25rem; }
+  h2 {
+    font-size: 1.15rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin: 0 0 0.9rem;
+  }
+  p { margin: 0 0 0.9rem; }
+  .callout {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 0.35rem;
+    padding: 0.85rem 1rem;
+    font-size: 0.95rem;
+    color: var(--text-dim);
+  }
+  ul { padding-left: 1.25rem; margin: 0 0 0.9rem; }
+  li { margin-bottom: 0.4rem; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    padding: 0.1rem 0.35rem;
+  }
+  .install-block {
+    position: relative;
+    background: var(--code-bg);
+    color: var(--code-text);
+    border: 1px solid var(--code-border);
+    border-radius: 0.5rem;
+    padding: 1.1rem 1rem;
+    overflow-x: auto;
+  }
+  .install-block pre {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    white-space: pre;
+  }
+  .copy-btn {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
+    font-size: 0.75rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: 0.3rem;
+    border: 1px solid var(--code-border);
+    background: transparent;
+    color: var(--code-text);
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .copy-btn:hover { background: rgba(255,255,255,0.08); }
+  a { color: var(--link); }
+  footer {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border);
+    padding-top: 1.25rem;
+  }
+  footer a { color: inherit; text-decoration: underline; }
+  .links { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-bottom: 0.6rem; }
+</style>
+</head>
+<body>
+<main>
+
+  <header class="hero">
+    <h1>🦑 Krauken</h1>
+    <p class="tagline">Open-source fermentation chamber controller for a Raspberry Pi.</p>
+    <div class="badges">
+      <span class="badge">v{{VERSION}}</span>
+      <span class="badge">Raspberry Pi OS</span>
+      <span class="badge">Debian package</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>What this is</h2>
+    <p>
+      Krauken drives a fermentation chamber end to end: a control daemon and
+      hardware supervisor, a web API, and a React frontend, all running as one
+      service on a Raspberry Pi. It can talk to a BrewPi-compatible Arduino
+      controller, Tilt hydrometers over Bluetooth LE, and the Krauken
+      project's own custom PCB -- pick whichever hardware you actually have.
+    </p>
+    <div class="callout">
+      Early days -- v{{VERSION}}. This is a DIY project: the Krauken PCB
+      isn't sold anywhere, so most of what you'll actually run today is the
+      BrewPi/Tilt support. Expect rough edges.
+    </div>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+    <p>Adds this apt repository, then installs the package normally:</p>
+    <div class="install-block">
+      <button class="copy-btn" type="button" data-copy-target="install-cmd">Copy</button>
+      <pre id="install-cmd">curl -fsSL {{PAGES_URL}}/krauken-archive-keyring.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/krauken-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/krauken-archive-keyring.gpg] {{PAGES_URL}} stable main" \
+  | sudo tee /etc/apt/sources.list.d/krauken.list
+
+sudo apt update && sudo apt install krauken</pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Before you install</h2>
+    <ul>
+      <li>Target is Raspberry Pi OS (or any Debian-based distro) on a Pi --
+        <code>armv6l</code>, <code>armhf</code>, and <code>arm64</code> are all supported.</li>
+      <li>The package ships as source, not a prebuilt binary: on first
+        install, it creates a real Python virtualenv and compiles a small
+        EEPROM utility natively on your Pi (using
+        <a href="https://www.piwheels.org/">piwheels.org</a> for prebuilt
+        wheels of compiled dependencies). This needs network access and
+        takes longer than a typical <code>apt install</code>.</li>
+      <li>If <code>brewpi.service</code> is already running on the box, the
+        installer asks before stopping/disabling it -- it never deletes
+        BrewPi's own files.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>After you install</h2>
+    <p>Check it's running:</p>
+    <div class="install-block">
+      <pre>systemctl status krauken-api krauken-daemon</pre>
+    </div>
+    <p>
+      By default the web API only listens on <code>127.0.0.1:8080</code>
+      (localhost). To reach it from another device on your network, edit
+      <code>/etc/krauken/krauken.conf</code>, set
+      <code>KRAUKEN_API_HOST=0.0.0.0</code>, then
+      <code>sudo systemctl restart krauken-api</code> and browse to
+      <code>http://&lt;your-pi's-address&gt;:8080</code>.
+    </p>
+  </section>
+
+  <footer>
+    <div class="links">
+      <a href="https://github.com/dneumann-carica/krauken">Source on GitHub</a>
+      <a href="https://github.com/dneumann-carica/krauken/releases">Releases</a>
+      <a href="https://github.com/dneumann-carica/krauken/issues">Issues</a>
+    </div>
+    Repository built and published {{BUILD_DATE}} from
+    <a href="https://github.com/dneumann-carica/krauken">dneumann-carica/krauken</a>.
+  </footer>
+
+</main>
+<script>
+  document.querySelectorAll(".copy-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var target = document.getElementById(btn.getAttribute("data-copy-target"));
+      if (!target || !navigator.clipboard) return;
+      navigator.clipboard.writeText(target.textContent).then(function () {
+        var original = btn.textContent;
+        btn.textContent = "Copied";
+        setTimeout(function () { btn.textContent = original; }, 1500);
+      });
+    });
+  });
+</script>
+</body>
+</html>

@@ -69,21 +69,22 @@ gpg --batch --yes "${GPG_USER_ARGS[@]}" --clearsign --output "${DISTS_DIR}/InRel
 
 cp "$PUBKEY_FILE" "${OUT_DIR}/krauken-archive-keyring.asc"
 
-cat > "${OUT_DIR}/index.html" <<EOF
-<!doctype html>
-<title>Krauken apt repository</title>
-<pre>
-Add this repository, then install normally:
-
-  curl -fsSL ${PAGES_URL}/krauken-archive-keyring.asc \\
-    | sudo gpg --dearmor -o /usr/share/keyrings/krauken-archive-keyring.gpg
-
-  echo "deb [signed-by=/usr/share/keyrings/krauken-archive-keyring.gpg] ${PAGES_URL} stable main" \\
-    | sudo tee /etc/apt/sources.list.d/krauken.list
-
-  sudo apt update && sudo apt install krauken
-</pre>
-EOF
+# The homepage/install page is a real template file (scripts/
+# pages-index-template.html), not an inline heredoc -- {{PLACEHOLDER}}
+# tokens filled in with values only known at publish time. VERSION comes
+# from the actual built .deb (dpkg-deb, part of the base dpkg package, no
+# extra install needed) rather than being passed in separately, so it can
+# never drift from what's really in the pool. `#` as the sed delimiter
+# since PAGES_URL contains `/`.
+DEB_FILE="$(find "$POOL_DIR" -maxdepth 1 -name '*.deb' | head -n1)"
+VERSION="$(dpkg-deb --field "$DEB_FILE" Version)"
+BUILD_DATE="$(date -u +%Y-%m-%d)"
+TEMPLATE="$(dirname "$0")/pages-index-template.html"
+sed \
+    -e "s#{{PAGES_URL}}#${PAGES_URL}#g" \
+    -e "s#{{VERSION}}#${VERSION}#g" \
+    -e "s#{{BUILD_DATE}}#${BUILD_DATE}#g" \
+    "$TEMPLATE" > "${OUT_DIR}/index.html"
 
 echo "Published apt repo to ${OUT_DIR}:"
 find "$OUT_DIR" -type f | sort
