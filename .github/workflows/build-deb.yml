@@ -106,7 +106,12 @@ jobs:
       - name: Build and sign the apt repository
         env:
           GPG_KEY_ID: ${{ secrets.KRAUKEN_GPG_KEY_ID }}
-        run: ./scripts/publish-apt-repo.sh dist public krauken-archive-keyring.asc "$GPG_KEY_ID"
+          # Project-Pages URLs are deterministic (https://<owner>.github.io/<repo>)
+          # and already confirmed live via `gh api .../pages` -- computed from
+          # github.repository rather than hardcoded so a repo rename/transfer
+          # can't silently make the published index.html wrong.
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: ./scripts/publish-apt-repo.sh dist public krauken-archive-keyring.asc "$GPG_KEY_ID" "$PAGES_URL"
 
       - name: Attach .deb to the GitHub Release
         uses: softprops/action-gh-release@v2

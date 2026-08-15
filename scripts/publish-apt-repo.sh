@@ -10,18 +10,21 @@
 # tree (Packages/Release/InRelease + a pool/ of .debs) served over HTTPS,
 # the same shape any apt repo is under the hood.
 #
-# Usage: publish-apt-repo.sh <deb-dir> <output-dir> <public-key-armor-file> [gpg-key-id]
+# Usage: publish-apt-repo.sh <deb-dir> <output-dir> <public-key-armor-file> [gpg-key-id] [pages-url]
 # gpg-key-id is optional -- if omitted, gpg falls back to "the only secret
 # key in the keyring", which is correct right after a fresh --import of
 # exactly our one signing key, but passing it explicitly (matches
 # KRAUKEN_GPG_KEY_ID in the workflow) avoids ever depending on that being
-# implicitly true.
+# implicitly true. pages-url is optional too -- fills in the generated
+# index.html's install instructions with the real, copy-pasteable URL
+# instead of a <this-pages-url> placeholder.
 set -euo pipefail
 
-DEB_DIR="${1:?usage: publish-apt-repo.sh <deb-dir> <output-dir> <public-key-armor-file> [gpg-key-id]}"
+DEB_DIR="${1:?usage: publish-apt-repo.sh <deb-dir> <output-dir> <public-key-armor-file> [gpg-key-id] [pages-url]}"
 OUT_DIR="${2:?}"
 PUBKEY_FILE="${3:?}"
 GPG_KEY_ID="${4:-}"
+PAGES_URL="${5:-<this-pages-url>}"
 GPG_USER_ARGS=()
 if [ -n "$GPG_KEY_ID" ]; then
     GPG_USER_ARGS=(--local-user "$GPG_KEY_ID")
@@ -66,16 +69,16 @@ gpg --batch --yes "${GPG_USER_ARGS[@]}" --clearsign --output "${DISTS_DIR}/InRel
 
 cp "$PUBKEY_FILE" "${OUT_DIR}/krauken-archive-keyring.asc"
 
-cat > "${OUT_DIR}/index.html" <<'EOF'
+cat > "${OUT_DIR}/index.html" <<EOF
 <!doctype html>
 <title>Krauken apt repository</title>
 <pre>
 Add this repository, then install normally:
 
-  curl -fsSL https://&lt;this-pages-url&gt;/krauken-archive-keyring.asc \
+  curl -fsSL ${PAGES_URL}/krauken-archive-keyring.asc \\
     | sudo gpg --dearmor -o /usr/share/keyrings/krauken-archive-keyring.gpg
 
-  echo "deb [signed-by=/usr/share/keyrings/krauken-archive-keyring.gpg] https://&lt;this-pages-url&gt; stable main" \
+  echo "deb [signed-by=/usr/share/keyrings/krauken-archive-keyring.gpg] ${PAGES_URL} stable main" \\
     | sudo tee /etc/apt/sources.list.d/krauken.list
 
   sudo apt update && sudo apt install krauken

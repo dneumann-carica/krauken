@@ -5,34 +5,45 @@ deployment-shape conversation (packaging, CI/CD, legacy-BrewPi handling),
 `krauken-hwid` (the Krauken HAT EEPROM provisioning tool), and now the
 actual `.deb`/Actions/Pages pipeline itself.
 
-## Two things blocking a real (not just written) release — need your input
+## Both release blockers now resolved
 
-1. **The repo is private** (confirmed via `gh repo view`). `actions/
-   deploy-pages` needs GitHub Pages enabled, and Pages on a private repo
-   is a paid-plan feature (Free doesn't support it) — I can't tell from
-   here whether your account's plan covers this. Options: confirm your
-   plan supports it and I'll enable Pages via the API; make the repo
-   public; or host the apt repo somewhere other than Pages (a different
-   static host, or skip the "add our apt repo" experience and only ship
-   the raw `.deb` via GitHub Releases, which needs no Pages at all).
-2. **No GPG signing key exists yet.** I didn't generate one unilaterally
-   — a production signing key that ends up trusted by everyone who
-   installs this is exactly the kind of thing worth your explicit call
-   rather than me silently picking parameters. Do you want me to generate
-   a fresh keypair now and install it as `KRAUKEN_GPG_PRIVATE_KEY`/
-   `KRAUKEN_GPG_KEY_ID` repo secrets (I have the `gh` access to do this
-   directly), or do you have an existing key/process you'd rather use?
+1. **Repo visibility.** Per your call, made public:
+   `gh repo edit --visibility public --accept-visibility-change-consequences`,
+   confirmed via `gh repo view --json visibility` → `PUBLIC`. GitHub Pages
+   enabled with Actions as the build source (`gh api -X POST
+   repos/dneumann-carica/krauken/pages -f "build_type=workflow"`), live at
+   `https://dneumann-carica.github.io/krauken/`. The publish script and
+   workflow now bake this real URL into the generated `index.html` and
+   sources.list snippet instead of a placeholder (computed in the workflow
+   from `github.repository_owner`/`github.event.repository.name`, so a
+   repo rename/transfer can't silently make it wrong).
+2. **GPG signing key.** Per your call ("generate one now"), generated a
+   fresh passphrase-less RSA 4096 keypair (passphrase-less is standard
+   practice for CI-signing keys — the repo secret's confidentiality is the
+   actual security boundary, not an interactive unlock) in an isolated,
+   short-lived `GNUPGHOME`, exported the private key straight into
+   `gh secret set KRAUKEN_GPG_PRIVATE_KEY` and the key ID into
+   `KRAUKEN_GPG_KEY_ID` (both confirmed present via `gh secret list`), then
+   destroyed the temporary keyring — no private-key material persists
+   anywhere outside that one GitHub repo secret. Public key fingerprint,
+   for your own records/verification:
+   `4929 5A61 2171 3934 2318 750C 9ABE 1A1D C0A3 08B2` (key ID
+   `9ABE1A1DC0A308B2`). The `.deb` consumer never needs this file
+   separately — the workflow re-exports the public key from the secret at
+   every build (`.github/workflows/build-deb.yml`'s "Export the public
+   key" step) and publishes it alongside the repo as
+   `krauken-archive-keyring.asc`.
 
-Nothing else below is blocked on these two — the actual pipeline code is
-written, and validated as much as possible without a real Debian/Linux
-host: `dpkg-source`/`dpkg-parsechangelog`/`dpkg-buildpackage`'s own
-pre-flight checks all pass locally (source format, changelog, control
-field syntax), and `actionlint` + `shellcheck` are clean on the workflow
-and every shell script. What's NOT yet verified: a full `dpkg-buildpackage`
-run (needs `debhelper`, which isn't packaged for macOS -- Docker/Colima
-wouldn't start locally either, so this needs a real CI run to confirm),
-and obviously the signing/Pages steps themselves, pending the two
-decisions above.
+The actual pipeline code is written, and validated as much as possible
+without a real Debian/Linux host: `dpkg-source`/`dpkg-parsechangelog`/
+`dpkg-buildpackage`'s own pre-flight checks all pass locally (source
+format, changelog, control field syntax), and `actionlint` + `shellcheck`
+are clean on the workflow and every shell script. What's NOT yet verified:
+a full `dpkg-buildpackage` run (needs `debhelper`, which isn't packaged
+for macOS -- Docker/Colima wouldn't start locally either), and the actual
+signing/Pages steps end-to-end. **Next real step: push a `v0.1.0` tag and
+watch the workflow run for real** (`gh run watch`) — this is the first
+genuine full-pipeline verification.
 
 ## Packaging shape — built
 
