@@ -133,10 +133,39 @@ copy/design, three are real behavior changes:
   skipped" -- while leaving the real, working mechanism in place for
   when the flag flips.
 
-Not yet re-verified against a real CI run as of this edit -- next step is
-moving the `v0.1.0` tag forward again and confirming the rendered
-homepage and the (still-skipped) eeptools gating both behave as
-expected.
+This round was verified live (moved the `v0.1.0` tag forward, watched the
+run go green, confirmed the rendered content on the actual Pages URL).
+
+## Homepage: layout fix + BrewPi-first framing, per your next round of review
+
+More feedback after seeing the live page:
+
+- **Layout bug, confirmed by screenshot**: the Copy button overlapped the
+  install command text, and long lines didn't wrap (had to scroll
+  horizontally to read them, easy to miss on mobile). Root cause: the
+  button was `position: absolute` with no reserved clearance from the
+  `<pre>` below it, and `.install-block pre` used `white-space: pre`
+  (never wraps) instead of `pre-wrap`. Fixed: `pre-wrap` +
+  `overflow-wrap: anywhere` so long lines wrap within the block, plus a
+  `has-copy` modifier class (on the three blocks that actually have a
+  button — I'd initially missed that step 3 has one too, corrected before
+  committing) giving the `<pre>` inside 28px of top padding so wrapped
+  code always starts safely below the button regardless of viewport
+  width.
+- **BrewPi-first framing.** The homepage previously gave the unreleased
+  Krauken PCB roughly equal billing with BrewPi -- per your direction,
+  this is BrewPi software today, full stop. Tagline and "What this is"
+  now read "New control software for the Arduino BrewPi fermentation
+  chamber controller"; the Krauken PCB gets exactly one forward-looking
+  sentence in the callout ("down the road... may also support") instead
+  of its own paragraph. The EEPROM-provisioning install bullet came out
+  of the homepage entirely -- the actual debconf/postinst mechanism from
+  the previous round is untouched (still real, still gated dormant behind
+  `KRAUKEN_HARDWARE_RELEASED=false`), this was purely about not
+  documenting an install step nobody hits yet.
+- **Added a tagline**: "Release the Krausen." (a Krausen is the actual
+  foam/head that forms during active fermentation -- the pun was your
+  call).
 
 ## Packaging shape — built
 

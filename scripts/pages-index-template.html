@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Krauken</title>
-<meta name="description" content="Open-source fermentation chamber controller for BrewPi and the Krauken PCB -- apt install instructions and project overview.">
+<meta name="description" content="New control software for the Arduino BrewPi fermentation chamber controller -- apt install instructions and project overview.">
 <style>
   /* Same token set as frontend/src/design/tokens/*.css -- copied rather
      than imported, since this page is built and served independently of
@@ -73,7 +73,8 @@
 
   header.hero { margin-bottom: var(--kr-space-8); }
   .hero h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.01em; }
-  .hero p.tagline { margin: var(--kr-space-2) 0 0; color: var(--kr-ink-body); font-size: 18px; }
+  .hero p.motto { margin: var(--kr-space-2) 0 0; color: var(--kr-accent-ink); font-size: 15px; font-weight: 700; }
+  .hero p.tagline { margin: var(--kr-space-1) 0 0; color: var(--kr-ink-body); font-size: 18px; }
   .badges { margin-top: var(--kr-space-3); display: flex; flex-wrap: wrap; gap: var(--kr-space-2); }
   .badge {
     font: 500 12px/1 var(--kr-font-sans);
@@ -146,7 +147,15 @@
     margin: 0;
     font-family: var(--kr-font-mono);
     font-size: 13px;
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* Only blocks with a copy button (steps 1-3, not the later systemctl
+     one) need this reserved clearance -- otherwise the button (position:
+     absolute, top-right) sits directly on top of the first line of code
+     instead of floating above it. */
+  .install-block.has-copy pre {
+    padding-top: 28px;
   }
   .copy-btn {
     position: absolute;
@@ -177,7 +186,8 @@
 
   <header class="hero">
     <h1>Krauken</h1>
-    <p class="tagline">Open-source fermentation chamber controller for a Raspberry Pi.</p>
+    <p class="motto">Release the Krausen.</p>
+    <p class="tagline">New control software for the Arduino BrewPi fermentation chamber controller.</p>
     <div class="badges">
       <span class="badge">v{{VERSION}}</span>
       <span class="badge">Raspberry Pi OS</span>
@@ -188,20 +198,17 @@
   <section>
     <h2>What this is</h2>
     <p>
-      Krauken drives a fermentation chamber end to end: a control daemon and
-      hardware supervisor, a web API, and a React frontend, all running as
-      one service on a Raspberry Pi. It can control the chamber through
-      either a BrewPi-compatible Arduino controller (the common DIY
-      fermentation-chamber setup) or the Krauken project's own custom PCB,
-      and it can read Tilt hydrometers over Bluetooth LE alongside either
-      one.
+      Krauken is new control software for the Arduino BrewPi fermentation
+      chamber controller: a control daemon and hardware supervisor, a web
+      API, and a React frontend, all running as one service on a Raspberry
+      Pi and talking to your existing BrewPi Arduino. It can also read
+      Tilt hydrometers over Bluetooth LE alongside it.
     </p>
     <div class="callout">
-      Early days -- v{{VERSION}}. The Krauken PCB is an open-source
-      hardware design, not a product -- when it's ready, the design files
-      go public and you build or order your own; nobody is selling
-      assembled boards. Until then, this software runs on BrewPi/Tilt
-      hardware you already have.
+      Early days -- v{{VERSION}}. Down the road this project may also
+      support the (not yet released) Krauken PCB as an alternative to
+      BrewPi's Arduino -- for now, everything here runs on BrewPi hardware
+      you already have.
     </div>
   </section>
 
@@ -219,7 +226,7 @@
           what lets apt tell a genuine Krauken package apart from an
           impostor claiming the same name.
         </div>
-        <div class="install-block">
+        <div class="install-block has-copy">
           <button class="copy-btn" type="button" data-copy-target="step1">Copy</button>
           <pre id="step1">curl -fsSL {{PAGES_URL}}/krauken-archive-keyring.asc \
   | sudo gpg --dearmor -o /usr/share/keyrings/krauken-archive-keyring.gpg</pre>
@@ -236,7 +243,7 @@
           apt to trust it specifically using the key from step 1 -- not
           just any key on your system. Nothing installs yet.
         </div>
-        <div class="install-block">
+        <div class="install-block has-copy">
           <button class="copy-btn" type="button" data-copy-target="step2">Copy</button>
           <pre id="step2">echo "deb [signed-by=/usr/share/keyrings/krauken-archive-keyring.gpg] {{PAGES_URL}} stable main" \
   | sudo tee /etc/apt/sources.list.d/krauken.list</pre>
@@ -254,7 +261,7 @@
           <code>apt install krauken</code> then actually downloads and
           installs it -- see below for what happens during that step.
         </div>
-        <div class="install-block">
+        <div class="install-block has-copy">
           <button class="copy-btn" type="button" data-copy-target="step3">Copy</button>
           <pre id="step3">sudo apt update && sudo apt install krauken</pre>
         </div>
@@ -273,11 +280,6 @@
         (using <a href="https://www.piwheels.org/">piwheels.org</a> for
         prebuilt wheels of compiled dependencies). This needs network
         access and takes longer than a typical <code>apt install</code>.</li>
-      <li>If you're installing on genuine Krauken PCB hardware, the
-        installer can also build the small tool that provisions its ID
-        EEPROM for auto-discovery -- but since the hardware hasn't
-        shipped yet, that question is currently dormant and always
-        skipped; nobody pays for a compile step they don't need.</li>
       <li>If <code>brewpi.service</code> is already running on the box,
         the installer asks before stopping/disabling it -- it never
         deletes BrewPi's own files.</li>
