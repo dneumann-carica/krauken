@@ -22,6 +22,12 @@ Conflicts=brewpi.service
 # without turning a slow/failed mock-hardware unit into a failed boot.
 Wants=krauken-simulator.service krauken-manual.service
 After=krauken-simulator.service krauken-manual.service
+# StartLimitIntervalSec/StartLimitBurst belong in [Unit], not [Service] --
+# real-hardware install caught systemd logging "Unknown key
+# 'StartLimitIntervalSec' in section [Service], ignoring" on boot,
+# meaning the crash-loop rate limit was silently never actually applied.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -31,8 +37,6 @@ EnvironmentFile=/etc/krauken/krauken.conf
 ExecStart=/opt/krauken/.venv/bin/krauken-daemon
 Restart=on-failure
 RestartSec=2
-StartLimitIntervalSec=60
-StartLimitBurst=5
 # dialout: opens /dev/ttyACM*/ttyUSB* for the BrewPi driver's auto-scan
 # (platforms/brewpi/connection.py). CAP_NET_RAW: opens a raw HCI socket
 # for the Tilt driver's BLE scanner (platforms/tilt/scanner.py) -- NOT

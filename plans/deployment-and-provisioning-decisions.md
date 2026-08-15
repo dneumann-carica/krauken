@@ -5,6 +5,37 @@ deployment-shape conversation (packaging, CI/CD, legacy-BrewPi handling),
 `krauken-hwid` (the Krauken HAT EEPROM provisioning tool), and now the
 actual `.deb`/Actions/Pages pipeline itself.
 
+## v0.1.2: two more real bugs, found by actually upgrading to v0.1.1 on real hardware
+
+Upgrading to v0.1.1 got the systemd units installed and enabled at last,
+but `systemctl status` on your actual Pi showed `krauken-api.service`
+crash-looping (`activating (auto-restart)`, exit code 217) while
+`krauken-daemon.service` ran fine -- and a recurring `systemd[1]: ...
+Unknown key 'StartLimitIntervalSec' in section [Service], ignoring`
+warning in the daemon's own journal output:
+
+1. **`krauken-api.service` specified `User=krauken-api`** -- a user that
+   never gets created anywhere. `postinst` only ever provisions one
+   shared `krauken` system user, and every other unit (`-daemon`,
+   `-manual`, `-simulator`, `-supervisor`) correctly references it; this
+   one alone didn't. Systemd exit code 217 is literally `EXIT_USER`
+   ("failed to determine user credentials") -- as exact a diagnosis as
+   you can get. Fixed: `User=krauken`, matching the rest.
+2. **All five `.service` units had `StartLimitIntervalSec`/
+   `StartLimitBurst` in `[Service]` instead of `[Unit]`** -- real
+   [Unit]-level directives, silently ignored by systemd in the wrong
+   section (confirmed by the literal warning text on your Pi, not
+   assumed). Net effect: the crash-loop rate limit was never actually
+   being enforced on any of the five units this whole time -- `krauken-api`
+   would have restarted forever rather than giving up after 5 failures in
+   60 seconds and reporting itself failed the way it's supposed to.
+
+Diagnosed the same way as v0.1.1's bugs: SSHing into `brewpi.local` and
+reading real `systemctl status`/journal output, not guessing from the
+source. Shipped as **0.1.2** (again a real version bump, not a retag --
+you have a real v0.1.1 already installed and crash-looping on real
+hardware).
+
 ## v0.1.1: two real bugs found on the first actual install on real hardware
 
 v0.1.0 installed "successfully" (dpkg reported it as fully configured) on

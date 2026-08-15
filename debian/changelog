@@ -1,3 +1,20 @@
+krauken (0.1.2) stable; urgency=high
+
+  * Fix: krauken-api.service specified User=krauken-api -- a user that
+    never actually gets created anywhere (postinst only ever provisions
+    the single shared "krauken" system user, matching every other unit).
+    Caught via a real install: systemd exit code 217 (EXIT_USER) and an
+    endless activating/auto-restart crash loop. Now User=krauken,
+    matching krauken-daemon/-manual/-simulator/-supervisor.
+  * Fix: all five .service units had StartLimitIntervalSec/
+    StartLimitBurst in [Service], where systemd silently ignores them
+    ("Unknown key ... in section [Service]", visible in `journalctl`/
+    `systemctl status` on a real install) -- these are [Unit]-level
+    directives. Moved accordingly; the crash-loop rate limit was never
+    actually being enforced until this fix.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 15 Aug 2026 12:37:38 -0400
+
 krauken (0.1.1) stable; urgency=high
 
   * Fix: dh_installsystemd's default lookup only ever matches a single

@@ -4,17 +4,22 @@ After=network.target krauken-daemon.service
 # Not Requires=krauken-daemon.service: per the architecture, /api/v1/state
 # and history reads work directly against SQLite even if the daemon is
 # down -- the API tier must come up and stay serving regardless.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
-User=krauken-api
+# Was krauken-api -- a user that never actually gets created anywhere
+# (postinst only ever provisions the single shared "krauken" system
+# user, matching every other unit here). Caught via a real install:
+# systemd exit code 217 (EXIT_USER, "failed to determine user
+# credentials") and an endless activating/auto-restart crash loop.
+User=krauken
 Group=krauken
 EnvironmentFile=/etc/krauken/krauken.conf
 ExecStart=/opt/krauken/.venv/bin/krauken-api
 Restart=on-failure
 RestartSec=2
-StartLimitIntervalSec=60
-StartLimitBurst=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadOnlyPaths=/var/lib/krauken

@@ -1,6 +1,8 @@
 [Unit]
 Description=Krauken hardware supervisor (Krauken PCB only -- not used on a BrewPi-only install)
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 # NOT YET FUNCTIONAL: krauken/supervisor/ has no service.py entry point
 # yet (GPIO/board-ID-loopback/thermostat work lands in a later milestone --
@@ -17,8 +19,6 @@ RuntimeDirectory=krauken
 StateDirectory=krauken
 Restart=on-failure
 RestartSec=2
-StartLimitIntervalSec=60
-StartLimitBurst=5
 WatchdogSec=30
 NoNewPrivileges=true
 ProtectSystem=strict
