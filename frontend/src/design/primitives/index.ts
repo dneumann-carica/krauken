@@ -1,5 +1,7 @@
 export { Button } from "./Button";
 export { Card } from "./Card";
+export { Combobox } from "./Combobox";
+export type { ComboboxOption } from "./Combobox";
 export { Dialog } from "./Dialog";
 export { MetricStat } from "./MetricStat";
 export { StatusPill } from "./StatusPill";

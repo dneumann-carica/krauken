@@ -21,6 +21,7 @@ on Arpio's marketing site. */
   --kr-cool-mid:   #5E95D6;
   --kr-cool-light: #C5DCF4;
   --kr-cool-faint: #ECF3FB;
+  --kr-cool-ink:   #2E5AAC;   /* text-on-tint ink for the cool family, same role as --kr-accent-ink */
 
   /* Heating uses the accent family; gravity/plan get their own */
   --kr-heat:       var(--kr-accent);
@@ -29,9 +30,10 @@ on Arpio's marketing site. */
   --kr-gravity:    #363E61;   /* was --bright-navy */
   --kr-plan:       #ABB8C3;   /* was --logo-gray -- setpoint/plan dashed line */
 
-  /* rgb triples for rgba(...) duty-cycle wash alpha blending */
+  /* rgb triples for rgba(...) alpha blending */
   --kr-wash-cool-rgb: 129 177 230;
   --kr-wash-heat-rgb: 255 64 2;
+  --kr-ink-rgb:       38 45 76;
 
   /* ---- Ink & surfaces ---------------------------------------- */
   --kr-ink:            #262D4C;   /* was --navy */
@@ -50,12 +52,10 @@ on Arpio's marketing site. */
   --kr-ok-tint:      #E3F3EC;
   --kr-warn:         #E8A317;
   --kr-warn-tint:    #FCF1D9;
+  --kr-warn-ink:     #9A6B05;   /* text-on-tint ink for warn, same role as --kr-accent-ink */
   --kr-danger:       #D7263D;
   --kr-danger-tint:  #FBE4E7;
   --kr-danger-faint: #FDF1ED;
-
-  --kr-focus-ring:   #C5DCF4;
-  --kr-focus-border: #81B1E6;
 }
 
 @media (prefers-color-scheme: dark) {

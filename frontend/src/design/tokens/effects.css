@@ -12,12 +12,16 @@ Arpio reference. */
   --kr-border-width:        1px;
   --kr-border-width-strong: 1.5px;
 
-  --kr-shadow-xs: 0 1px 2px rgba(38, 45, 76, 0.06);
-  --kr-shadow-sm: 0 1px 3px rgba(38, 45, 76, 0.08), 0 1px 2px rgba(38, 45, 76, 0.04);
-  --kr-shadow-md: 0 4px 12px rgba(38, 45, 76, 0.08), 0 2px 4px rgba(38, 45, 76, 0.04);
-  --kr-shadow-lg: 0 12px 28px rgba(38, 45, 76, 0.12), 0 4px 8px rgba(38, 45, 76, 0.05);
+  --kr-shadow-xs: 0 1px 2px rgb(var(--kr-ink-rgb) / 0.06);
+  --kr-shadow-sm: 0 1px 3px rgb(var(--kr-ink-rgb) / 0.08), 0 1px 2px rgb(var(--kr-ink-rgb) / 0.04);
+  --kr-shadow-md: 0 4px 12px rgb(var(--kr-ink-rgb) / 0.08), 0 2px 4px rgb(var(--kr-ink-rgb) / 0.04);
+  --kr-shadow-lg: 0 12px 28px rgb(var(--kr-ink-rgb) / 0.12), 0 4px 8px rgb(var(--kr-ink-rgb) / 0.05);
 
-  --kr-ring-focus: 0 0 0 3px var(--kr-focus-ring);
+  /* The shared :focus-visible ring for text inputs/selects (DevPanelView,
+     FermentationPlanDialog) -- accent-tinted to match the rest of the
+     interactive-state palette, not the separate --kr-cool-toned ring an
+     earlier, never-wired-up token (--kr-focus-ring, now removed) implied. */
+  --kr-ring-focus: 0 0 0 3px var(--kr-accent-faint);
 
   --kr-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --kr-ease-out:      cubic-bezier(0.16, 1, 0.3, 1);

@@ -1,0 +1,26 @@
+[Unit]
+Description=Krauken Simulator platform (mock hardware, dev/demo)
+After=network.target
+
+[Service]
+Type=simple
+User=krauken
+Group=krauken
+EnvironmentFile=/etc/krauken/krauken.conf
+ExecStart=/opt/krauken/.venv/bin/krauken-simulator
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# No WatchdogSec here (unlike krauken-supervisor.service's draft) --
+# this process doesn't sd_notify(WATCHDOG=1), and setting one without that
+# would just make systemd kill+restart it every interval for never
+# checking in. Add both together if that ever changes.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/run/krauken
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,408 @@
+{
+  "title": "The Krauken Fermentation Profile Library",
+  "version": "1.0",
+  "description": "Complete fermentation workflows for major yeast strains",
+  "generated": "2026-08-10",
+  "how_to_use": [
+    "1. User selects a yeast from the Krauken yeast database",
+    "2. Controller looks up yeast_code in this profile library",
+    "3. Display recommended_workflow as a stage-by-stage timeline",
+    "4. At each stage, hold temperature and wait for completion_criteria",
+    "5. Once complete, advance to next stage"
+  ],
+  "stage_descriptions": {
+    "LAG": "Yeast acclimation & reproduction (12-24h)",
+    "PRIMARY": "Main fermentation, 80-90% sugar consumed (5-14 days typical)",
+    "FREE_RISE": "Optional: stop cooling, let temp rise from yeast heat (2-7 days)",
+    "DIACETYL_REST": "Optional (mandatory for lagers): raise temp to clean buttery flavor (2-6 days)",
+    "CONDITIONING": "Optional (mandatory for lagers): cold storage for flavor maturation (0-56 days)",
+    "COLD_CRASH": "Optional: rapid chill to clarify via yeast flocculation (24-48h)",
+    "BOTTLE_COND": "Secondary fermentation in sealed bottles for carbonation & maturation (21-84+ days)"
+  },
+  "profiles": {
+    "WLP001": {
+      "yeast_code": "WLP001",
+      "yeast_name": "White Labs California Ale Yeast",
+      "yeast_lab": "White Labs",
+      "beer_style": "Pale Ale, IPA, American Ale",
+      "profile_type": "clean_american_ale",
+      "primary_fermentation": {
+        "duration_days": {
+          "min": 5,
+          "max": 10,
+          "typical": 7
+        },
+        "temperature_f": {
+          "min": 64,
+          "max": 73,
+          "target": 68
+        },
+        "gravity_target": "per recipe",
+        "monitoring": "gravity check every 2-3 days after day 2"
+      },
+      "free_rise": {
+        "enabled": false,
+        "reason": "Clean American ale; free rise would add unwanted esters"
+      },
+      "diacetyl_rest": {
+        "needed": false,
+        "reason": "Low diacetyl production strain; fermented warm naturally cleans diacetyl",
+        "note": "White Labs FAQ still recommends 48h @ 62-70°F after reaching FG if desired"
+      },
+      "conditioning": {
+        "enabled": false,
+        "reason": "Not required; American ales can go straight to cold crash",
+        "note": "1-2 weeks optional for flavor smoothing"
+      },
+      "cold_crash": {
+        "recommended": true,
+        "temperature_f": 33,
+        "duration_hours": 24,
+        "purpose": "Optional clarity; helps settle hops"
+      },
+      "bottle_conditioning": {
+        "duration_days": 21,
+        "temperature_f": 70,
+        "carbonate_then_chill": true,
+        "shelf_life_months": 3
+      },
+      "recommended_workflow": [
+        "Day 0-1: LAG PHASE @ 68°F",
+        "Day 2-7: PRIMARY @ 68°F (gravity plateau)",
+        "Day 8: SKIP diacetyl rest (not needed)",
+        "Day 8: OPTIONAL cold crash 24h @ 33°F",
+        "Day 9: BOTTLE with priming sugar",
+        "Day 9-30: BOTTLE CONDITION @ 70°F (3 weeks)",
+        "Day 30: READY TO DRINK"
+      ],
+      "total_days_to_drinking": 30
+    },
+    "WLP800": {
+      "yeast_code": "WLP800",
+      "yeast_name": "White Labs Pilsner Lager Yeast",
+      "yeast_lab": "White Labs",
+      "beer_style": "Pilsner, Lager, Pale Lager",
+      "profile_type": "clean_lager",
+      "primary_fermentation": {
+        "duration_days": {
+          "min": 7,
+          "max": 14,
+          "typical": 10
+        },
+        "temperature_f": {
+          "min": 48,
+          "max": 55,
+          "target": 50
+        },
+        "gravity_target": "per recipe",
+        "monitoring": "gravity check every 2-3 days after day 3",
+        "note": "Cold fermentation is intentional; slow and clean"
+      },
+      "free_rise": {
+        "enabled": false,
+        "reason": "Lagers maintain cold profile throughout"
+      },
+      "diacetyl_rest": {
+        "needed": true,
+        "timing": "Begin when 2-5 points above target FG (approx day 10-12)",
+        "temperature_f": {
+          "min": 62,
+          "max": 68,
+          "target": 65
+        },
+        "duration_days": {
+          "min": 2,
+          "max": 6,
+          "typical": 3
+        },
+        "procedure": [
+          "Raise temperature 2-3°F per day over 1-2 days (don't shock)",
+          "Hold at 65°F for 2-3 days",
+          "Gravity should reach terminal by end of diacetyl rest"
+        ],
+        "critical": "Must do in PRIMARY (yeast in suspension); don't rack before"
+      },
+      "conditioning": {
+        "enabled": true,
+        "duration_days": {
+          "min": 21,
+          "max": 56,
+          "typical": 42
+        },
+        "temperature_f": {
+          "min": 35,
+          "max": 48,
+          "target": 40
+        },
+        "procedure": [
+          "After diacetyl rest, gradually cool 2-3°F per day to 40°F",
+          "Hold at 40°F for 4-6 weeks (traditional lagering)",
+          "Longer lagering = cleaner, more refined flavor"
+        ],
+        "purpose": "Flavor maturation, yeast settling, off-flavor cleanup"
+      },
+      "cold_crash": {
+        "recommended": true,
+        "timing": "After conditioning",
+        "temperature_f": 33,
+        "duration_hours": 24,
+        "purpose": "Final clarity polish; settles remaining yeast/proteins"
+      },
+      "bottle_conditioning": {
+        "duration_days": 21,
+        "temperature_f": 70,
+        "procedure": [
+          "Days 1-3: Room temp (68-72°F) to carbonate",
+          "Days 4-21: Cold storage (fridge, 40°F) to mature"
+        ],
+        "shelf_life_months": 6
+      },
+      "recommended_workflow": [
+        "Day 0-1: LAG @ 50°F",
+        "Day 2-12: PRIMARY @ 50°F (gravity plateau around day 10-12)",
+        "Day 12-15: DIACETYL REST: raise to 65°F over 2 days, hold 2-3 days",
+        "Day 15-60: CONDITIONING: gradually cool to 40°F, hold 4-6 weeks",
+        "Day 56: COLD CRASH 24h @ 33°F",
+        "Day 57: BOTTLE with priming sugar @ 70°F",
+        "Day 57-78: BOTTLE CONDITION @ 70°F for 3 weeks",
+        "Day 78: READY TO DRINK (longer aging OK, even recommended)"
+      ],
+      "total_days_to_drinking": 78,
+      "note": "Traditional lager brewing takes 10-12 weeks; worth it for clean, refined beer"
+    },
+    "WLP590": {
+      "yeast_code": "WLP590",
+      "yeast_name": "White Labs French Saison Ale Yeast",
+      "yeast_lab": "White Labs",
+      "beer_style": "Saison, Farmhouse, Belgian Ale",
+      "profile_type": "belgian_high_ester",
+      "primary_fermentation": {
+        "duration_days": {
+          "min": 7,
+          "max": 21,
+          "typical": 14
+        },
+        "temperature_f": {
+          "min": 64,
+          "max": 85,
+          "target": 68
+        },
+        "gravity_target": "per recipe",
+        "monitoring": "gravity check every 2-3 days",
+        "note": "Saisons are slow and unpredictable; extended fermentation normal"
+      },
+      "free_rise": {
+        "enabled": true,
+        "timing": "After 5-7 days at 68°F (after lag + early growth phase)",
+        "temperature_f": {
+          "min": 68,
+          "max": 80,
+          "target": 75
+        },
+        "duration_days": {
+          "min": 3,
+          "max": 7,
+          "typical": 5
+        },
+        "method": "Stop active cooling; let yeast metabolic heat warm naturally",
+        "purpose": "Enhance pear, apple, spice esters; promote attenuation",
+        "risk": "If above 80°F, may produce unwanted fusel/heat stress flavors"
+      },
+      "diacetyl_rest": {
+        "needed": false,
+        "reason": "Fermented warm; diacetyl cleans naturally",
+        "optional": "If you detect butter/VDK, hold warm for 1-2 extra days"
+      },
+      "conditioning": {
+        "enabled": false,
+        "reason": "Belgian ales go to bottle conditioning for flavor development"
+      },
+      "cold_crash": {
+        "recommended": false,
+        "reason": "Saisons benefit from continued slow fermentation; no cold crash"
+      },
+      "bottle_conditioning": {
+        "duration_days": {
+          "min": 42,
+          "max": 365,
+          "typical": 84
+        },
+        "temperature_f": 70,
+        "procedure": [
+          "Days 1-21: Room temp (68-72°F) for carbonation + continued fermentation",
+          "Days 22-84+: Cold storage or room temp (flavor develops either way)",
+          "Wait 2-3 months before first tasting"
+        ],
+        "note": "Saisons improve dramatically with 3-12 months aging",
+        "shelf_life_months": 24
+      },
+      "recommended_workflow": [
+        "Day 0-1: LAG @ 68°F",
+        "Day 2-7: PRIMARY @ 68°F (early growth phase)",
+        "Day 8-21: FREE RISE: stop cooling, let temp rise to 75°F over 2 days, ferment 3-5 days",
+        "Day 21-42: FINISH PRIMARY: let temp fall back, complete attenuation",
+        "Day 42: BOTTLE with priming sugar",
+        "Day 42-63: BOTTLE CONDITION @ 70°F (3 weeks carbonation + continued fermentation)",
+        "Day 63+: CONDITION: can keep at room temp or cold storage",
+        "Day 84: TRY FIRST BOTTLE (but really, wait 3-6 months)"
+      ],
+      "total_days_to_drinking": 84,
+      "total_days_to_peak_flavor": 180,
+      "note": "Saisons are a commitment; patience is rewarded with complex flavor"
+    },
+    "WLP300": {
+      "yeast_code": "WLP300",
+      "yeast_name": "White Labs Hefeweizen Ale Yeast",
+      "yeast_lab": "White Labs",
+      "beer_style": "Hefeweizen, Wheat Beer, German Wheat",
+      "profile_type": "wheat_ester_phenol",
+      "primary_fermentation": {
+        "duration_days": {
+          "min": 5,
+          "max": 14,
+          "typical": 7
+        },
+        "temperature_f": {
+          "min": 66,
+          "max": 72,
+          "target": 69
+        },
+        "gravity_target": "per recipe",
+        "monitoring": "gravity check every 2-3 days after day 2",
+        "note": "Pitch rate affects banana:clove ratio; underpitch slightly for more banana"
+      },
+      "free_rise": {
+        "enabled": true,
+        "timing": "After 3-4 days at 69°F (early stage)",
+        "temperature_f": {
+          "min": 69,
+          "max": 75,
+          "target": 72
+        },
+        "duration_days": 3,
+        "method": "Reduce active cooling; let natural heat rise temp 2-3°F",
+        "purpose": "Enhance banana (isoamyl acetate) and clove (phenolic) esters",
+        "note": "This is where the classic hefeweizen character comes from"
+      },
+      "diacetyl_rest": {
+        "needed": false,
+        "reason": "Fermented warm; cleans diacetyl naturally"
+      },
+      "conditioning": {
+        "enabled": false,
+        "reason": "Wheat beers drink fresh; can go straight to cold storage"
+      },
+      "cold_crash": {
+        "recommended": false,
+        "reason": "Haze is a feature of hefeweizen; cold crash would remove it",
+        "note": "You WANT yeast in suspension; serve with yeast"
+      },
+      "bottle_conditioning": {
+        "duration_days": 21,
+        "temperature_f": 70,
+        "procedure": [
+          "Days 1-3: Room temp (68-72°F) for carbonation",
+          "Days 4-21: Cold storage or room temp (drink fresh)"
+        ],
+        "shelf_life_months": 2
+      },
+      "recommended_workflow": [
+        "Day 0-1: LAG @ 69°F",
+        "Day 2-4: PRIMARY @ 69°F (early fermentation)",
+        "Day 5-7: FREE RISE: let temp rise to 72°F, ferment 2-3 days",
+        "Day 8: Gravity plateau; beer ready",
+        "Day 8: BOTTLE (no cold crash)",
+        "Day 8-28: BOTTLE CONDITION @ 70°F",
+        "Day 28: READY TO DRINK"
+      ],
+      "total_days_to_drinking": 28,
+      "note": "Hefeweizens are fast and fun; enjoy fresh"
+    },
+    "S-23": {
+      "yeast_code": "S-23",
+      "yeast_name": "Fermentis SafLager S-23",
+      "yeast_lab": "Fermentis (Lesaffre)",
+      "beer_style": "Hoppy Lager, Fruity Lager, Dry Lager",
+      "profile_type": "clean_lager",
+      "form": "Dry",
+      "primary_fermentation": {
+        "duration_days": {
+          "min": 7,
+          "max": 14,
+          "typical": 10
+        },
+        "temperature_f": {
+          "min": 48,
+          "max": 58,
+          "target": 50
+        },
+        "gravity_target": "per recipe",
+        "monitoring": "gravity check every 2-3 days after day 3",
+        "note": "S-23 is highly attenuative (80-90%); expect low FG"
+      },
+      "free_rise": {
+        "enabled": false,
+        "reason": "Lagers don't free rise"
+      },
+      "diacetyl_rest": {
+        "needed": true,
+        "timing": "Begin at 75-80% attenuation (approx day 8-10)",
+        "temperature_f": {
+          "min": 62,
+          "max": 68,
+          "target": 65
+        },
+        "duration_days": 2,
+        "procedure": [
+          "Gradually raise temp 2-3°F per day to 65°F",
+          "Hold for 2-3 days minimum",
+          "Beer should reach final gravity during this rest"
+        ]
+      },
+      "conditioning": {
+        "enabled": true,
+        "duration_days": {
+          "min": 21,
+          "max": 42,
+          "typical": 28
+        },
+        "temperature_f": {
+          "min": 35,
+          "max": 48,
+          "target": 40
+        },
+        "procedure": [
+          "After diacetyl rest, cool slowly to 40°F",
+          "Hold for 3-4 weeks minimum",
+          "S-23's fruity notes develop during lagering"
+        ]
+      },
+      "cold_crash": {
+        "recommended": true,
+        "temperature_f": 33,
+        "duration_hours": 24
+      },
+      "bottle_conditioning": {
+        "duration_days": 21,
+        "temperature_f": 70,
+        "procedure": [
+          "Days 1-3: Room temp to carbonate",
+          "Days 4-21: Cold storage"
+        ]
+      },
+      "recommended_workflow": [
+        "Day 0-1: LAG @ 50°F",
+        "Day 2-10: PRIMARY @ 50°F (highly attenuative; reaches ~80% FG early)",
+        "Day 10-12: DIACETYL REST: raise to 65°F, hold 2-3 days",
+        "Day 12-40: CONDITIONING: cool to 40°F, hold 4 weeks",
+        "Day 39: COLD CRASH @ 33°F for 24h",
+        "Day 40: BOTTLE",
+        "Day 40-61: BOTTLE CONDITION @ 70°F",
+        "Day 61: READY"
+      ],
+      "total_days_to_drinking": 61,
+      "note": "S-23 is excellent for fruity/hoppy lagers; the dry finish makes hops pop"
+    }
+  },
+  "profile_count": 5
+}

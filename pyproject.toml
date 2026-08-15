@@ -19,7 +19,17 @@ dependencies = [
 # platforms/base.py's @requires_optional decorator.
 pi = [
     "lgpio>=0.2",
-    "bleak>=0.22",
+    # NOT bleak -- verified 2026-08-11 against real hardware that bleak's
+    # BlueZ D-Bus Discovery backend doesn't reliably surface Tilt's
+    # iBeacon advertisement on Raspberry Pi (two independent scan
+    # attempts, zero Tilt-shaped packets, despite the Tilt broadcasting
+    # and being read successfully at the same time by both the phone
+    # app and BrewPi Remix's own Tilt manager). aioblescan's raw HCI
+    # socket scanning -- what BrewPi Remix itself uses -- caught the
+    # same advertisement instantly and repeatedly. Needs CAP_NET_RAW on
+    # the daemon process (see deploy/krauken-daemon.service), not full
+    # root.
+    "aioblescan>=0.2.14",
     "pyserial>=3.5",
 ]
 dev = [
@@ -32,6 +42,8 @@ dev = [
 [project.scripts]
 krauken-daemon = "krauken.daemon.__main__:main"
 krauken-api = "krauken.api.__main__:main"
+krauken-simulator = "krauken.platforms.simulator.__main__:main"
+krauken-manual = "krauken.platforms.manual.__main__:main"
 krauken-ipc = "krauken.ipc.cli:main"
 krauken-db = "krauken.db.migrate:main"
 krauken-hwid = "krauken.cli.hwid:main"

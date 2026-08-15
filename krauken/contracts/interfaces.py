@@ -25,6 +25,25 @@ class ChamberDriver(Protocol):
         setpoint with no fermentation running") without the timing
         concerns read_chamber()'s own docstring warns about."""
         ...
+    async def set_ambient_location(self, location: str | None) -> None:
+        """The room/enclosure the chamber sits in (e.g. "Garage",
+        "Basement") -- purely a hint for drivers that model (or display)
+        an ambient-temperature effect; a no-op for any driver with no such
+        concept (real hardware has no simulated ambient to hint at). Called
+        every control tick regardless of which platform is actually
+        mapped, cheaply and idempotently, so the control loop itself never
+        needs to know which platform cares."""
+        ...
+    async def probe_temps(self) -> dict[str, float | None]:
+        """Live per-probe temps, keyed by whatever probe-address strings
+        this platform's discover() advertised in the device's
+        DeviceCandidate.identity["probe_addresses"] -- the one place the
+        guided wizard's identify_probes test (daemon/tests_runtime.py)
+        needs live per-probe state instead of read_chamber()'s single
+        reading. A one-probe rig returns a single-entry dict keyed by that
+        probe's own address; a driver with no multi-probe concept at all
+        may return an empty dict."""
+        ...
 
 
 @runtime_checkable

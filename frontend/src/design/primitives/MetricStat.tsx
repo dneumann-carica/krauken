@@ -1,13 +1,17 @@
 import type { ReactNode } from "react";
 import styles from "./MetricStat.module.css";
 
-type Accent = "orange" | "navy" | "blue" | "green" | "plan";
+// Color-based, not domain-based -- this is a generic primitive with no idea
+// what a "setpoint" is; callers map their own domain meaning onto whichever
+// accent reads right (see GettingStartedView.tsx's Setpoint tile, which
+// picks "gray" to match the chart's own plan-line color, --kr-plan).
+type Accent = "orange" | "navy" | "blue" | "green" | "gray";
 const ACCENT_CLASS: Record<Accent, string> = {
   orange: styles.accentOrange,
   navy: styles.accentNavy,
   blue: styles.accentBlue,
   green: styles.accentGreen,
-  plan: styles.accentPlan,
+  gray: styles.accentGray,
 };
 const ALIGN_CLASS = { left: "", center: styles.alignCenter, right: styles.alignRight };
 

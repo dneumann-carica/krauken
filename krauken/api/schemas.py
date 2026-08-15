@@ -47,6 +47,11 @@ class StageInput(BaseModel):
 
 class YeastPreset(BaseModel):
     name: str
+    # Dropdown-grouping label only (Ale/Lager/Belgian-Saison/Wheat-
+    # Hefeweizen/Kveik/Custom) -- cosmetic, never branched on for stage
+    # logic (see default_stages below for why). Optional so hand-authored
+    # presets from before this field existed don't need a backfill.
+    category: str | None = None
     # The new-fermentation dialog's starting plan for this strain, verbatim
     # -- literal StageInput templates, not flags for the UI to interpret
     # (e.g. a diacetyl-negative strain's list just has no diacetyl-rest-

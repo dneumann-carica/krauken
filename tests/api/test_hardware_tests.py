@@ -4,10 +4,12 @@ so the suite doesn't spend real wall-clock time on countdowns."""
 from __future__ import annotations
 
 import asyncio
+from typing import Awaitable, Callable
 
 from httpx import AsyncClient
 
 from krauken.daemon.app import Daemon
+from krauken.platforms.simulator.service import SimulatorService
 
 
 async def _poll_until_done(client: AsyncClient, device_id: str, test_id: str, *, patience_s: float = 1.0) -> dict:
@@ -37,21 +39,18 @@ async def test_fire_outlet_completes_with_server_owned_countdown(client: AsyncCl
     assert final["result"]["outlet"] == 1
 
 
-async def test_identify_probes_reports_a_moved_probe(client: AsyncClient, daemon: Daemon):
+async def test_identify_probes_reports_a_moved_probe(
+    client: AsyncClient, simulator_service: SimulatorService, scan_and_wait: Callable[[], Awaitable[dict]]
+):
     # probe_addresses now come from the device's own last-scanned metadata,
     # not a caller-supplied param -- a scan with probe2 enabled is what
     # gives simulator:chamber two addresses to tell apart.
-    daemon.ctx.sim_engine.set_probe2_enabled(True)
-    daemon.ctx.sim_engine.set_probe2_temp(65.0)
-    scan = await client.post("/api/v1/hardware/scan")
-    scan_id = scan.json()["scan_id"]
-    for _ in range(50):
-        status = (await client.get(f"/api/v1/hardware/scan/{scan_id}")).json()
-        if status["state"] == "complete":
-            break
-        await asyncio.sleep(0.02)
-    else:
-        raise AssertionError("scan never completed")
+    # simulator_service.engine is the SAME SimPlantEngine the daemon's
+    # simulator_client reaches over IPC -- both live in this one test
+    # process (see tests/api/conftest.py).
+    simulator_service.engine.set_probe2_enabled(True)
+    simulator_service.engine.set_probe2_temp(65.0)
+    await scan_and_wait()
 
     start = await client.post(
         "/api/v1/hardware/devices/simulator:chamber/test",
@@ -61,7 +60,7 @@ async def test_identify_probes_reports_a_moved_probe(client: AsyncClient, daemon
     # Real polling cadence (IDENTIFY_PROBES_POLL_S) means the job's first
     # sample lands ~1s of real wall-clock time after it starts -- nudge
     # probe 2 now so that first sample already sees the jump.
-    daemon.ctx.sim_engine.set_probe2_temp(70.0)
+    simulator_service.engine.set_probe2_temp(70.0)
 
     final = await _poll_until_done(client, "simulator:chamber", body["test_id"], patience_s=5.0)
     assert final["state"] == "completed"

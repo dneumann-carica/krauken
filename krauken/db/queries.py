@@ -1,12 +1,20 @@
 """All read SQL. Used by both the API tier (read-only connection) and the
 daemon (for rebuilding state on startup). No writes in this module -- see
 writes.py, which is daemon-only by convention (enforced by
-tests/db/test_write_boundary.py)."""
+tests/db/test_write_boundary.py).
+
+The one exception to "just SQL" is _compute_projection's own datetime glue
+(turning fetched row timestamps into the elapsed-hours argument the actual
+projection computation needs) -- the computation itself lives in
+platforms/simulator/projection.py, not here; see that call site's comment."""
 from __future__ import annotations
 
+import datetime
 import json
 import sqlite3
 from typing import Any
+
+from krauken.platforms.simulator.projection import project_forward_response
 
 
 def live_state(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -90,6 +98,14 @@ def hardware_config(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
+def hardware_config_by_role(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """hardware_config(), keyed by role -- the shape every caller that
+    wants "what's mapped to role X" actually needs, instead of each one
+    rebuilding the same `{r["role"]: r for r in hardware_config(conn)}`
+    dict comprehension by hand."""
+    return {r["role"]: r for r in hardware_config(conn)}
+
+
 def active_fermentation(conn: sqlite3.Connection) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT * FROM fermentations WHERE status = 'active' LIMIT 1"
@@ -170,12 +186,11 @@ def latest_sample(conn: sqlite3.Connection, fermentation_id: int) -> dict[str, A
 def _compute_projection(conn: sqlite3.Connection, fermentation_id: int) -> dict[str, Any] | None:
     """None for anything but an active fermentation -- a completed or
     terminated batch has no "future" left to preview. See
-    contracts/projection.py's module docstring for what this is (and isn't)
-    an honest preview of."""
-    import datetime
-
-    from krauken.contracts.projection import project_forward
-
+    platforms/simulator/projection.py's module docstring for what this is
+    (and isn't) an honest preview of -- this function only fetches the rows
+    that preview needs and translates them into its arguments; the actual
+    computation lives there, not here (this module is read-SQL only, by
+    the module docstring's own convention)."""
     fermentation_row = conn.execute("SELECT status, started_at FROM fermentations WHERE id = ?", (fermentation_id,)).fetchone()
     if fermentation_row is None or fermentation_row["status"] != "active":
         return None
@@ -202,17 +217,10 @@ def _compute_projection(conn: sqlite3.Connection, fermentation_id: int) -> dict[
     stage_started = datetime.datetime.fromisoformat(current["started_at"])
     elapsed_h_into_current = max(0.0, (now - stage_started).total_seconds() / 3600.0)
 
-    points = project_forward(
-        beer_temp_f=last["beer_temp_f"], chamber_temp_f=last["chamber_temp_f"], gravity=last["gravity"],
+    return project_forward_response(
+        now=now, beer_temp_f=last["beer_temp_f"], chamber_temp_f=last["chamber_temp_f"], gravity=last["gravity"],
         stages=stages, current_stage_seq=current["seq"], elapsed_h_into_current=elapsed_h_into_current,
     )
-    return {
-        "ts": [(now + datetime.timedelta(hours=p["t_h_from_now"])).isoformat() for p in points],
-        "beer_temp_f": [p["beer_temp_f"] for p in points],
-        "chamber_temp_f": [p["chamber_temp_f"] for p in points],
-        "gravity": [p["gravity"] for p in points],
-        "effective_target_f": [p["effective_target_f"] for p in points],
-    }
 
 
 def fermentation_series(
@@ -286,27 +294,24 @@ def fermentation_series(
     }
 
 
-def devices(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    rows = conn.execute("SELECT * FROM devices ORDER BY device_id").fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["capabilities"] = json.loads(d["capabilities"])
-        d["metadata"] = json.loads(d["metadata"])
-        d["last_reading"] = json.loads(d["last_reading"])
-        out.append(d)
-    return out
-
-
-def device_by_id(conn: sqlite3.Connection, device_id: str) -> dict[str, Any] | None:
-    row = conn.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,)).fetchone()
-    if row is None:
-        return None
+def _device_row(row: sqlite3.Row) -> dict[str, Any]:
+    """A `devices` row with its three JSON-blob columns decoded -- shared
+    by devices() and device_by_id() so the column list only lives once."""
     d = dict(row)
     d["capabilities"] = json.loads(d["capabilities"])
     d["metadata"] = json.loads(d["metadata"])
     d["last_reading"] = json.loads(d["last_reading"])
     return d
+
+
+def devices(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute("SELECT * FROM devices ORDER BY device_id").fetchall()
+    return [_device_row(r) for r in rows]
+
+
+def device_by_id(conn: sqlite3.Connection, device_id: str) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,)).fetchone()
+    return _device_row(row) if row is not None else None
 
 
 def devices_as_candidates(conn: sqlite3.Connection) -> dict[str, "DeviceCandidate"]:

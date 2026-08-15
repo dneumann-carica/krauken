@@ -76,6 +76,16 @@
   background: var(--kr-danger);
   opacity: 1;
 }
+/* The outlet is actually energized right now -- a soft pulse on top of the
+   disabled state's red background, same idiom as HardwareSetupView's own
+   "actively scanning" dot (.scanDot.scanning). */
+.fireRunning {
+  animation: kr-fire-pulse 1s infinite;
+}
+@keyframes kr-fire-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
 
 .choiceGrid {
   display: flex;

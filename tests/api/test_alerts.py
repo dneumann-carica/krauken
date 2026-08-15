@@ -6,24 +6,13 @@ exercisable without real hardware ever going unresponsive.
 """
 from __future__ import annotations
 
-import asyncio
+from typing import Awaitable, Callable
 
 from httpx import AsyncClient
 
 from krauken.contracts.models import Health
 from krauken.daemon.app import Daemon
-from krauken.daemon.control_loop import control_tick
-
-
-async def _scan_and_wait(client: AsyncClient) -> None:
-    resp = await client.post("/api/v1/hardware/scan")
-    scan_id = resp.json()["scan_id"]
-    for _ in range(50):
-        status = (await client.get(f"/api/v1/hardware/scan/{scan_id}")).json()
-        if status["state"] == "complete":
-            return
-        await asyncio.sleep(0.02)
-    raise AssertionError("scan never completed")
+from krauken.platforms.manual.service import ManualService
 
 STAGES = [
     {
@@ -33,13 +22,10 @@ STAGES = [
 ]
 
 
-async def _tick(daemon: Daemon) -> None:
-    async with daemon.server.state_lock:
-        await control_tick(daemon.ctx)
-
-
-async def test_no_alerts_while_the_manual_driver_stays_healthy(client: AsyncClient, daemon: Daemon):
-    await _scan_and_wait(client)
+async def test_no_alerts_while_the_manual_driver_stays_healthy(
+    client: AsyncClient, daemon: Daemon, scan_and_wait: Callable[[], Awaitable[dict]], tick: Callable[[], Awaitable[None]]
+):
+    await scan_and_wait()
     await client.put(
         "/api/v1/hardware/mapping",
         json={"roles": {"chamber_temp": "manual:chamber", "beer_temp": "manual:tilt"}},
@@ -47,14 +33,19 @@ async def test_no_alerts_while_the_manual_driver_stays_healthy(client: AsyncClie
     start = await client.post("/api/v1/fermentations", json={"name": "Alert test", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
-    await _tick(daemon)
+    await tick()
     resp = await client.get(f"/api/v1/fermentations/{fermentation_id}/alerts")
     assert resp.status_code == 200
     assert resp.json() == []
 
 
-async def test_beer_temp_lost_opens_an_alert_and_recovery_closes_it(client: AsyncClient, daemon: Daemon):
-    await _scan_and_wait(client)
+async def test_beer_temp_lost_opens_an_alert_and_recovery_closes_it(
+    client: AsyncClient,
+    manual_service: ManualService,
+    scan_and_wait: Callable[[], Awaitable[dict]],
+    tick: Callable[[], Awaitable[None]],
+):
+    await scan_and_wait()
     await client.put(
         "/api/v1/hardware/mapping",
         json={"roles": {"chamber_temp": "manual:chamber", "beer_temp": "manual:tilt"}},
@@ -62,15 +53,20 @@ async def test_beer_temp_lost_opens_an_alert_and_recovery_closes_it(client: Asyn
     start = await client.post("/api/v1/fermentations", json={"name": "Alert test", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
-    await _tick(daemon)  # healthy tick first, matching real timing (health starts OK)
-    daemon.ctx.manual_panel.tilt.health = Health.UNREACHABLE
-    await _tick(daemon)
+    await tick()  # healthy tick first, matching real timing (health starts OK)
+    # Mutating the Manual process's panel directly, in-process -- this is
+    # the SAME object the daemon's manual_client reaches over IPC (both
+    # live in this one test process; see tests/api/conftest.py's
+    # manual_service fixture), just without the wire round trip a real
+    # dev-panel PUT would add for no benefit here.
+    manual_service.panel.tilt.health = Health.UNREACHABLE
+    await tick()
 
     alerts = (await client.get(f"/api/v1/fermentations/{fermentation_id}/alerts")).json()
     assert len(alerts) == 1
     assert alerts[0]["field"] == "beer_temp"
 
-    daemon.ctx.manual_panel.tilt.health = Health.OK
-    await _tick(daemon)
+    manual_service.panel.tilt.health = Health.OK
+    await tick()
     alerts = (await client.get(f"/api/v1/fermentations/{fermentation_id}/alerts")).json()
     assert alerts == []

@@ -8,7 +8,7 @@
 .header {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--kr-space-1);
   padding: var(--kr-space-5) var(--kr-space-5) var(--kr-space-3);
   border-bottom: 1px solid var(--kr-border);
 }
@@ -76,7 +76,7 @@
 .select:focus-visible {
   outline: none;
   border-color: var(--kr-accent);
-  box-shadow: 0 0 0 3px var(--kr-accent-faint);
+  box-shadow: var(--kr-ring-focus);
 }
 /* Native <select> arrows sit almost flush against the box's own right
    edge (browser-controlled inset, not ours to pad) -- appearance:none
@@ -125,7 +125,7 @@
 }
 .moveButtons {
   display: flex;
-  gap: 4px;
+  gap: var(--kr-space-1);
 }
 /* Shared by the move buttons and the icon-only remove button -- same
    narrow, icon-appropriate footprint instead of the default .sm text
@@ -155,7 +155,7 @@ button.iconButton {
 }
 .stageNameButton:hover:not(:disabled) {
   border-color: var(--kr-border);
-  background: var(--kr-surface-hover, var(--kr-accent-faint));
+  background: var(--kr-accent-faint);
 }
 .stageNameButton:disabled {
   cursor: default;
@@ -175,7 +175,7 @@ button.iconButton {
 }
 .stageNameInput:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px var(--kr-accent-faint);
+  box-shadow: var(--kr-ring-focus);
 }
 .stageSummary {
   font-family: var(--kr-font-mono);

@@ -4,18 +4,30 @@ lives in exactly one place (contracts.cascade + the Simulator's plant
 model) rather than being duplicated in TypeScript, per the project plan's
 explicit M2 decision.
 
+Lives alongside plant.py, not in contracts/, precisely because it depends
+on the Simulator's own physics model -- contracts/ is meant to be the one
+package everything else can depend on without pulling in a concrete
+platform, and this module is Simulator-specific by nature (see below).
+db/queries.py imports it the same way db/seed.py already imports plant.py
+directly: a db-layer module reaching into a platform's physics model for a
+platform-specific feature, not a contracts-layer dependency.
+
 This is a preview, not a literal prediction, in two ways:
 - It ignores relay-timing protection (min-on/min-off/lockout) -- a dashed
   preview line doesn't need to model exactly when a compressor is allowed
   to click on, and the original UI mockup's own client-side preview made
   the same simplification.
 - It reuses the Simulator's thermal coefficients (heat-transfer, beer/
-  chamber coupling, ambient, exotherm) as the physics. That's honestly
-  applicable today because every fermentation this software can currently
-  produce IS running on the Simulator (no real hardware driver exists
-  yet) -- once a real Krauken/BrewPi driver lands, projecting a REAL
-  batch's temperature with fictional simulator coefficients would need
-  revisiting, but that's a problem for that milestone, not this one.
+  chamber coupling, ambient, exotherm) as the physics, unconditionally --
+  including for a fermentation running on real hardware once a Krauken/
+  BrewPi driver exists. That's a deliberate, permanent product decision
+  (not a gap waiting on a future milestone): this dashed line is eye
+  candy, not a claim of accuracy, so it was never worth a driver-supplied-
+  coefficients mechanism or a generic fallback model to make it "honest"
+  for a platform the Simulator doesn't back. Every fermentation this
+  software can currently produce IS running on the Simulator anyway (no
+  real hardware driver exists yet), so there's nothing to observe
+  differently today either way.
 
 Gravity is deliberately NOT projected via the plant model's sigmoid
 (gravity_at) -- that curve is fit to specific og/terminal/midpoint/
@@ -26,6 +38,7 @@ value.
 """
 from __future__ import annotations
 
+import datetime
 from typing import Any
 
 from krauken.contracts.stages import target_rate_f_per_h, target_temp_f
@@ -112,3 +125,31 @@ def project_forward(
                 }
             )
     return points
+
+
+def project_forward_response(
+    *,
+    now: datetime.datetime,
+    beer_temp_f: float,
+    chamber_temp_f: float,
+    gravity: float | None,
+    stages: list[dict[str, Any]],
+    current_stage_seq: int,
+    elapsed_h_into_current: float,
+) -> dict[str, Any]:
+    """Wraps project_forward() with the wire-shape (parallel-arrays, ISO
+    timestamps) db/queries.py's _compute_projection needs. Kept here rather
+    than in queries.py -- a read-SQL-only module by convention (see its own
+    module docstring) -- so the only non-SQL work queries.py does for a
+    projection is call this one function with rows it already fetched."""
+    points = project_forward(
+        beer_temp_f=beer_temp_f, chamber_temp_f=chamber_temp_f, gravity=gravity,
+        stages=stages, current_stage_seq=current_stage_seq, elapsed_h_into_current=elapsed_h_into_current,
+    )
+    return {
+        "ts": [(now + datetime.timedelta(hours=p["t_h_from_now"])).isoformat() for p in points],
+        "beer_temp_f": [p["beer_temp_f"] for p in points],
+        "chamber_temp_f": [p["chamber_temp_f"] for p in points],
+        "gravity": [p["gravity"] for p in points],
+        "effective_target_f": [p["effective_target_f"] for p in points],
+    }

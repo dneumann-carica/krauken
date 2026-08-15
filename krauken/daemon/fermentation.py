@@ -11,17 +11,19 @@ automatically.
 """
 from __future__ import annotations
 
-import datetime
+import contextlib
 from typing import Any
 
 from krauken.contracts.errors import (
     FermentationAlreadyActive,
     HardwareIncomplete,
     NoActiveFermentation,
+    PlatformUnavailable,
     StageNotRunning,
     ValidationError,
 )
 from krauken.contracts.roles import Role, resolve
+from krauken.daemon.timefmt import iso_now as _iso_now
 from krauken.db import queries, writes
 from krauken.db.connection import transaction
 
@@ -32,13 +34,22 @@ EDITABLE_STAGE_FIELDS = {
 }
 
 
-def _iso_now(clock: Any) -> str:
-    return datetime.datetime.fromtimestamp(clock.now(), tz=datetime.timezone.utc).isoformat()
-
-
 def _is_simulated(devices: dict[str, Any], resolution: Any) -> bool:
     mapped_ids = {v for v in resolution.roles.values() if v is not None}
     return any(devices[d].simulated for d in mapped_ids if d in devices)
+
+
+def _require_active_fermentation(ctx: Any, fermentation_id: int) -> dict[str, Any]:
+    """Every stage-mutating op below only makes sense against THE active
+    fermentation matching the id the caller named -- a stale id (already
+    completed/terminated, or never this one to begin with) raises the same
+    NoActiveFermentation either way, so the API layer never has to
+    distinguish "nothing is running" from "wrong fermentation" or "already
+    ended"."""
+    fermentation = queries.active_fermentation(ctx.conn)
+    if fermentation is None or fermentation["id"] != fermentation_id:
+        raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+    return fermentation
 
 
 async def start_fermentation(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -84,10 +95,17 @@ async def start_fermentation(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     # Re-anchors the Simulator's plant to "now" and resets chamber/beer/relay
     # to their starting values -- see SimPlantEngine.reset_for_new_batch()'s
     # docstring for why this matters (without it, gravity/exotherm silently
-    # carry forward from whenever the daemon process itself started, not
-    # from this fermentation's actual start). Cheap and idempotent if
-    # Simulator isn't even the mapped platform.
-    ctx.sim_engine.reset_for_new_batch()
+    # carry forward from whenever that process itself started, not from
+    # this fermentation's actual start). Cheap and idempotent if Simulator
+    # isn't even the mapped platform -- called unconditionally, same as
+    # ChamberDriver.set_ambient_location's own "every tick regardless"
+    # idiom. Best-effort: if the Simulator process is currently unreachable
+    # there's no batch-critical state to lose here (nothing was ever going
+    # to read that stale physics anyway), so this just logs nothing and
+    # moves on rather than failing the whole start_fermentation call over
+    # a platform this batch may not even be using.
+    with contextlib.suppress(PlatformUnavailable):
+        await ctx.simulator_client.call("simulator.reset_for_new_batch")
     return {"fermentation_id": fermentation_id, "profile_id": profile_id, "stage_ids": stage_ids}
 
 
@@ -125,9 +143,7 @@ async def advance(
 async def advance_stage_manual(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     fermentation_id = args["fermentation_id"]
     async with ctx.db_lock:
-        fermentation = queries.active_fermentation(ctx.conn)
-        if fermentation is None or fermentation["id"] != fermentation_id:
-            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+        _require_active_fermentation(ctx, fermentation_id)
         current = queries.current_stage(ctx.conn, fermentation_id)
         if current is None:
             raise StageNotRunning("no stage is currently running")
@@ -144,9 +160,7 @@ async def terminate_fermentation(ctx: Any, args: dict[str, Any]) -> dict[str, An
     fermentation_id = args["fermentation_id"]
     reason = args.get("reason") or "user_terminated"
     async with ctx.db_lock:
-        fermentation = queries.active_fermentation(ctx.conn)
-        if fermentation is None or fermentation["id"] != fermentation_id:
-            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+        _require_active_fermentation(ctx, fermentation_id)
         now = _iso_now(ctx.clock)
         with transaction(ctx.conn):
             current = queries.current_stage(ctx.conn, fermentation_id)
@@ -174,9 +188,7 @@ async def update_stages(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     updates: dict[int, dict[str, Any]] = {int(k): v for k, v in args["stages"].items()}
 
     async with ctx.db_lock:
-        fermentation = queries.active_fermentation(ctx.conn)
-        if fermentation is None or fermentation["id"] != fermentation_id:
-            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+        _require_active_fermentation(ctx, fermentation_id)
 
         existing = {s["id"]: s for s in queries.fermentation_stages(ctx.conn, fermentation_id)}
         applied = []
@@ -221,9 +233,7 @@ async def insert_stage(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     stage = args["stage"]
 
     async with ctx.db_lock:
-        fermentation = queries.active_fermentation(ctx.conn)
-        if fermentation is None or fermentation["id"] != fermentation_id:
-            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+        _require_active_fermentation(ctx, fermentation_id)
 
         stages = queries.fermentation_stages(ctx.conn, fermentation_id)
         by_id = {s["id"]: s for s in stages}
@@ -281,9 +291,7 @@ async def reorder_stages(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     requested_ids = args["stage_ids"]
 
     async with ctx.db_lock:
-        fermentation = queries.active_fermentation(ctx.conn)
-        if fermentation is None or fermentation["id"] != fermentation_id:
-            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+        _require_active_fermentation(ctx, fermentation_id)
 
         stages = queries.fermentation_stages(ctx.conn, fermentation_id)
         reorderable = [s for s in stages if s["state"] in ("pending", "skipped")]
@@ -323,9 +331,7 @@ async def set_stage_enabled(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     enabled = args["enabled"]
 
     async with ctx.db_lock:
-        fermentation_row = queries.active_fermentation(ctx.conn)
-        if fermentation_row is None or fermentation_row["id"] != fermentation_id:
-            raise NoActiveFermentation(f"fermentation {fermentation_id} is not active")
+        _require_active_fermentation(ctx, fermentation_id)
 
         stage = next((s for s in queries.fermentation_stages(ctx.conn, fermentation_id) if s["id"] == stage_id), None)
         if stage is None:

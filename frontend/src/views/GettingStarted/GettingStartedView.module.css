@@ -1,5 +1,5 @@
 .page {
-  max-width: var(--kr-container-max, 1120px);
+  max-width: var(--kr-container-max);
   margin: 0 auto;
   padding: var(--kr-space-5) var(--kr-space-4) var(--kr-space-10);
   display: flex;
@@ -23,7 +23,7 @@
   flex: 1 1 320px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--kr-space-1);
   min-width: 0;
 }
 .bannerTitleRow {
@@ -218,7 +218,7 @@
   font: var(--kr-type-small);
   color: var(--kr-ink-muted);
 }
-.legendCool { color: var(--kr-cool-ink, #2E5AAC); font-weight: var(--kr-weight-bold); }
+.legendCool { color: var(--kr-cool-ink); font-weight: var(--kr-weight-bold); }
 .legendHeat { color: var(--kr-accent-deep); font-weight: var(--kr-weight-bold); }
 .legendMono { font-family: var(--kr-font-mono); font-size: var(--kr-text-xs); }
 

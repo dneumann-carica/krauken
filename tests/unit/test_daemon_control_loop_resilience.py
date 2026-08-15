@@ -24,6 +24,12 @@ async def test_control_loop_survives_an_exception_and_keeps_ticking(tmp_path: Pa
     db_path = tmp_path / "krauken.db"
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))  # AF_UNIX path-length limit -- see tests/api/conftest.py
     socket_path = short_tmp / "d.sock"
+    # control_tick is fully monkeypatched below -- nothing here ever
+    # dispatches to Simulator/Manual, so these sockets never need a real
+    # process listening on them (PersistentIPCClient.start() is
+    # non-blocking regardless -- see its own docstring).
+    simulator_socket = short_tmp / "sim.sock"
+    manual_socket = short_tmp / "man.sock"
 
     call_count = 0
 
@@ -35,7 +41,10 @@ async def test_control_loop_survives_an_exception_and_keeps_ticking(tmp_path: Pa
 
     monkeypatch.setattr(app_module, "control_tick", flaky_control_tick)
 
-    daemon, _clock = build_scenario_daemon(db_path=db_path, socket_path=socket_path, control_tick_interval_s=0.0)
+    daemon, _clock = build_scenario_daemon(
+        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        control_tick_interval_s=0.0,
+    )
     await daemon.start()
     try:
         loop = asyncio.get_event_loop()

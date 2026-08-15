@@ -1,7 +1,10 @@
 import type { ReactNode } from "react";
 import styles from "./StatusPill.module.css";
 
-export type PillTone = "cool" | "heat" | "idle" | "warn" | "danger" | "neutral";
+// Color-based, not domain-based -- this is a generic primitive with no idea
+// what "cooling" or "heating" mean; callers map their own domain state onto
+// whichever tone reads right (see GettingStartedView.tsx's modeTone).
+export type PillTone = "info" | "accent" | "positive" | "warn" | "danger" | "neutral";
 
 interface Props {
   tone: PillTone;

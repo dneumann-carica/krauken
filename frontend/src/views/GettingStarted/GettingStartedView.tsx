@@ -1,33 +1,19 @@
-import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { FermentationChart } from "../../chart/FermentationChart";
 import type { PillTone } from "../../design/primitives";
-import { Button, Card, Dialog, MetricStat, StatusPill, Switch, Tag } from "../../design/primitives";
-import {
-  useAdvanceStage,
-  useAlerts,
-  useAppState,
-  useChamberStatus,
-  useFermentation,
-  useFermentations,
-  useSeries,
-  useStopChamber,
-  useTerminateFermentation,
-  useUpdateStages,
-} from "../../api/queries";
-import type { FermentationSummary, RoleStatus, StageResponse } from "../../api/types";
+import { Button, Card, Dialog, MetricStat, StatusPill, Tag } from "../../design/primitives";
+import { useAdvanceStage, useChamberStatus, useStopChamber, useTerminateFermentation, useUpdateStages } from "../../api/queries";
+import type { RoleStatus, StageResponse } from "../../api/types";
 import type { Role } from "../../hardware/resolve";
 import { ROLE_LABELS } from "../../hardware/roleLabels";
+import { BatchTitleMenu } from "./BatchTitleMenu";
 import type { CloneSource } from "./FermentationPlanDialog";
 import { FermentationPlanDialog } from "./FermentationPlanDialog";
+import { LiveStageBar } from "./LiveStageBar";
+import { useBatchSelection } from "./useBatchSelection";
+import { useScrubbedSeries } from "./useScrubbedSeries";
 import styles from "./GettingStartedView.module.css";
-
-function lastDefined<T>(arr: (T | null)[]): T | null {
-  for (let i = arr.length - 1; i >= 0; i--) {
-    if (arr[i] !== null) return arr[i];
-  }
-  return null;
-}
 
 function fmtTemp(v: number | null): string {
   return v === null ? "--" : `${v.toFixed(1)}°F`;
@@ -67,63 +53,15 @@ function elapsedInMode(ts: string[], modes: string[]): number | null {
   return end - start;
 }
 
-function fmtMenuDate(iso: string, includeYear: boolean): string {
-  return new Date(iso).toLocaleDateString(
-    undefined,
-    includeYear ? { month: "short", day: "numeric", year: "numeric" } : { month: "short", day: "numeric" },
-  );
-}
-
-// The title-menu batch list's secondary line -- "Active" for the one
-// currently running (a date range would just show "started, still going",
-// which is what "Active" already says more plainly), a real start–end
-// range for anything finished. The end date gets its year appended once
-// it's no longer this year -- otherwise last December's batch and one
-// from three weeks ago both just read "Dec 30", indistinguishable at a
-// glance. The start date never does; a range implies "same era as its own
-// end date" well enough on its own.
-function fmtMenuDateRange(f: FermentationSummary): string {
-  if (f.status === "active") return "Active";
-  if (!f.ended_at) return fmtMenuDate(f.started_at, false);
-  // Not just "ended before this year" -- an accelerated SimulatorClock
-  // batch can just as easily race PAST the current year into next year
-  // (started from a real-now anchor, then ticked through weeks of
-  // simulated time in seconds). Either direction is equally ambiguous
-  // without a year shown, and equally capable of producing a menu order
-  // that looks wrong at a glance if you assume everything's "this year."
-  const differentYear = new Date(f.ended_at).getFullYear() !== new Date().getFullYear();
-  return `${fmtMenuDate(f.started_at, false)} – ${fmtMenuDate(f.ended_at, differentYear)}`;
-}
-
-function fmtHours(hours: number): string {
-  return hours >= 24 ? `${(hours / 24).toFixed(hours % 24 === 0 ? 0 : 1)} days` : `${hours}h`;
-}
-
 // Days+hours, not a raw hour count or a fractional day -- "452h elapsed"
 // isn't something a human parses at a glance, and "18.8 days" isn't much
-// better. Used for actual ELAPSED durations specifically; a PLANNED
-// duration (fmtHours above, e.g. "4d" in the stage ribbon) reads fine as a
-// single rounded unit since it's describing a round authored number, not
-// an arbitrary elapsed one.
+// better.
 function fmtDaysHours(hours: number): string {
   const totalHours = Math.round(hours);
   const days = Math.floor(totalHours / 24);
   const rem = totalHours % 24;
   if (days === 0) return `${rem}h`;
   return rem === 0 ? `${days}d` : `${days}d ${rem}h`;
-}
-
-function criteriaDescription(stage: StageResponse): string {
-  if (stage.end_mode === "time") return `${fmtHours(stage.end_hours ?? 0)} elapse`;
-  if (stage.end_mode === "temp_hold") return `beer holds ${stage.hold_temp_f?.toFixed(1)}°F for ${fmtHours(stage.hold_hours ?? 0)}`;
-  return `gravity flattens at or below ${stage.gravity_hi?.toFixed(3)} for ${fmtHours(stage.gravity_stable_hours ?? 0)}`;
-}
-
-function runningLine(stage: StageResponse, target: number | null): string {
-  if (stage.temp_mode === "stepped" && stage.temp_from_f != null && stage.temp_to_f != null) {
-    return `Stepping beer temp ${fmtTemp(stage.temp_from_f)} → ${fmtTemp(stage.temp_to_f)}`;
-  }
-  return `Holding beer temp at ${fmtTemp(target)}`;
 }
 
 function modeLabelFor(mode: string): string {
@@ -142,22 +80,9 @@ function stageAtTs(stages: StageResponse[], ts: string): StageResponse | undefin
   return stages[0];
 }
 
-function stageEndSentence(stage: StageResponse): string {
-  const capHours = stage.max_hours ?? (stage.end_mode === "time" ? stage.end_hours : null);
-  const criteria = `Ends when ${criteriaDescription(stage)}`;
-  if (capHours == null || !stage.started_at) {
-    return `${criteria} -- no time cap set.`;
-  }
-  const end = new Date(new Date(stage.started_at).getTime() + capHours * 3_600_000);
-  const dateLabel = end.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  const timeLabel = end.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  return `${criteria} -- projected ${dateLabel}, ${timeLabel}.`;
-}
-
 export function GettingStartedView() {
   const navigate = useNavigate();
-  const state = useAppState();
-  const fermentations = useFermentations();
+  const { state, fermentations, batchId, isLive, detail, series, alerts, setSearchParams } = useBatchSelection();
   // Only meaningful when nothing's running -- a live fermentation's chamber
   // is trivially "on" the whole time it's active, so there's no "orphaned
   // target" question to ask until it's the only thing still holding one.
@@ -166,47 +91,6 @@ export function GettingStartedView() {
   // guards below resolve it for real; chamberOrphaned re-derives the
   // authoritative answer from `hasActiveBatch` once they have.
   const chamberStatus = useChamberStatus(state.data?.active_fermentation_id == null);
-  // The viewed batch lives in the URL, not plain component state -- a
-  // refresh must keep showing whatever you were looking at, not silently
-  // fall back to the default. Only in the absence of that (a fresh load
-  // with no ?batch= at all) does it pick a default, and that default
-  // prefers whatever's actively running over merely "most recently
-  // started" -- fermentations_list sorts by started_at, which a
-  // SimulatorClock-driven batch can't be trusted to place correctly
-  // relative to wall-clock-timed ones.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const viewedIdParam = searchParams.get("batch");
-  const parsedViewedId = viewedIdParam !== null ? Number(viewedIdParam) : NaN;
-  const defaultBatchId = state.data?.active_fermentation_id ?? fermentations.data?.[0]?.id;
-  const batchId = Number.isFinite(parsedViewedId) ? parsedViewedId : defaultBatchId;
-  const isLive = state.data?.active_fermentation_id !== undefined && state.data?.active_fermentation_id === batchId;
-  const detail = useFermentation(batchId, { live: isLive });
-  const series = useSeries(batchId, { live: isLive });
-  const alerts = useAlerts(isLive ? batchId : undefined, { live: isLive });
-
-  // Independent polling intervals (state every 5s, detail/series on their
-  // own slower cadences while live) mean isLive can flip false the moment a
-  // batch completes, stopping detail/series polling, BEFORE their own next
-  // scheduled poll would have picked up the truly-final state -- the
-  // observed symptom was the chart freezing mid-stage with a stale NOW
-  // marker and projection that never cleared. One extra fetch right on the
-  // true->false transition closes that gap; nothing needs to keep polling
-  // after that, since the daemon's completion writes (final sample, status,
-  // stage state) all land in the same control tick, not staggered later.
-  // Deliberately NOT alerts: unlike detail/series (always queried on
-  // batchId, gated only on *polling* via live:isLive), alerts is gated on
-  // *identity* too (isLive ? batchId : undefined) since it's never shown
-  // for a non-live batch -- calling .refetch() on it here bypasses its own
-  // enabled:false and fires with fermentationId already undefined.
-  const wasLiveRef = useRef(isLive);
-  useEffect(() => {
-    if (wasLiveRef.current && !isLive) {
-      detail.refetch();
-      series.refetch();
-    }
-    wasLiveRef.current = isLive;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLive]);
 
   const advanceStage = useAdvanceStage();
   const terminateFermentation = useTerminateFermentation();
@@ -222,25 +106,6 @@ export function GettingStartedView() {
   // either the header action or the read-only view dialog. Cleared on
   // close so a later plain "Start a new fermentation" doesn't reuse it.
   const [cloneFrom, setCloneFrom] = useState<CloneSource | null>(null);
-  const menuRef = useRef<HTMLDetailsElement>(null);
-
-  // Native <details> has no "click outside to close" behavior of its own --
-  // only reopening the <summary> toggles it back off. A capturing pointerdown
-  // listener on the whole document, closing whenever the click lands outside
-  // the element, is the standard way to bolt that on. Attached unconditionally
-  // (not just while open) since it's cheap and the element itself is stable
-  // for the component's whole lifetime -- no need to add/remove it every
-  // open/close cycle.
-  useEffect(() => {
-    function onPointerDown(e: PointerEvent) {
-      const el = menuRef.current;
-      if (el && el.open && e.target instanceof Node && !el.contains(e.target)) {
-        el.removeAttribute("open");
-      }
-    }
-    document.addEventListener("pointerdown", onPointerDown, true);
-    return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, []);
 
   function openCloneDialog(source: CloneSource) {
     setCloneFrom(source);
@@ -257,6 +122,16 @@ export function GettingStartedView() {
   useEffect(() => {
     setScrubIndex(null);
   }, [batchId]);
+
+  // While scrubbing the chart, the stat tiles below show this sample's
+  // values instead of the batch's latest/final ones -- everything else
+  // on the page (header status pill, live bar, elapsed time) keeps
+  // reflecting the batch's actual current state regardless. Called
+  // unconditionally, before the loading/error guards below, same as every
+  // other hook in this component (Rules of Hooks) -- seriesData may still
+  // be undefined here, which the hook itself already treats as "no data
+  // yet."
+  const scrubbed = useScrubbedSeries(series.data, scrubIndex);
 
   if (state.isLoading || fermentations.isLoading) {
     return <p className={styles.loading}>Loading…</p>;
@@ -280,22 +155,6 @@ export function GettingStartedView() {
     ? "Finish or terminate the current batch first"
     : "Unlocks once hardware is mapped";
 
-  const lastBeer = seriesData ? lastDefined(seriesData.beer_temp_f) : null;
-  const lastChamber = seriesData ? lastDefined(seriesData.chamber_temp_f) : null;
-  const lastGravity = seriesData ? lastDefined(seriesData.gravity) : null;
-  const lastTarget = seriesData ? lastDefined(seriesData.effective_target_f) : null;
-  const hasGravity = lastGravity !== null;
-
-  // While scrubbing the chart, the stat tiles below show this sample's
-  // values instead of the batch's latest/final ones -- everything else
-  // on the page (header status pill, live bar, elapsed time) keeps
-  // reflecting the batch's actual current state regardless.
-  const scrubTs = scrubIndex !== null && seriesData ? seriesData.ts[scrubIndex] : null;
-  const displayBeer = scrubTs && seriesData ? seriesData.beer_temp_f[scrubIndex!] : lastBeer;
-  const displayChamber = scrubTs && seriesData ? seriesData.chamber_temp_f[scrubIndex!] : lastChamber;
-  const displayGravity = scrubTs && seriesData ? seriesData.gravity[scrubIndex!] : lastGravity;
-  const displayTarget = scrubTs && seriesData ? seriesData.effective_target_f[scrubIndex!] : lastTarget;
-
   const currentStage = batch?.stages.find((s) => s.state === "running") ?? batch?.stages[batch.stages.length - 1];
   const nextStage = currentStage ? batch?.stages.find((s) => s.seq === currentStage.seq + 1) : undefined;
   const isComplete = batch?.status !== "active";
@@ -304,18 +163,17 @@ export function GettingStartedView() {
   // time regardless of whether the batch itself has finished, so they need
   // the same plain labels a still-running fermentation uses.
   const showFinalLabels = isComplete && scrubIndex === null;
-  const lastMode = seriesData?.chamber_mode[seriesData.chamber_mode.length - 1] ?? "idle";
-  const displayMode = scrubTs && seriesData ? seriesData.chamber_mode[scrubIndex!] : lastMode;
-  const chamberModeLabel = modeLabelFor(displayMode);
-  const displayStage = scrubTs && batch ? (stageAtTs(batch.stages, scrubTs) ?? currentStage) : currentStage;
-  const modeTone: PillTone = isComplete ? "neutral" : lastMode === "cool" ? "cool" : lastMode === "heat" ? "heat" : "idle";
+  const chamberModeLabel = modeLabelFor(scrubbed.mode);
+  const displayStage = scrubbed.ts && batch ? (stageAtTs(batch.stages, scrubbed.ts) ?? currentStage) : currentStage;
+  const modeTone: PillTone =
+    isComplete ? "neutral" : scrubbed.mode === "cool" ? "info" : scrubbed.mode === "heat" ? "accent" : "positive";
   const modeLabel = isComplete
     ? batch?.status === "terminated"
       ? "Terminated"
       : "Batch complete"
-    : lastMode === "cool"
+    : scrubbed.mode === "cool"
       ? "Cooling"
-      : lastMode === "heat"
+      : scrubbed.mode === "heat"
         ? "Heating"
         : "Idle · in range";
   const elapsedDisplay =
@@ -330,10 +188,6 @@ export function GettingStartedView() {
 
   const stageIdx = currentStage ? (batch?.stages.findIndex((s) => s.id === currentStage.id) ?? -1) : -1;
   const stageReady = currentStage?.criteria_met_at != null;
-
-  function closeMenu() {
-    menuRef.current?.removeAttribute("open");
-  }
 
   return (
     <main className={styles.page}>
@@ -388,67 +242,19 @@ export function GettingStartedView() {
       )}
 
       <div className={styles.headerRow}>
-        <div className={styles.headerTitleCol}>
-          <div className={styles.eyebrow}>The Krauken · Release the Krausen</div>
-          <details ref={menuRef} className={styles.titleMenu}>
-            <summary className={styles.titleMenuButton}>
-              <span className={styles.titleRow}>
-                <h1 className={styles.title}>{batch?.name ?? "No fermentation yet"}</h1>
-                {batch?.demo && (
-                  <Tag tone="gray" size="sm">
-                    Demo
-                  </Tag>
-                )}
-              </span>
-              <span className={styles.chevronCircle}>
-                {/* An inline SVG, not the Unicode ⌄ glyph -- that character's
-                    ink sits visibly above center in most fonts (glyph metrics,
-                    not a flex-centering bug), so no amount of align-items:
-                    center on .chevronCircle could fix it. A hand-drawn path
-                    centers by construction instead of by font luck. */}
-                <svg className={styles.chevron} viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-                  <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </span>
-            </summary>
-            <div className={styles.titleMenuPanel}>
-              <button
-                type="button"
-                className={styles.titleMenuAction}
-                disabled={!canStartNew}
-                onClick={() => {
-                  if (!canStartNew) return;
-                  closeMenu();
-                  setCloneFrom(null);
-                  setShowStartForm(true);
-                }}
-              >
-                <span>Start a new fermentation</span>
-                {!canStartNew && <span className={styles.titleMenuNote}>{cannotStartReason}</span>}
-              </button>
-              <div className={styles.titleMenuDivider} />
-              <div className={styles.titleMenuLabel}>Fermentations</div>
-              {fermentations.data && fermentations.data.length > 0 ? (
-                fermentations.data.map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    className={`${styles.titleMenuItem} ${f.id === batchId ? styles.titleMenuItemActive : ""}`}
-                    onClick={() => {
-                      setSearchParams({ batch: String(f.id) });
-                      closeMenu();
-                    }}
-                  >
-                    <span>{f.name}</span>
-                    <span className={styles.titleMenuNote}>{fmtMenuDateRange(f)}</span>
-                  </button>
-                ))
-              ) : (
-                <div className={styles.titleMenuNote}>Your own batches appear here once you start one.</div>
-              )}
-            </div>
-          </details>
-        </div>
+        <BatchTitleMenu
+          batchName={batch?.name ?? "No fermentation yet"}
+          isDemo={batch?.demo ?? false}
+          canStartNew={canStartNew}
+          cannotStartReason={cannotStartReason}
+          fermentations={fermentations.data}
+          currentBatchId={batchId}
+          onStartNew={() => {
+            setCloneFrom(null);
+            setShowStartForm(true);
+          }}
+          onSelectBatch={(id) => setSearchParams({ batch: String(id) })}
+        />
 
         <div className={styles.headerActions}>
           {batch && (
@@ -482,54 +288,23 @@ export function GettingStartedView() {
       )}
 
       {isLive && batch && currentStage && (
-        <Card padding="sm" className={styles.liveBar}>
-          <div className={styles.liveInfo}>
-            <div className={styles.liveTagRow}>
-              <Tag tone={stageReady ? "orange" : "blue"} size="sm">
-                {currentStage.name} &middot; stage {stageIdx + 1} of {batch.stages.length}
-              </Tag>
-              <span className={styles.liveInfoTitle}>{runningLine(currentStage, lastTarget)}</span>
-            </div>
-            <span className={styles.liveInfoSub}>{stageEndSentence(currentStage)}</span>
-            {nextStage ? (
-              <label className={styles.autoRow}>
-                <Switch
-                  checked={currentStage.advance_mode === "auto"}
-                  onChange={(auto) =>
-                    updateStages.mutate({
-                      fermentationId: batch.id,
-                      stages: { [String(currentStage.id)]: { advance_mode: auto ? "auto" : "manual" } },
-                    })
-                  }
-                />
-                <span>
-                  {currentStage.advance_mode === "auto"
-                    ? "Auto-advance on -- the next stage starts as soon as the criteria are met."
-                    : `Manual advance -- the Krauken holds ${currentStage.name} after the criteria are met until you say go.`}
-                </span>
-              </label>
-            ) : (
-              <span className={styles.liveLastStageNote}>
-                Last stage -- the Krauken holds here until you end the fermentation.
-              </span>
-            )}
-          </div>
-          <div className={styles.liveActions}>
-            {nextStage && (
-              <Button
-                variant={stageReady && currentStage.advance_mode === "manual" ? "primary" : "outline"}
-                size="sm"
-                onClick={() => advanceStage.mutate(batch.id)}
-                disabled={advanceStage.isPending}
-              >
-                Advance to {nextStage.name}
-              </Button>
-            )}
-            <Button variant="outline" size="sm" onClick={() => setShowEditProfile(true)}>
-              Edit profile
-            </Button>
-          </div>
-        </Card>
+        <LiveStageBar
+          batch={batch}
+          currentStage={currentStage}
+          nextStage={nextStage}
+          stageReady={stageReady}
+          stageIdx={stageIdx}
+          lastTarget={scrubbed.target}
+          onAdvance={() => advanceStage.mutate(batch.id)}
+          advancePending={advanceStage.isPending}
+          onSetAutoAdvance={(auto) =>
+            updateStages.mutate({
+              fermentationId: batch.id,
+              stages: { [String(currentStage.id)]: { advance_mode: auto ? "auto" : "manual" } },
+            })
+          }
+          onEditProfile={() => setShowEditProfile(true)}
+        />
       )}
 
       {batch && seriesData && (
@@ -537,24 +312,24 @@ export function GettingStartedView() {
           <div className={styles.statsGrid}>
             <Card padding="sm">
               <MetricStat
-                value={fmtTemp(displayBeer)}
+                value={fmtTemp(scrubbed.beer)}
                 label={showFinalLabels ? "Beer temp at end" : "Beer temp"}
-                sublabel={`Target ${fmtTemp(displayTarget)}`}
+                sublabel={`Target ${fmtTemp(scrubbed.target)}`}
                 accent="orange"
               />
             </Card>
             <Card padding="sm">
               <MetricStat
-                value={fmtTemp(displayChamber)}
+                value={fmtTemp(scrubbed.chamber)}
                 label={showFinalLabels ? "Chamber at end" : "Chamber"}
                 sublabel={chamberModeLabel}
                 accent="blue"
               />
             </Card>
-            {hasGravity && (
+            {scrubbed.hasGravity && (
               <Card padding="sm">
                 <MetricStat
-                  value={displayGravity !== null ? displayGravity.toFixed(3) : "--"}
+                  value={scrubbed.gravity !== null ? scrubbed.gravity.toFixed(3) : "--"}
                   label={showFinalLabels ? "Final gravity" : "Gravity"}
                   sublabel={
                     batch.og != null
@@ -569,10 +344,10 @@ export function GettingStartedView() {
             )}
             <Card padding="sm">
               <MetricStat
-                value={fmtTemp(displayTarget)}
+                value={fmtTemp(scrubbed.target)}
                 label="Setpoint"
                 sublabel={`${displayStage?.name ?? ""} · ±0.5°F`}
-                accent="plan"
+                accent="gray"
               />
             </Card>
           </div>

@@ -306,6 +306,10 @@ export interface ReorderStagesResponse {
 
 export interface YeastPreset {
   name: string;
+  // Dropdown-grouping label only (Ale/Lager/Belgian-Saison/Wheat-
+  // Hefeweizen/Kveik/Custom) -- cosmetic, never branched on for stage
+  // logic. Absent on any hand-authored preset from before this existed.
+  category?: string | null;
   // The new-fermentation dialog's starting plan for this strain, verbatim
   // -- literal StageInput templates, not flags for the UI to interpret.
   default_stages: StageInput[];

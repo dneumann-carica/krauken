@@ -14,7 +14,7 @@
 .accentNavy   { color: var(--kr-ink); }
 .accentBlue   { color: var(--kr-cool-mid); }
 .accentGreen  { color: var(--kr-ok); }
-.accentPlan   { color: var(--kr-plan); }
+.accentGray   { color: var(--kr-plan); }
 
 .label {
   margin-top: var(--kr-space-2);

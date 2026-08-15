@@ -4,7 +4,19 @@
 KRAUKEN_DB_PATH=/var/lib/krauken/krauken.db
 KRAUKEN_DAEMON_SOCKET=/run/krauken/daemon.sock
 KRAUKEN_SUPERVISOR_SOCKET=/run/krauken/supervisor.sock
+KRAUKEN_SIMULATOR_SOCKET=/run/krauken/simulator.sock
+KRAUKEN_MANUAL_SOCKET=/run/krauken/manual.sock
 KRAUKEN_HEARTBEAT_INTERVAL_S=60
 # 1 enables the /api/v1/dev/* endpoints (Manual driver dev panel). Leave
 # unset/0 in any deployment that isn't actively being developed against.
 KRAUKEN_DEV_PANEL=0
+# Which hci device (bluetoothd numbering) the Tilt BLE scanner opens a raw
+# socket against. 0 (hci0) is correct for a Pi's onboard Bluetooth; only
+# change this if you're using a USB BLE dongle instead. No color config --
+# the scanner watches for all 8 known Tilt colors and Hardware Setup shows
+# whichever are actually detected.
+KRAUKEN_TILT_HCI_DEVICE=0
+# No KRAUKEN_BREWPI_* -- the BrewPi driver auto-scans every /dev/ttyACM*/
+# ttyUSB* and identifies a real BrewPi by its version response, rather
+# than needing a configured port (a single-chamber install has at most
+# one BrewPi to find).

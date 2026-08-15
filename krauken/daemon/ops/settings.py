@@ -5,15 +5,11 @@ since the next setting won't be the last.
 """
 from __future__ import annotations
 
-import datetime
 from typing import Any, Mapping
 
+from krauken.daemon.timefmt import iso_now as _iso_now
 from krauken.db import writes
 from krauken.ipc.server import op
-
-
-def _iso_now(clock) -> str:
-    return datetime.datetime.fromtimestamp(clock.now(), tz=datetime.timezone.utc).isoformat()
 
 
 @op("settings.save", mutating=True)

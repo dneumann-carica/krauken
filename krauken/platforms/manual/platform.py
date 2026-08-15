@@ -19,7 +19,13 @@ from typing import Any, Mapping, Sequence
 
 from krauken.contracts.models import DeviceCandidate, Health
 from krauken.contracts.roles import CHAMBER_BUNDLE, Role
-from krauken.platforms.manual.live import ManualChamberState, ManualPanel, ManualTiltState
+from krauken.platforms.manual.live import (
+    PROBE_1_ADDRESS,
+    PROBE_2_ADDRESS,
+    ManualChamberState,
+    ManualPanel,
+    ManualTiltState,
+)
 
 PLATFORM_ID = "manual"
 DISPLAY_NAME = "Manual (dev panel)"
@@ -55,7 +61,11 @@ class ManualPlatform:
                     "chamber_temp_f": chamber.temp_f,
                     **({"beer_temp_f": chamber.probe2_temp_f} if chamber.probe2_enabled else {}),
                 },
-                identity={"probe_addresses": ["manual-probe-1", "manual-probe-2"] if chamber.probe2_enabled else ["manual-probe-1"]},
+                identity={
+                    "probe_addresses": [PROBE_1_ADDRESS, PROBE_2_ADDRESS]
+                    if chamber.probe2_enabled
+                    else [PROBE_1_ADDRESS]
+                },
                 simulated=True,
                 available_tests=("fire_outlet", "identify_probes"),
             ),

@@ -17,6 +17,10 @@ from pathlib import Path
 from krauken.daemon.testing import build_scenario_daemon
 from krauken.db.connection import open_ro
 from krauken.ipc.client import AsyncIPCClient
+from krauken.platforms.manual.service import ManualService
+from krauken.platforms.manual.service import build_service as build_manual_service
+from krauken.platforms.simulator.service import SimulatorService
+from krauken.platforms.simulator.service import build_service as build_simulator_service
 
 FULL_PROFILE_STAGES = [
     {
@@ -51,6 +55,20 @@ TEST_STAGES = [
 ]
 
 
+async def _start_platform_services(short_tmp: Path) -> tuple[SimulatorService, ManualService, Path, Path]:
+    """Simulator's/Manual's own out-of-process servers, for
+    build_scenario_daemon()'s daemon to reach over IPC -- Manual's is
+    started too (build_daemon() always wants both clients) even though
+    these scenarios never map it to anything."""
+    simulator_socket = short_tmp / "sim.sock"
+    manual_socket = short_tmp / "man.sock"
+    simulator_service = build_simulator_service(socket_path=simulator_socket)
+    manual_service = build_manual_service(socket_path=manual_socket)
+    await simulator_service.start()
+    await manual_service.start()
+    return simulator_service, manual_service, simulator_socket, manual_socket
+
+
 async def _scan_and_wait(client: AsyncIPCClient) -> None:
     result = await client.call("hardware.scan_start")
     scan_id = result["scan_id"]
@@ -66,8 +84,12 @@ async def test_compressed_two_stage_fermentation_runs_to_completion(tmp_path: Pa
     db_path = tmp_path / "krauken.db"
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))  # AF_UNIX path-length limit -- see tests/api/conftest.py
     socket_path = short_tmp / "d.sock"
+    simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
 
-    daemon, clock = build_scenario_daemon(db_path=db_path, socket_path=socket_path, control_tick_interval_s=600.0)
+    daemon, clock = build_scenario_daemon(
+        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        control_tick_interval_s=600.0,
+    )
     await daemon.start()
     client = AsyncIPCClient(socket_path)
     try:
@@ -104,6 +126,8 @@ async def test_compressed_two_stage_fermentation_runs_to_completion(tmp_path: Pa
         assert status == "completed", f"fermentation never completed in time (last status: {status})"
     finally:
         await daemon.stop()
+        await simulator_service.stop()
+        await manual_service.stop()
         shutil.rmtree(short_tmp, ignore_errors=True)
 
     conn = open_ro(db_path)
@@ -151,8 +175,12 @@ async def test_control_tick_writes_rich_live_state_telemetry(tmp_path: Path):
     db_path = tmp_path / "krauken.db"
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))
     socket_path = short_tmp / "d.sock"
+    simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
 
-    daemon, clock = build_scenario_daemon(db_path=db_path, socket_path=socket_path, control_tick_interval_s=600.0)
+    daemon, clock = build_scenario_daemon(
+        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        control_tick_interval_s=600.0,
+    )
     await daemon.start()
     client = AsyncIPCClient(socket_path)
     try:
@@ -177,6 +205,8 @@ async def test_control_tick_writes_rich_live_state_telemetry(tmp_path: Path):
         assert payload["beer_temp_ok"] is True
     finally:
         await daemon.stop()
+        await simulator_service.stop()
+        await manual_service.stop()
         shutil.rmtree(short_tmp, ignore_errors=True)
 
 
@@ -206,8 +236,12 @@ async def test_full_fermentation_profile_completes_with_correct_decisions(tmp_pa
     db_path = tmp_path / "krauken.db"
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))
     socket_path = short_tmp / "d.sock"
+    simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
 
-    daemon, clock = build_scenario_daemon(db_path=db_path, socket_path=socket_path, control_tick_interval_s=300.0)
+    daemon, clock = build_scenario_daemon(
+        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        control_tick_interval_s=300.0,
+    )
     await daemon.start()
     client = AsyncIPCClient(socket_path)
     try:
@@ -248,6 +282,8 @@ async def test_full_fermentation_profile_completes_with_correct_decisions(tmp_pa
         assert status == "completed"
     finally:
         await daemon.stop()
+        await simulator_service.stop()
+        await manual_service.stop()
         shutil.rmtree(short_tmp, ignore_errors=True)
 
     conn = open_ro(db_path)
@@ -305,8 +341,12 @@ async def test_full_fermentation_auto_detects_og_when_not_supplied(tmp_path: Pat
     db_path = tmp_path / "krauken.db"
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))
     socket_path = short_tmp / "d.sock"
+    simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
 
-    daemon, clock = build_scenario_daemon(db_path=db_path, socket_path=socket_path, control_tick_interval_s=300.0)
+    daemon, clock = build_scenario_daemon(
+        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        control_tick_interval_s=300.0,
+    )
     await daemon.start()
     client = AsyncIPCClient(socket_path)
     og = None
@@ -346,6 +386,8 @@ async def test_full_fermentation_auto_detects_og_when_not_supplied(tmp_path: Pat
                 raise AssertionError("OG never locked in within 12 simulated hours")
     finally:
         await daemon.stop()
+        await simulator_service.stop()
+        await manual_service.stop()
         shutil.rmtree(short_tmp, ignore_errors=True)
 
     assert og is not None

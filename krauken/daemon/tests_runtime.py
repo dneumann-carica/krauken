@@ -15,12 +15,13 @@ layer" piece changes.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from krauken.contracts.errors import TestAlreadyRunning, UnknownTest, ValidationError
+from krauken.daemon import drivers
+from krauken.daemon.timefmt import iso as _iso
 from krauken.db import queries
 
 FIRE_OUTLET_DURATION_S = 10.0
@@ -30,10 +31,6 @@ FIRE_OUTLET_DURATION_S = 10.0
 IDENTIFY_PROBES_WINDOW_S = 90.0
 IDENTIFY_PROBES_POLL_S = 1.0
 IDENTIFY_PROBES_DELTA_F = 3.0
-
-
-def _iso(ts: float) -> str:
-    return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
 
 
 @dataclass
@@ -130,25 +127,19 @@ async def _run_fire_outlet(ctx: Any, job: TestJob, duration_s: float, outlet: An
         raise
 
 
-def _read_probe_temps(ctx: Any, device_id: str) -> dict[str, float | None]:
+async def _read_probe_temps(ctx: Any, device_id: str) -> dict[str, float | None]:
     """Real per-probe temps for whichever device/platform is running this
     test -- the one place identify_probes' delta detection touches live
-    driver state. Simulator/Manual are the only platforms with a live probe
-    model today; an unknown device_id just reads as no probes at all."""
-    if device_id == "simulator:chamber":
-        engine = ctx.sim_engine
-        chamber_f = engine.read_chamber().temp_f  # ticks the engine forward too
-        temps = {"sim-probe-1": chamber_f}
-        if engine.probe2_enabled:
-            temps["sim-probe-2"] = engine.probe2_temp_f
-        return temps
-    if device_id == "manual:chamber":
-        chamber = ctx.manual_panel.chamber
-        temps = {"manual-probe-1": chamber.temp_f}
-        if chamber.probe2_enabled:
-            temps["manual-probe-2"] = chamber.probe2_temp_f
-        return temps
-    return {}
+    driver state. Dispatches through daemon/drivers.py's chamber_driver()
+    exactly like the control loop does, so this has no hardcoded knowledge
+    of which platforms exist or what their probe-address strings look like
+    (ChamberDriver.probe_temps()) -- an unmapped/unknown platform just reads
+    as no probes at all."""
+    platform = device_id.split(":", 1)[0]
+    driver = drivers.chamber_driver(ctx, platform, device_id)
+    if driver is None:
+        return {}
+    return await driver.probe_temps()
 
 
 async def _run_identify_probes(ctx: Any, job: TestJob, device_id: str, probe_addresses: list[str], window_s: float) -> None:
@@ -160,7 +151,7 @@ async def _run_identify_probes(ctx: Any, job: TestJob, device_id: str, probe_add
             # reading to job.result while running, so the wizard's UI has a
             # live number to show -- proof the test is doing something even
             # with only one probe.
-            baseline = _read_probe_temps(ctx, device_id)
+            baseline = await _read_probe_temps(ctx, device_id)
             current = dict(baseline)
             job.result = {"identified_address": None, "baseline_f": dict(baseline), "current_f": dict(current)}
             fast_window_s = min(window_s, 2.0)
@@ -169,7 +160,7 @@ async def _run_identify_probes(ctx: Any, job: TestJob, device_id: str, probe_add
                 step_s = min(0.5, fast_window_s - elapsed_s)
                 await ctx.clock.sleep(step_s)
                 elapsed_s += step_s
-                current = _read_probe_temps(ctx, device_id)
+                current = await _read_probe_temps(ctx, device_id)
                 job.result = {"identified_address": None, "baseline_f": dict(baseline), "current_f": dict(current)}
             job.state = "completed"
             job.result = {
@@ -179,7 +170,7 @@ async def _run_identify_probes(ctx: Any, job: TestJob, device_id: str, probe_add
             }
             return
 
-        baseline = _read_probe_temps(ctx, device_id)
+        baseline = await _read_probe_temps(ctx, device_id)
         current = dict(baseline)
         identified: str | None = None
         job.result = {"identified_address": None, "baseline_f": dict(baseline), "current_f": dict(current)}
@@ -187,7 +178,7 @@ async def _run_identify_probes(ctx: Any, job: TestJob, device_id: str, probe_add
         while elapsed_s < window_s:
             await ctx.clock.sleep(IDENTIFY_PROBES_POLL_S)
             elapsed_s += IDENTIFY_PROBES_POLL_S
-            current = _read_probe_temps(ctx, device_id)
+            current = await _read_probe_temps(ctx, device_id)
             for addr in probe_addresses:
                 b, c = baseline.get(addr), current.get(addr)
                 if b is not None and c is not None and (c - b) >= IDENTIFY_PROBES_DELTA_F:

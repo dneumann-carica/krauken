@@ -40,6 +40,8 @@ from typing import Any
 from krauken.daemon.testing import build_scenario_daemon
 from krauken.db.connection import open_ro, open_rw
 from krauken.ipc.client import AsyncIPCClient
+from krauken.platforms.manual.service import build_service as build_manual_service
+from krauken.platforms.simulator.service import build_service as build_simulator_service
 
 # The five stages exactly as the mockup's blankPlan() defines them --
 # primary is the only one that can't be disabled. max_hours is set on every
@@ -103,12 +105,20 @@ async def _scan_and_wait(client: AsyncIPCClient) -> None:
     raise AssertionError("scan never completed")
 
 
-async def _generate(scratch_db: Path, socket_path: Path) -> int:
-    """Runs a real daemon through the demo profile inside `scratch_db`,
-    end to end via IPC exactly as a real client would -- returns the
-    resulting fermentation_id."""
+async def _generate(scratch_db: Path, socket_path: Path, simulator_socket: Path, manual_socket: Path) -> int:
+    """Runs a real daemon -- talking to a real, separately-running
+    Simulator process over IPC, exactly like production -- through the
+    demo profile inside `scratch_db`, end to end via IPC exactly as a real
+    client would -- returns the resulting fermentation_id. Manual's own
+    process is started too (build_daemon() always wants both clients) even
+    though the demo mapping never touches it."""
+    simulator_service = build_simulator_service(socket_path=simulator_socket)
+    manual_service = build_manual_service(socket_path=manual_socket)
+    await simulator_service.start()
+    await manual_service.start()
     daemon, clock = build_scenario_daemon(
-        db_path=scratch_db, socket_path=socket_path, control_tick_interval_s=CONTROL_TICK_INTERVAL_S,
+        db_path=scratch_db, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        control_tick_interval_s=CONTROL_TICK_INTERVAL_S,
     )
     await daemon.start()
     client = AsyncIPCClient(socket_path)
@@ -159,6 +169,8 @@ async def _generate(scratch_db: Path, socket_path: Path) -> int:
         return fermentation_id
     finally:
         await daemon.stop()
+        await simulator_service.stop()
+        await manual_service.stop()
 
 
 def _next_id(conn, table: str) -> int:
@@ -259,8 +271,10 @@ def seed_demo_batch(db_path: Path | str) -> None:
     short_tmp = Path(tempfile.mkdtemp(prefix="krseed-"))  # AF_UNIX path-length limit -- see tests/api/conftest.py
     scratch_db = short_tmp / "scratch.db"
     socket_path = short_tmp / "d.sock"
+    simulator_socket = short_tmp / "sim.sock"
+    manual_socket = short_tmp / "man.sock"
     try:
-        fermentation_id = asyncio.run(_generate(scratch_db, socket_path))
+        fermentation_id = asyncio.run(_generate(scratch_db, socket_path, simulator_socket, manual_socket))
         _copy_into(scratch_db, db_path, fermentation_id)
     finally:
         shutil.rmtree(short_tmp, ignore_errors=True)

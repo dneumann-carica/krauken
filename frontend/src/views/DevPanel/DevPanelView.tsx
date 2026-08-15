@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ApiError } from "../../api/client";
 import {
+  ApiError,
   useClock,
   useManualReadings,
   useSetManualReading,

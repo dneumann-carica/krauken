@@ -34,6 +34,14 @@ from krauken.contracts.models import BeerReading, ChamberMode, ChamberReading, G
 
 _MODE_MAP = {"idle": ChamberMode.IDLE, "cool": ChamberMode.COOL, "heat": ChamberMode.HEAT}
 
+# The probe-address strings this platform's discover() advertises in
+# DeviceCandidate.identity["probe_addresses"] (platform.py) -- defined here,
+# not there, so ManualChamberDriver.probe_temps() can key its readings off
+# the same constants discover() advertised instead of two files each
+# hand-typing the same literal strings.
+PROBE_1_ADDRESS = "manual-probe-1"
+PROBE_2_ADDRESS = "manual-probe-2"
+
 
 @dataclass
 class ManualChamberState:
@@ -81,8 +89,8 @@ def _last_good_ts(clock: Clock, health: Health) -> float | None:
 
 
 class ManualChamberDriver:
-    def __init__(self, panel: ManualPanel):
-        self._panel = panel
+    def __init__(self, panel: ManualPanel, device_id: str | None = None):
+        self._panel = panel  # device_id unused -- Manual has exactly one chamber device
 
     async def read_chamber(self) -> ChamberReading:
         s = self._panel.chamber
@@ -100,16 +108,28 @@ class ManualChamberDriver:
     async def commanded_target(self) -> float | None:
         return self._panel.chamber.commanded_target_f
 
+    async def set_ambient_location(self, location: str | None) -> None:
+        pass  # Manual has no ambient/physics concept at all -- see the Protocol's own docstring.
+
+    async def probe_temps(self) -> dict[str, float | None]:
+        s = self._panel.chamber
+        temps: dict[str, float | None] = {PROBE_1_ADDRESS: s.temp_f}
+        if s.probe2_enabled:
+            temps[PROBE_2_ADDRESS] = s.probe2_temp_f
+        return temps
+
 
 class ManualBeerTempSource:
     """Also the driver returned when beer_temp is mapped onto the chamber
     controller's optional second probe (probe2_enabled) -- both read the
-    Tilt's shared state today; distinguishing "which manual device is
-    actually asking" would need device_id threaded through daemon/drivers.py,
-    which is more than this reading needs to be useful for its actual
-    purpose (exercising the control loop against a hand-picked value)."""
+    same shared panel.tilt state today. device_id is accepted (see
+    daemon/drivers.py) but still unused here even though it's now
+    available: both "which manual device is actually asking" paths read
+    the identical shared state regardless, so there's nothing to
+    disambiguate -- unlike Tilt's live.py, which genuinely needs it to
+    pick a color."""
 
-    def __init__(self, panel: ManualPanel):
+    def __init__(self, panel: ManualPanel, device_id: str | None = None):
         self._panel = panel
 
     async def read(self) -> BeerReading:
@@ -120,7 +140,7 @@ class ManualBeerTempSource:
 
 
 class ManualGravitySource:
-    def __init__(self, panel: ManualPanel):
+    def __init__(self, panel: ManualPanel, device_id: str | None = None):
         self._panel = panel
 
     async def read(self) -> GravityReading:

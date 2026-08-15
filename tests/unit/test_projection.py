@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from krauken.contracts.projection import OPEN_ENDED_STAGE_HORIZON_H, project_forward
+from krauken.platforms.simulator.projection import OPEN_ENDED_STAGE_HORIZON_H, project_forward
 
 # One point per hour, not the real PROJECTION_STEP_H -- keeps the expected
 # t_h_from_now values exact round numbers without touching production

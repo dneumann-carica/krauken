@@ -20,7 +20,7 @@ from typing import Any, Mapping, Sequence
 
 from krauken.contracts.models import DeviceCandidate, Health
 from krauken.contracts.roles import CHAMBER_BUNDLE, Role
-from krauken.platforms.simulator.live import SimPlantEngine
+from krauken.platforms.simulator.live import PROBE_1_ADDRESS, PROBE_2_ADDRESS, SimPlantEngine
 
 PLATFORM_ID = "simulator"
 DISPLAY_NAME = "Simulator"
@@ -51,7 +51,7 @@ class SimulatorPlatform:
                 detail_line="Outlet 1 cool / Outlet 2 heat - simulated plant",
                 reading_summary=f"{chamber_f:.1f}°F chamber" if chamber_f is not None else None,
                 readings={"chamber_temp_f": chamber_f},
-                identity={"probe_addresses": ["sim-probe-1", "sim-probe-2"] if probe2 else ["sim-probe-1"]},
+                identity={"probe_addresses": [PROBE_1_ADDRESS, PROBE_2_ADDRESS] if probe2 else [PROBE_1_ADDRESS]},
                 simulated=True,
                 available_tests=("fire_outlet", "identify_probes"),
             ),

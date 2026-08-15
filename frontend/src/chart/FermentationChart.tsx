@@ -1,12 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { SeriesResponse, StageResponse } from "../api/types";
+import { formatDateTime } from "../lib/format";
 import { useMeasuredWidth } from "../lib/useMeasuredWidth";
 import {
   buildGapPaths,
   buildLinePath,
   dutyColumns,
-  formatScrubMoment,
   gapBreakIndices,
   gravityScale,
   nearestIndex,
@@ -486,7 +486,7 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
                     textAnchor={model.xs[scrubIndex] < 60 ? "start" : model.xs[scrubIndex] > plotWidth - 60 ? "end" : "middle"}
                     className={styles.scrubLabel}
                   >
-                    {formatScrubMoment(series.ts[scrubIndex])}
+                    {formatDateTime(new Date(series.ts[scrubIndex]))}
                   </text>
                 </>
               )}

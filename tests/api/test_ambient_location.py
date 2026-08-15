@@ -6,14 +6,13 @@ tests/api/test_settings.py).
 """
 from __future__ import annotations
 
-import asyncio
+from typing import Awaitable, Callable
 
 from httpx import AsyncClient
 
-from krauken.daemon.app import Daemon
-from krauken.daemon.control_loop import control_tick
 from krauken.platforms.simulator.live import AMBIENT_PRESETS
 from krauken.platforms.simulator.plant import AmbientParams
+from krauken.platforms.simulator.service import SimulatorService
 
 STAGES = [
     {
@@ -23,26 +22,19 @@ STAGES = [
 ]
 
 
-async def _scan_and_wait(client: AsyncClient) -> None:
-    resp = await client.post("/api/v1/hardware/scan")
-    scan_id = resp.json()["scan_id"]
-    for _ in range(50):
-        status = (await client.get(f"/api/v1/hardware/scan/{scan_id}")).json()
-        if status["state"] == "complete":
-            return
-        await asyncio.sleep(0.02)
-    raise AssertionError("scan never completed")
+async def test_chamber_location_setting_reaches_the_sim_engine(
+    client: AsyncClient,
+    simulator_service: SimulatorService,
+    scan_and_wait: Callable[[], Awaitable[dict]],
+    tick: Callable[[], Awaitable[None]],
+):
+    # simulator_service.engine is the SAME SimPlantEngine the daemon's
+    # simulator_client reaches over IPC -- both live in this one test
+    # process (see tests/api/conftest.py) -- so reading it directly here
+    # is a legitimate, un-round-tripped assertion, not a mock.
+    assert simulator_service.engine.params.ambient == AmbientParams()  # generic default before any location is set
 
-
-async def _tick(daemon: Daemon) -> None:
-    async with daemon.server.state_lock:
-        await control_tick(daemon.ctx)
-
-
-async def test_chamber_location_setting_reaches_the_sim_engine(client: AsyncClient, daemon: Daemon):
-    assert daemon.ctx.sim_engine.params.ambient == AmbientParams()  # generic default before any location is set
-
-    await _scan_and_wait(client)
+    await scan_and_wait()
     await client.put(
         "/api/v1/hardware/mapping",
         json={"roles": {"chamber_temp": "simulator:chamber", "beer_temp": "simulator:tilt"}},
@@ -50,9 +42,9 @@ async def test_chamber_location_setting_reaches_the_sim_engine(client: AsyncClie
     await client.post("/api/v1/fermentations", json={"name": "Ambient test", "stages": STAGES})
 
     await client.put("/api/v1/settings/chamber_location", json={"value": "Garage"})
-    await _tick(daemon)
-    assert daemon.ctx.sim_engine.params.ambient == AMBIENT_PRESETS["Garage"]
+    await tick()
+    assert simulator_service.engine.params.ambient == AMBIENT_PRESETS["Garage"]
 
     await client.put("/api/v1/settings/chamber_location", json={"value": "Kitchen"})
-    await _tick(daemon)
-    assert daemon.ctx.sim_engine.params.ambient == AMBIENT_PRESETS["Kitchen"]
+    await tick()
+    assert simulator_service.engine.params.ambient == AMBIENT_PRESETS["Kitchen"]

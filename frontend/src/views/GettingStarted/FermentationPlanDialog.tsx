@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { ApiError } from "../../api/client";
 import {
+  apiErrorMessage,
   useInsertStage,
   useReorderStages,
   useSetStageEnabled,
@@ -9,7 +9,10 @@ import {
   useYeasts,
 } from "../../api/queries";
 import type { StageInput, StageResponse } from "../../api/types";
-import { Button, Dialog, Switch, Tag } from "../../design/primitives";
+import { Button, Combobox, Dialog, Switch, Tag } from "../../design/primitives";
+import type { ComboboxOption } from "../../design/primitives";
+import type { StageEndCriteriaFields, StageEndCriteriaFormat } from "../../lib/stageFormat";
+import { describeStageEndCriteria } from "../../lib/stageFormat";
 import styles from "./FermentationPlanDialog.module.css";
 
 type TempMode = "constant" | "stepped";
@@ -80,10 +83,36 @@ function fromStageInput(s: StageInput, key: string, index: number): StageForm {
   };
 }
 
+/** StageResponse's wire shape widens temp_mode/end_mode/advance_mode to
+ * plain `string` (whatever the backend returns) where StageInput's authoring
+ * shape narrows them to real literal unions -- an explicit field-by-field
+ * copy instead of a blind `as unknown as StageInput` cast, so only those
+ * three fields need a (narrow, well-scoped) assertion instead of silently
+ * bypassing every field's shape checking. */
+function stageResponseToStageInput(s: StageResponse): StageInput {
+  return {
+    name: s.name,
+    temp_mode: s.temp_mode as StageInput["temp_mode"],
+    temp_f: s.temp_f,
+    temp_from_f: s.temp_from_f,
+    temp_to_f: s.temp_to_f,
+    ramp_hours: s.ramp_hours,
+    end_mode: s.end_mode as StageInput["end_mode"],
+    end_hours: s.end_hours,
+    hold_temp_f: s.hold_temp_f,
+    hold_hours: s.hold_hours,
+    gravity_hi: s.gravity_hi,
+    gravity_stable_hours: s.gravity_stable_hours,
+    min_hours: s.min_hours,
+    max_hours: s.max_hours,
+    advance_mode: s.advance_mode as StageInput["advance_mode"],
+  };
+}
+
 function fromStageResponse(s: StageResponse): StageForm {
   const completed = s.state === "finished" || (s.state === "skipped" && s.started_at !== null);
   return {
-    ...fromStageInput(s as unknown as StageInput, String(s.id), -1),
+    ...fromStageInput(stageResponseToStageInput(s), String(s.id), -1),
     key: String(s.id),
     on: s.state !== "skipped",
     locked: s.state === "running",
@@ -114,17 +143,23 @@ function toStageInput(s: StageForm): StageInput {
   };
 }
 
+const FORM_CRITERIA_FORMAT: StageEndCriteriaFormat = {
+  hours: (h) => (h != null ? `${h}h` : "?h"),
+  tempF: (t) => (t != null ? `${t.toFixed(1)}°F` : "?°F"),
+  gravity: (g) => (g != null ? g.toFixed(3) : "?"),
+};
+
 function summaryLine(s: StageForm): string {
   const temp = s.tempMode === "constant" ? `${s.tempF || "?"}°F` : `${s.tempFrom || "?"}→${s.tempTo || "?"}°F`;
-  const end =
-    s.endMode === "gravity"
-      ? `ends when gravity flattens at or below ${s.gravHi || "?"} for ${s.gravH || "?"}h`
-      : s.endMode === "gravity_below"
-        ? `ends when gravity drops below ${s.gravHi || "?"} and stays there for ${s.holdHours || "?"}h`
-        : s.endMode === "temp_hold"
-          ? `ends after holding ${s.holdTemp || "?"}°F for ${s.holdHours || "?"}h`
-          : `ends when ${s.endHours || "?"}h elapse`;
-  return `${temp} · ${end}`;
+  const criteria: StageEndCriteriaFields = {
+    end_mode: s.endMode,
+    end_hours: num(s.endHours),
+    hold_temp_f: num(s.holdTemp),
+    hold_hours: num(s.holdHours),
+    gravity_hi: num(s.gravHi),
+    gravity_stable_hours: num(s.gravH),
+  };
+  return `${temp} · ends when ${describeStageEndCriteria(criteria, FORM_CRITERIA_FORMAT)}`;
 }
 
 function setMode(stages: StageForm[], key: string, patch: Partial<StageForm>): StageForm[] {
@@ -492,6 +527,19 @@ export function FermentationPlanDialog(props: Props) {
   const [error, setError] = useState<string>();
 
   const yeastOptions = Object.entries(yeasts.data?.yeasts ?? {});
+  // Fixed category render/search order, not alphabetical -- most-common-
+  // first (Ale, Lager) beats "Belgian/Saison" sorting ahead of "Ale".
+  // Custom always last regardless of how many real strains get added
+  // later. Combobox appends anything present but unlisted here (an
+  // unrecognized category shouldn't happen, but a preset silently
+  // vanishing from its own picker on a typo would be a worse failure mode
+  // than an extra trailing group).
+  const YEAST_CATEGORY_ORDER = ["Ale", "Lager", "Belgian/Saison", "Wheat/Hefeweizen", "Kveik", "Custom"];
+  const yeastComboOptions: ComboboxOption[] = yeastOptions.map(([id, preset]) => ({
+    id,
+    label: preset.name,
+    group: preset.category ?? "Custom",
+  }));
   const selectedYeastId = yeastId ?? yeastOptions[0]?.[0];
   const selectedYeast = selectedYeastId ? yeasts.data?.yeasts[selectedYeastId] : undefined;
   const cloneFrom = props.mode === "new" ? props.cloneFrom : undefined;
@@ -512,7 +560,7 @@ export function FermentationPlanDialog(props: Props) {
     } else if (cloneFrom) {
       setName(`${cloneFrom.name} (copy)`);
       setYeastId(cloneFrom.yeast_id ?? undefined);
-      setStages(cloneFrom.stages.map((s, i) => fromStageInput(s as unknown as StageInput, String(i), i)));
+      setStages(cloneFrom.stages.map((s, i) => fromStageInput(stageResponseToStageInput(s), String(i), i)));
     } else if (selectedYeast) {
       setName("");
       setStages(selectedYeast.default_stages.map((s, i) => fromStageInput(s, String(i), i)));
@@ -535,7 +583,7 @@ export function FermentationPlanDialog(props: Props) {
       await setStageEnabled.mutateAsync({ fermentationId: props.fermentationId, stageId: Number(key), enabled: on });
     } catch (err) {
       patchStage(key, { on: !on });
-      setError(err instanceof ApiError ? err.message : "Could not update that stage.");
+      setError(apiErrorMessage(err, "Could not update that stage."));
     }
   }
 
@@ -556,7 +604,7 @@ export function FermentationPlanDialog(props: Props) {
       const result = await insertStage.mutateAsync({ fermentationId: props.fermentationId, stage, afterStageId });
       setStages((prev) => [...prev, fromStageInput(stage, String(result.stage_id), prev.length)]);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not add a stage.");
+      setError(apiErrorMessage(err, "Could not add a stage."));
     }
   }
 
@@ -577,7 +625,7 @@ export function FermentationPlanDialog(props: Props) {
       });
     } catch (err) {
       setStages(prevStages);
-      setError(err instanceof ApiError ? err.message : "Could not reorder stages.");
+      setError(apiErrorMessage(err, "Could not reorder stages."));
     }
   }
 
@@ -614,7 +662,7 @@ export function FermentationPlanDialog(props: Props) {
       // "view" mode has no submit-type button in its footer, so this
       // branch is unreachable for it -- no case needed, just no crash.
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save this profile.");
+      setError(apiErrorMessage(err, "Could not save this profile."));
     }
   }
 
@@ -653,20 +701,16 @@ export function FermentationPlanDialog(props: Props) {
               </div>
               <div className={styles.field}>
                 <span className={styles.fieldLabel}>Yeast</span>
-                <select
-                  className={styles.select}
-                  value={selectedYeastId ?? ""}
-                  onChange={(e) => {
-                    setYeastId(e.target.value);
+                <Combobox
+                  options={yeastComboOptions}
+                  groupOrder={YEAST_CATEGORY_ORDER}
+                  value={selectedYeastId}
+                  placeholder="Search yeasts…"
+                  onChange={(id) => {
+                    setYeastId(id);
                     setError(undefined);
                   }}
-                >
-                  {yeastOptions.map(([id, preset]) => (
-                    <option key={id} value={id}>
-                      {preset.name}
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
             </div>
           )}

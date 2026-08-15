@@ -91,17 +91,6 @@ export function xTickStep(spanHours: number, maxTicks = 10): number {
   return 24 * Math.ceil(spanHours / 24 / maxTicks);
 }
 
-/** Formats a sample timestamp for the scrub crosshair's on-chart label --
- * the same spot the "NOW" label uses, so it reads as "this is what point
- * in time the tiles above are currently showing," not a second, separate
- * caption competing for space. */
-export function formatScrubMoment(ts: string): string {
-  const d = new Date(ts);
-  const dateLabel = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  const timeLabel = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-  return `${dateLabel}, ${timeLabel}`;
-}
-
 /** Binary search for the index of the sample whose x position (from an
  * xs array already run through timeScale) is closest to a given pixel
  * position -- the scrub/crosshair feature's hit-testing. xs must be
@@ -120,11 +109,6 @@ export function nearestIndex(xs: number[], x: number): number {
   // immediate predecessor to find whichever is genuinely closer.
   if (lo > 0 && Math.abs(xs[lo - 1] - x) <= Math.abs(xs[lo] - x)) return lo - 1;
   return lo;
-}
-
-export interface SeriesPoint {
-  x: number;
-  y: number;
 }
 
 /** Builds an SVG path string from parallel x/value arrays, breaking the

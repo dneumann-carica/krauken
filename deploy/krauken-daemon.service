@@ -1,9 +1,19 @@
 [Unit]
 Description=Krauken control daemon
 After=network.target
-# Not currently ordered After=krauken-supervisor.service: the daemon must
+# Not ordered After=/Wants=krauken-supervisor.service: the daemon must
 # tolerate the supervisor being absent or late (BrewPi-only installs never
-# run it at all) -- see AsyncIPCClient's DaemonUnavailable handling.
+# run it at all, and it's not yet functional regardless -- see that unit's
+# own comment) -- see PersistentIPCClient's non-blocking start().
+#
+# Simulator/Manual get the opposite treatment: they're the only platforms
+# that exist today, so a typical install genuinely wants both running
+# before the daemon starts ticking. Wants=+After=, not Requires=+After= --
+# the daemon still tolerates them being down (same PersistentIPCClient
+# mechanism), this just expresses the ordinary case's real preference
+# without turning a slow/failed mock-hardware unit into a failed boot.
+Wants=krauken-simulator.service krauken-manual.service
+After=krauken-simulator.service krauken-manual.service
 
 [Service]
 Type=simple
@@ -15,10 +25,19 @@ Restart=on-failure
 RestartSec=2
 StartLimitIntervalSec=60
 StartLimitBurst=5
-# TODO once krauken/platforms/brewpi lands: SupplementaryGroups=dialout (to
-# open /dev/ttyUSB*). Not added now -- no code in this process touches
-# serial yet, and an unused group grant is worth adding only when it's
-# actually exercised.
+# dialout: opens /dev/ttyACM*/ttyUSB* for the BrewPi driver's auto-scan
+# (platforms/brewpi/connection.py). CAP_NET_RAW: opens a raw HCI socket
+# for the Tilt driver's BLE scanner (platforms/tilt/scanner.py) -- NOT
+# full root; AmbientCapabilities is systemd's mechanism for granting one
+# specific capability to a non-root service without setuid/file
+# capabilities, and is designed to work together with
+# NoNewPrivileges=true below, not around it. A Krauken-only install (no
+# BrewPi, no Tilt) still gets both grants -- harmless unused permissions,
+# same tradeoff already accepted for krauken-manual.service/krauken-
+# simulator.service running unconditionally on an install that ends up
+# using neither.
+SupplementaryGroups=dialout
+AmbientCapabilities=CAP_NET_RAW
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/krauken /run/krauken

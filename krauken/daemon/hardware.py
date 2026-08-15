@@ -5,17 +5,13 @@ see chamber_status()/stop_chamber() below.
 """
 from __future__ import annotations
 
-import datetime
 from typing import Any
 
 from krauken.contracts.errors import FermentationAlreadyActive
 from krauken.contracts.roles import ALL_ROLES, Role, resolve
 from krauken.daemon import drivers
+from krauken.daemon.timefmt import iso_now as _iso_now
 from krauken.db import queries, writes
-
-
-def _iso_now(clock) -> str:
-    return datetime.datetime.fromtimestamp(clock.now(), tz=datetime.timezone.utc).isoformat()
 
 
 async def save_mapping(ctx: Any, draft: dict[str, str | None]) -> dict[str, Any]:
@@ -60,9 +56,9 @@ async def save_mapping(ctx: Any, draft: dict[str, str | None]) -> dict[str, Any]
 
 
 def _mapped_chamber(ctx: Any):
-    hw = {r["role"]: r for r in queries.hardware_config(ctx.conn)}
+    hw = queries.hardware_config_by_role(ctx.conn)
     chamber_role = hw.get("chamber_temp")
-    return drivers.chamber_driver(ctx, chamber_role["platform"]) if chamber_role else None
+    return drivers.chamber_driver(ctx, chamber_role["platform"], chamber_role["device_id"]) if chamber_role else None
 
 
 async def chamber_status(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:

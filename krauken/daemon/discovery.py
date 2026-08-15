@@ -8,7 +8,6 @@ block the IPC server or a caller's HTTP request.
 from __future__ import annotations
 
 import asyncio
-import datetime
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -17,6 +16,7 @@ from typing import Any
 from krauken.contracts.errors import PlatformUnavailable
 from krauken.contracts.interfaces import PlatformDriver
 from krauken.contracts.models import DeviceCandidate
+from krauken.daemon.timefmt import iso as _iso
 from krauken.db import writes
 
 log = logging.getLogger("krauken.daemon.discovery")
@@ -33,21 +33,24 @@ class ScanJob:
     error: str | None = None
 
 
-def _iso(ts: float) -> str:
-    return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
-
-
 def _candidate_to_row(c: DeviceCandidate, as_of: str) -> dict[str, Any]:
     """The one place DeviceCandidate (the platform-driver contract) gets
     projected onto the `devices` table's row shape. If a future real
     platform's candidate fields drift from this shape, this is the only
-    function that needs to change."""
+    function that needs to change.
+
+    capabilities' elements are Role enum members from an in-process
+    platform driver, but plain strings once a candidate has crossed IPC
+    (platforms/ipc_driver.py's _candidate_from_wire -- JSON has no enum
+    type, so a Role only ever survives the wire as its own .value) --
+    str(r) handles both identically, since Role is a StrEnum whose str()
+    already IS its value."""
     return {
         "device_id": c.device_id,
         "platform": c.platform,
         "name": c.display_name,
         "kind": c.kind_label,
-        "capabilities": [r.value for r in c.capabilities],
+        "capabilities": [str(r) for r in c.capabilities],
         "is_bundle": 1 if c.bundled_roles else 0,
         "health": c.health.value,
         "first_seen_at": as_of,

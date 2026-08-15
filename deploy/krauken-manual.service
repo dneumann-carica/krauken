@@ -1,0 +1,24 @@
+[Unit]
+Description=Krauken Manual platform (dev-panel hardware, dev/demo)
+After=network.target
+
+[Service]
+Type=simple
+User=krauken
+Group=krauken
+EnvironmentFile=/etc/krauken/krauken.conf
+ExecStart=/opt/krauken/.venv/bin/krauken-manual
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# No WatchdogSec here -- see krauken-simulator.service's own comment,
+# identical reasoning.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/run/krauken
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

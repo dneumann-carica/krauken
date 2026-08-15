@@ -14,16 +14,17 @@ from pathlib import Path
 from typing import Any
 
 from krauken.contracts.clock import Clock, ProductionClock, SimulatorClock
-from krauken.contracts.control_constants import ControlTuning
+from krauken.contracts.errors import PlatformUnavailable
 from krauken.daemon.control_loop import DEFAULT_CONTROL_TICK_INTERVAL_S, control_tick
 from krauken.daemon.control_state import ControlState
 from krauken.db import queries, writes
 from krauken.db.connection import open_ro, open_rw
 from krauken.db.migrate import migrate
+from krauken.ipc.persistent_client import PersistentIPCClient
 from krauken.ipc.server import IPCServer
-from krauken.platforms.manual.live import ManualPanel
+from krauken.platforms.brewpi.connection import BrewPiConnection
 from krauken.platforms.registry import build_registry
-from krauken.platforms.simulator.live import SimPlantEngine
+from krauken.platforms.tilt.scanner import TiltScanner
 
 # Imported for their @op-decorated side effects (registers hardware.*/
 # settings.*/fermentation.*/manual.* ops into krauken.ipc.server.OPS) -- not
@@ -39,19 +40,44 @@ log = logging.getLogger("krauken.daemon")
 class DaemonContext:
     """Passed as `ctx` to every IPC op handler."""
 
-    def __init__(self, *, db_path: Path, clock: Clock, control_tuning: ControlTuning | None = None):
+    def __init__(
+        self,
+        *,
+        db_path: Path,
+        clock: Clock,
+        simulator_socket: Path,
+        manual_socket: Path,
+        tilt_hci_device: int = 0,
+    ):
         self.db_path = db_path
         self.clock = clock
         self.conn = open_rw(db_path)
-        # M2 live drivers -- always constructed (cheap, inert until a role
-        # actually resolves to one via daemon/drivers.py), one shared
-        # instance per process so every device that shares a platform
-        # shares its one conceptual state (see live.py's module docstrings).
-        # Built before the registry so discover() can read live off them
-        # instead of a fixed snapshot (see platforms/registry.py).
-        self.sim_engine = SimPlantEngine(clock, tuning=control_tuning or ControlTuning())
-        self.manual_panel = ManualPanel(clock)
-        self.registry = build_registry(manual_panel=self.manual_panel, sim_engine=self.sim_engine)
+        # Persistent connections to Simulator's/Manual's own out-of-process
+        # servers (platforms/simulator/service.py, platforms/manual/
+        # service.py) -- one shared instance per process so every device
+        # that shares a platform shares its one conceptual connection,
+        # same reasoning live.py's module docstrings gave for the old
+        # in-process SimPlantEngine/ManualPanel sharing. Built before the
+        # registry so discover() dispatches through the same clients
+        # daemon/drivers.py's role-driver factories use (see
+        # platforms/registry.py's PLATFORM_BINDINGS) -- one connection per
+        # platform, not one per use. Not started here -- Daemon.start()
+        # owns that, same as the IPC server itself.
+        self.simulator_client = PersistentIPCClient(simulator_socket)
+        self.manual_client = PersistentIPCClient(manual_socket)
+        # BrewPi/Tilt are in-process (no IPC -- see platforms/registry.py's
+        # own docstring on why), but get the identical "one shared
+        # connection object, constructed here, (re)connected in
+        # Daemon.start()" treatment for the same reason: every device
+        # sharing a platform shares its one conceptual connection.
+        self.brewpi_connection = BrewPiConnection(clock=self.clock)
+        self.tilt_scanner = TiltScanner(clock=self.clock, hci_device=tilt_hci_device)
+        self.registry = build_registry(
+            manual_client=self.manual_client,
+            simulator_client=self.simulator_client,
+            brewpi_connection=self.brewpi_connection,
+            tilt_scanner=self.tilt_scanner,
+        )
         # Serializes actual SQLite writes from background tasks (a scan's
         # device upserts) against each other and against control-tick
         # writes -- separate from IPCServer.state_lock, which only covers
@@ -76,22 +102,62 @@ class Daemon:
         self.server = IPCServer(socket_path, ctx)
         self._heartbeat_task: asyncio.Task | None = None
         self._control_task: asyncio.Task | None = None
+        self._brewpi_connect_task: asyncio.Task | None = None
         self._stopping = asyncio.Event()
 
     async def start(self) -> None:
+        # Non-blocking -- PersistentIPCClient.start() never waits for the
+        # first connection to succeed (see its own docstring), so a
+        # Simulator/Manual process that's down or slow to start never
+        # blocks the daemon's own startup.
+        await self.ctx.simulator_client.start()
+        await self.ctx.manual_client.start()
+        # BrewPi's identify_and_connect() can take several real seconds
+        # (the Arduino's DTR-triggered boot delay, times however many
+        # candidate serial ports get tried) -- fired as a background task
+        # rather than awaited here for the identical "never block daemon
+        # startup on a platform that might not even be plugged in" reason
+        # simulator_client/manual_client already get non-blocking start().
+        # Best-effort: a dev machine with no BrewPi attached logs one
+        # "not found" line and moves on, same as any other unmapped
+        # platform. The NEXT Hardware Setup scan retries via discover()
+        # regardless of whether this succeeded.
+        self._brewpi_connect_task = asyncio.create_task(self._connect_brewpi())
+        # Tilt's scanner start() is fast (open a raw socket, issue one scan
+        # request) but can still fail (no CAP_NET_RAW, aioblescan not
+        # installed) -- caught here so that never blocks or crashes daemon
+        # startup either; discover() retries starting it on every scan
+        # (platforms/tilt/platform.py), so a fixed dependency/permission
+        # is picked up without a restart.
+        try:
+            await self.ctx.tilt_scanner.start()
+        except PlatformUnavailable as e:
+            log.warning("Tilt scanner not started at daemon startup: %s", e)
         await self.server.start()
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._control_task = asyncio.create_task(self._control_loop())
         log.info("daemon started")
 
+    async def _connect_brewpi(self) -> None:
+        try:
+            found = await self.ctx.brewpi_connection.identify_and_connect()
+            if not found:
+                log.info("BrewPi not found at daemon startup -- will retry on next Hardware Setup scan")
+        except PlatformUnavailable as e:
+            log.warning("BrewPi connection not attempted at daemon startup: %s", e)
+
     async def stop(self) -> None:
         self._stopping.set()
-        for task in (self._heartbeat_task, self._control_task):
+        for task in (self._heartbeat_task, self._control_task, self._brewpi_connect_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         await self.server.stop()
+        await self.ctx.simulator_client.stop()
+        await self.ctx.manual_client.stop()
+        await self.ctx.brewpi_connection.close()
+        await self.ctx.tilt_scanner.stop()
         self.ctx.conn.close()
         log.info("daemon stopped")
 
@@ -204,12 +270,18 @@ def build_daemon(
     db_path: Path,
     clock: Clock | None = None,
     socket_path: Path,
+    simulator_socket: Path,
+    manual_socket: Path,
+    tilt_hci_device: int = 0,
     heartbeat_interval_s: float = 60.0,
     control_tick_interval_s: float = DEFAULT_CONTROL_TICK_INTERVAL_S,
-    control_tuning: ControlTuning | None = None,
 ) -> Daemon:
     migrate(db_path)
-    ctx = DaemonContext(db_path=db_path, clock=clock or _select_clock(db_path), control_tuning=control_tuning)
+    ctx = DaemonContext(
+        db_path=db_path, clock=clock or _select_clock(db_path),
+        simulator_socket=simulator_socket, manual_socket=manual_socket,
+        tilt_hci_device=tilt_hci_device,
+    )
     return Daemon(
         ctx=ctx, socket_path=socket_path, heartbeat_interval_s=heartbeat_interval_s,
         control_tick_interval_s=control_tick_interval_s,

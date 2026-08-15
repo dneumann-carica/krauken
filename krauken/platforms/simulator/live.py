@@ -52,6 +52,14 @@ from krauken.platforms.simulator import plant
 
 _MODE_MAP = {"idle": ChamberMode.IDLE, "cool": ChamberMode.COOL, "heat": ChamberMode.HEAT}
 
+# The probe-address strings this platform's discover() advertises in
+# DeviceCandidate.identity["probe_addresses"] (platform.py) -- defined here,
+# not there, so SimChamberDriver.probe_temps() can key its readings off the
+# same constants discover() advertised instead of two files each hand-typing
+# the same literal strings.
+PROBE_1_ADDRESS = "sim-probe-1"
+PROBE_2_ADDRESS = "sim-probe-2"
+
 # The same 5 presets offered by the Hardware Setup wizard's chamber-location
 # step (see HardwareWizard.tsx's LOCATION_PRESETS) -- picking one there
 # changes what "ambient" means for the SimPlant engine's idle-chamber
@@ -216,8 +224,8 @@ class SimPlantEngine:
 
 
 class SimChamberDriver:
-    def __init__(self, engine: SimPlantEngine):
-        self._engine = engine
+    def __init__(self, engine: SimPlantEngine, device_id: str | None = None):
+        self._engine = engine  # device_id unused -- Simulator has exactly one chamber device
 
     async def read_chamber(self) -> ChamberReading:
         return self._engine.read_chamber()
@@ -228,18 +236,28 @@ class SimChamberDriver:
     async def commanded_target(self) -> float | None:
         return self._engine._chamber_target_f
 
+    async def set_ambient_location(self, location: str | None) -> None:
+        self._engine.set_ambient_location(location)
+
+    async def probe_temps(self) -> dict[str, float | None]:
+        chamber_f = self._engine.read_chamber().temp_f  # ticks the engine forward too
+        temps: dict[str, float | None] = {PROBE_1_ADDRESS: chamber_f}
+        if self._engine.probe2_enabled:
+            temps[PROBE_2_ADDRESS] = self._engine.probe2_temp_f
+        return temps
+
 
 class SimBeerTempSource:
-    def __init__(self, engine: SimPlantEngine):
-        self._engine = engine
+    def __init__(self, engine: SimPlantEngine, device_id: str | None = None):
+        self._engine = engine  # device_id unused -- Simulator has exactly one hydrometer-like device
 
     async def read(self) -> BeerReading:
         return self._engine.read_beer()
 
 
 class SimGravitySource:
-    def __init__(self, engine: SimPlantEngine):
-        self._engine = engine
+    def __init__(self, engine: SimPlantEngine, device_id: str | None = None):
+        self._engine = engine  # device_id unused -- see SimBeerTempSource's own comment
 
     async def read(self) -> GravityReading:
         return self._engine.read_gravity()

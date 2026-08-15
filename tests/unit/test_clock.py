@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from krauken.contracts.clock import ProductionClock, SimulatorClock
+from krauken.contracts.clock import ProductionClock, RemoteClock, SimulatorClock
 
 
 def test_production_clock_tracks_real_time():
@@ -60,3 +60,41 @@ async def test_simulator_clock_sleep_yields_to_the_event_loop():
     await clock.sleep(1.0)
     await task
     assert ran == ["other"]
+
+
+def test_remote_clock_starts_from_a_real_wall_clock_snapshot():
+    before = time.monotonic()
+    clock = RemoteClock()
+    assert clock.monotonic() == pytest.approx(before, abs=0.5)
+
+
+def test_remote_clock_set_updates_both_fields():
+    clock = RemoteClock()
+    clock.set(now=1_700_000_000.0, monotonic=1_700_000_000.0)
+    assert clock.now() == 1_700_000_000.0
+    assert clock.monotonic() == 1_700_000_000.0
+
+
+def test_remote_clock_fires_on_first_sync_exactly_once():
+    # The real bug this guards against: a consumer (SimPlantEngine) anchors
+    # its own elapsed-time state via this clock at construction time, using
+    # whatever real-wall-clock value RemoteClock started with -- then the
+    # daemon's first sync can jump monotonic() to a wildly different value
+    # (SimulatorClock's own start=1_700_000_000-ish epoch). on_first_sync
+    # is the hook a consumer uses to re-anchor itself the moment that
+    # happens, exactly once, not on every subsequent sync.
+    clock = RemoteClock()
+    calls = []
+    clock.on_first_sync = lambda: calls.append(clock.monotonic())
+
+    clock.set(now=1_700_000_000.0, monotonic=1_700_000_000.0)
+    assert calls == [1_700_000_000.0]  # fired, AFTER the new value was already applied
+
+    clock.set(now=1_700_000_060.0, monotonic=1_700_000_060.0)
+    assert calls == [1_700_000_000.0]  # not fired again
+
+
+def test_remote_clock_with_no_on_first_sync_set_is_a_safe_no_op():
+    clock = RemoteClock()
+    clock.set(now=1.0, monotonic=1.0)  # must not raise with on_first_sync left None
+    assert clock.now() == 1.0

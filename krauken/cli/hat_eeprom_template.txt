@@ -1,0 +1,53 @@
+# Krauken Fermentation Controller HAT -- EEPROM settings
+#
+# Rendered from this template by krauken-hwid flash (krauken/cli/hwid.py),
+# which fills in {product_uuid} fresh per physical unit, then feeds the
+# result to raspberrypi/utils's eepmake. Settings-file format confirmed
+# against eeptools' own eeprom_v1_settings.txt example, not guessed:
+# https://github.com/raspberrypi/utils/tree/master/eeptools
+#
+# vendor/product/product_id/product_ver are ours to change any time before
+# wide deployment -- pure software convention, unlike the GPIO map below,
+# which is fixed by the physical board and needs a hardware rev to change.
+product_uuid {product_uuid}
+product_id 0x0001
+product_ver 0x0001
+vendor "TheKrauken"
+product "Krauken Fermentation Controller HAT"
+
+# GPIO map (BCM numbering), confirmed against the board's real schematic
+# by the hardware design session (see
+# plans/brewpi-tilt-implementation-decisions.md's sibling doc / chat
+# history for the full exchange). GPIO0/GPIO1 (ID_SD/ID_SC, physical pins
+# 27/28) are deliberately NOT listed here -- those are the dedicated ID
+# EEPROM bus itself, read by the Pi's own firmware before the OS's GPIO
+# subsystem exists, not general-purpose pins this section describes.
+#
+# GPIO4  (physical 7):  1-Wire bus (DS18B20 probes). Input, no internal
+#                       pull -- a real discrete 4.7k pull-up (R1) is
+#                       already on the board; enabling the Pi's own
+#                       internal pull-up too would be redundant, not
+#                       wrong, but doesn't match actual hardware.
+setgpio 4 INPUT NONE
+
+# GPIO17 (physical 11): COOL_CTRL -> relay driver (ULN2803A). Output,
+#                       pulled down for a fail-safe "relay off" default
+#                       during the boot window before software claims it.
+setgpio 17 OUTPUT DOWN
+
+# GPIO27 (physical 13): HEAT_CTRL -> relay driver. Same fail-safe-off
+#                       reasoning as GPIO17 (drives the heater).
+setgpio 27 OUTPUT DOWN
+
+# GPIO22 (physical 15): EEPROM_WP. Output, pulled up -- idle/safe state is
+#                       HIGH (write-protected), the 24AA32A's normal WP
+#                       polarity. No physical jumper on this board by
+#                       design -- krauken-hwid itself drives this LOW only
+#                       for the duration of a flash and ALWAYS restores
+#                       HIGH afterward, even on failure (see hwid.py's
+#                       _with_wp_unlocked). This declaration only governs
+#                       the pin's default state on every OTHER boot,
+#                       before software takes over -- without it, the pin
+#                       floats to an undefined (not necessarily protected)
+#                       state during the early-boot window.
+setgpio 22 OUTPUT UP

@@ -155,8 +155,8 @@ def advance_physics(state: PlantState, p: PlantParams, dt_h: float, drive_to: fl
 
     Chamber uses the EXACT solution of dT/dt = k*(drive_to - T) --
     drive_to + (T0-drive_to)*exp(-k*dt_h) -- not a forward-Euler step,
-    because this same function also backs contracts/projection.py's
-    forward preview, which steps in much coarser 0.5h increments than the
+    because this same function also backs projection.py's (this package's
+    sibling module) forward preview, which steps in much coarser 0.5h increments than the
     live driver's per-tick calls. A forward-Euler step is only stable
     while k*dt_h stays comfortably below 1; once heat_transfer_coeff was
     tuned up for the relay's own duty-cycle physics (see PlantParams),
@@ -186,7 +186,7 @@ def step(
     state: PlantState, p: PlantParams, dt_h: float, beer_target_f: float, ramp_rate_f_per_h: float = 0.0
 ) -> PlantState:
     """Convenience entry point for the chart's forward-projection preview
-    (contracts/projection.py): makes its own cascade decision (no relay-
+    (projection.py, this package's sibling module): makes its own cascade decision (no relay-
     timing protection -- see advance_physics's docstring) and then
     integrates. chamber_target_for() always returns a real target now,
     never None (see its own docstring -- idle governs gently at the beer

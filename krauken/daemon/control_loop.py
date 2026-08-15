@@ -18,6 +18,7 @@ from krauken.contracts import failsafe, og_detection, stages as stages_mod
 from krauken.contracts.cascade import beer_relay_demand, chamber_target_for
 from krauken.daemon import drivers, fermentation
 from krauken.daemon.sampler import SampleCandidate, SamplingPolicy
+from krauken.daemon.timefmt import iso as _iso
 from krauken.db import queries, writes
 
 log = logging.getLogger("krauken.daemon.control_loop")
@@ -30,10 +31,6 @@ _HEALTH_EVENT_NAMES = {
     "chamber_temp": ("chamber_temp_lost", "chamber_temp_recovered"),
     "gravity": ("gravity_lost", "gravity_recovered"),
 }
-
-
-def _iso(ts: float) -> str:
-    return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).isoformat()
 
 
 def _parse_iso(s: str) -> float:
@@ -54,8 +51,128 @@ def _log_health_edge(ctx: Any, fermentation_id: int, field_name: str, ok: bool |
 
 
 async def control_tick(ctx: Any) -> None:
+    # Every scheduled tick, not just while a fermentation is active -- an
+    # IPC-backed platform's clock must stay fresh even between batches
+    # (dev-panel/identify-probes exercise it with nothing fermenting), and
+    # _control_tick_locked below returns early exactly in that case. See
+    # daemon/drivers.py's sync_remote_clocks and contracts/clock.py's
+    # RemoteClock.
+    await drivers.sync_remote_clocks(ctx)
     async with ctx.db_lock:
         await _control_tick_locked(ctx)
+
+
+class _Drivers:
+    """The role drivers this tick will read from/write to, resolved once
+    per tick from whatever's currently mapped -- a plain holder, not a
+    Protocol of its own, since callers just want the four fields."""
+
+    __slots__ = ("chamber", "beer_source", "gravity_mapped", "gravity_source")
+
+    def __init__(self, chamber: Any, beer_source: Any, gravity_mapped: bool, gravity_source: Any):
+        self.chamber = chamber
+        self.beer_source = beer_source
+        self.gravity_mapped = gravity_mapped
+        self.gravity_source = gravity_source
+
+
+def _resolve_drivers(ctx: Any) -> _Drivers:
+    hw = queries.hardware_config_by_role(ctx.conn)
+    gravity_mapped = hw["beer_gravity"]["platform"] is not None
+    return _Drivers(
+        chamber=drivers.chamber_driver(ctx, hw["chamber_temp"]["platform"], hw["chamber_temp"]["device_id"]),
+        beer_source=drivers.beer_temp_source(ctx, hw["beer_temp"]["platform"], hw["beer_temp"]["device_id"]),
+        gravity_mapped=gravity_mapped,
+        gravity_source=drivers.gravity_source(ctx, hw["beer_gravity"]["platform"], hw["beer_gravity"]["device_id"])
+        if gravity_mapped
+        else None,
+    )
+
+
+class _Readings:
+    __slots__ = ("beer", "chamber", "gravity")
+
+    def __init__(self, beer: Any, chamber: Any, gravity: Any):
+        self.beer = beer
+        self.chamber = chamber
+        self.gravity = gravity
+
+
+async def _read_all(d: _Drivers) -> _Readings:
+    return _Readings(
+        beer=await d.beer_source.read() if d.beer_source is not None else None,
+        chamber=await d.chamber.read_chamber() if d.chamber is not None else None,
+        gravity=await d.gravity_source.read() if d.gravity_source is not None else None,
+    )
+
+
+def _run_og_detection(
+    ctx: Any, fermentation_row: Any, fermentation_id: int, gravity_mapped: bool,
+    gravity_ok: bool, gravity_reading: Any, absolute_h: float, now_iso: str,
+) -> None:
+    """Auto-detects OG (contracts/og_detection.py) -- runs every tick,
+    independent of which stage is current, until it's locked in. A
+    fermentation started WITH an explicit og already has this column
+    non-null, so this is a no-op for it -- explicit og always wins over
+    auto-detection."""
+    if fermentation_row["og"] is not None or not gravity_mapped:
+        return
+    og_detector = ctx.control_state.og_detector
+    if gravity_ok:
+        og_detector.update(absolute_h, gravity_reading.gravity_sg)
+    else:
+        og_detector.reset()
+    if og_detector.locked_og is None and absolute_h >= og_detection.OG_DETECTION_MAX_H:
+        og_detector.force_lock()
+    if og_detector.locked_og is not None:
+        writes.set_fermentation_og(ctx.conn, fermentation_id, og=og_detector.locked_og)
+        writes.record_event(
+            ctx.conn, fermentation_id=fermentation_id, ts=now_iso, type="og_locked",
+            payload={"og": og_detector.locked_og},
+        )
+
+
+# One shared shape (update(t_h, value, threshold) / reset()) covers all
+# three gated end_modes -- see contracts/stages.py's GravityGate/
+# TempHoldGate/GravityBelowGate -- so this table (which class, and how to
+# get its current (ok, value, threshold)) is all that's left of what used
+# to be three near-identical create/update/reset blocks. 'time' has no
+# entry: it needs no gate at all.
+_GATE_CLASSES: dict[str, Any] = {
+    "gravity": stages_mod.GravityGate,
+    "temp_hold": stages_mod.TempHoldGate,
+    "gravity_below": stages_mod.GravityBelowGate,
+}
+
+
+def _update_stage_gate(
+    ctx: Any, current: Any, *, beer_ok: bool, beer_temp_f: float | None,
+    gravity_ok: bool, gravity_sg: float | None, absolute_h: float,
+) -> Any | None:
+    """Creates the gate on first use, updates it (or resets it, if this
+    tick's relevant reading is unhealthy/missing -- a stale reading must
+    never count toward "stable"), and returns it for stage_finished() to
+    consult. None for 'time' end_mode, which needs no gate."""
+    end_mode = current["end_mode"]
+    gate_cls = _GATE_CLASSES.get(end_mode)
+    if gate_cls is None:
+        return None
+    gate = ctx.control_state.gates.get(current["id"])
+    if gate is None:
+        gate = gate_cls()
+        ctx.control_state.gates[current["id"]] = gate
+
+    if end_mode == "temp_hold":
+        ok, value, threshold = beer_ok, beer_temp_f, current["hold_temp_f"]
+    else:
+        threshold = current["gravity_stable_hours"] if end_mode == "gravity" else current["gravity_hi"]
+        ok, value = gravity_ok, gravity_sg
+
+    if ok:
+        gate.update(absolute_h, value, threshold)
+    else:
+        gate.reset()
+    return gate
 
 
 async def _control_tick_locked(ctx: Any) -> None:
@@ -69,29 +186,25 @@ async def _control_tick_locked(ctx: Any) -> None:
         log.warning("fermentation %s is active with no running stage -- skipping tick", fermentation_id)
         return
 
-    # Cheap and idempotent -- a no-op for Manual-driver setups (no ambient
-    # concept at all) and harmless if the Simulator isn't actually the
-    # mapped driver this tick.
-    ctx.sim_engine.set_ambient_location(queries.setting(ctx.conn, "chamber_location"))
-
-    hw = {r["role"]: r for r in queries.hardware_config(ctx.conn)}
-    chamber = drivers.chamber_driver(ctx, hw["chamber_temp"]["platform"])
-    beer_source = drivers.beer_temp_source(ctx, hw["beer_temp"]["platform"])
-    gravity_mapped = hw["beer_gravity"]["platform"] is not None
-    gravity_source = drivers.gravity_source(ctx, hw["beer_gravity"]["platform"]) if gravity_mapped else None
+    d = _resolve_drivers(ctx)
+    # Cheap and idempotent -- a no-op for drivers with no ambient concept
+    # at all (Manual) and harmless if the Simulator isn't actually the
+    # mapped chamber driver this tick; see ChamberDriver.set_ambient_location's
+    # own docstring for why the control loop calls this uniformly rather
+    # than naming a specific platform.
+    if d.chamber is not None:
+        await d.chamber.set_ambient_location(queries.setting(ctx.conn, "chamber_location"))
 
     now = ctx.clock.now()
     now_iso = _iso(now)
-    beer_reading = await beer_source.read() if beer_source is not None else None
-    chamber_reading = await chamber.read_chamber() if chamber is not None else None
-    gravity_reading = await gravity_source.read() if gravity_source is not None else None
+    readings = await _read_all(d)
 
     health = failsafe.assess_health(
         now=now,
-        beer_last_good_ts=beer_reading.last_good_ts if beer_reading else None,
-        chamber_last_good_ts=chamber_reading.last_good_ts if chamber_reading else None,
-        gravity_last_good_ts=gravity_reading.last_good_ts if gravity_reading else None,
-        gravity_mapped=gravity_mapped,
+        beer_last_good_ts=readings.beer.last_good_ts if readings.beer else None,
+        chamber_last_good_ts=readings.chamber.last_good_ts if readings.chamber else None,
+        gravity_last_good_ts=readings.gravity.last_good_ts if readings.gravity else None,
+        gravity_mapped=d.gravity_mapped,
     )
     _log_health_edge(ctx, fermentation_id, "beer_temp", health.beer_temp_ok, now_iso)
     _log_health_edge(ctx, fermentation_id, "chamber_temp", health.chamber_temp_ok, now_iso)
@@ -101,29 +214,15 @@ async def _control_tick_locked(ctx: Any) -> None:
     elapsed_h = (now - _parse_iso(current["started_at"])) / 3600.0
     beer_target = stages_mod.target_temp_f(current, elapsed_h)
 
-    # OG auto-detection (contracts/og_detection.py): runs every tick,
-    # independent of which stage is current, until it's locked in. A
-    # fermentation started WITH an explicit og already has this column
-    # non-null, so this block never runs for it -- explicit og always
-    # wins over auto-detection.
-    if fermentation_row["og"] is None and gravity_mapped:
-        og_detector = ctx.control_state.og_detector
-        if health.gravity_ok and gravity_reading is not None and gravity_reading.gravity_sg is not None:
-            og_detector.update(absolute_h, gravity_reading.gravity_sg)
-        else:
-            og_detector.reset()
-        if og_detector.locked_og is None and absolute_h >= og_detection.OG_DETECTION_MAX_H:
-            og_detector.force_lock()
-        if og_detector.locked_og is not None:
-            writes.set_fermentation_og(ctx.conn, fermentation_id, og=og_detector.locked_og)
-            writes.record_event(
-                ctx.conn, fermentation_id=fermentation_id, ts=now_iso, type="og_locked",
-                payload={"og": og_detector.locked_og},
-            )
+    gravity_ok = health.gravity_ok and readings.gravity is not None and readings.gravity.gravity_sg is not None
+    _run_og_detection(
+        ctx, fermentation_row, fermentation_id, d.gravity_mapped,
+        gravity_ok, readings.gravity, absolute_h, now_iso,
+    )
 
-    beer_ok = health.beer_temp_ok and beer_reading is not None and beer_reading.temp_f is not None
+    beer_ok = health.beer_temp_ok and readings.beer is not None and readings.beer.temp_f is not None
     if beer_ok:
-        mode = beer_relay_demand(beer_reading.temp_f, beer_target, ctx.control_state.last_relay_mode)
+        mode = beer_relay_demand(readings.beer.temp_f, beer_target, ctx.control_state.last_relay_mode)
         ramp_rate = stages_mod.target_rate_f_per_h(current, elapsed_h)
         chamber_target = chamber_target_for(mode, beer_target, ramp_rate)
         target_source = "profile"
@@ -136,36 +235,15 @@ async def _control_tick_locked(ctx: Any) -> None:
         chamber_target = ctx.control_state.last_chamber_target_f
         target_source = "failsafe"
 
-    if chamber is not None:
-        await chamber.set_target(chamber_target)
+    if d.chamber is not None:
+        await d.chamber.set_target(chamber_target)
 
-    # Stage-advance gate (gravity/temp_hold only -- 'time' needs no gate).
-    gate = ctx.control_state.gates.get(current["id"])
-    if current["end_mode"] == "gravity":
-        if gate is None:
-            gate = stages_mod.GravityGate()
-            ctx.control_state.gates[current["id"]] = gate
-        if health.gravity_ok and gravity_reading is not None and gravity_reading.gravity_sg is not None:
-            gate.update(absolute_h, gravity_reading.gravity_sg, current["gravity_stable_hours"])
-        else:
-            gate.reset()  # a stale/missing reading must not count toward "stable"
-    elif current["end_mode"] == "temp_hold":
-        if gate is None:
-            gate = stages_mod.TempHoldGate()
-            ctx.control_state.gates[current["id"]] = gate
-        if beer_ok:
-            gate.update(absolute_h, beer_reading.temp_f, current["hold_temp_f"])
-        else:
-            gate.reset()
-    elif current["end_mode"] == "gravity_below":
-        if gate is None:
-            gate = stages_mod.GravityBelowGate()
-            ctx.control_state.gates[current["id"]] = gate
-        if health.gravity_ok and gravity_reading is not None and gravity_reading.gravity_sg is not None:
-            gate.update(absolute_h, gravity_reading.gravity_sg, current["gravity_hi"])
-        else:
-            gate.reset()  # a stale/missing reading must not count toward "stable"
-
+    gate = _update_stage_gate(
+        ctx, current,
+        beer_ok=beer_ok, beer_temp_f=readings.beer.temp_f if beer_ok else None,
+        gravity_ok=gravity_ok, gravity_sg=readings.gravity.gravity_sg if gravity_ok else None,
+        absolute_h=absolute_h,
+    )
     finished, reason = stages_mod.stage_finished(
         current, elapsed_h, absolute_h,
         gravity_gate=gate if current["end_mode"] == "gravity" else None,
@@ -179,10 +257,10 @@ async def _control_tick_locked(ctx: Any) -> None:
 
     candidate = SampleCandidate(
         ts=now,
-        beer_temp_f=beer_reading.temp_f if beer_reading else None,
-        chamber_temp_f=chamber_reading.temp_f if chamber_reading else None,
-        gravity=gravity_reading.gravity_sg if gravity_reading else None,
-        chamber_mode=chamber_reading.mode.value if chamber_reading else "unknown",
+        beer_temp_f=readings.beer.temp_f if readings.beer else None,
+        chamber_temp_f=readings.chamber.temp_f if readings.chamber else None,
+        gravity=readings.gravity.gravity_sg if readings.gravity else None,
+        chamber_mode=readings.chamber.mode.value if readings.chamber else "unknown",
     )
     write_reason = _SAMPLING_POLICY.should_write(candidate, ctx.control_state.last_sample)
     if write_reason is not None:

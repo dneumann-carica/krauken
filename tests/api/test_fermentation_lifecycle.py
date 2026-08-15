@@ -8,12 +8,9 @@ for a real tick to fire.
 """
 from __future__ import annotations
 
-import asyncio
+from typing import Awaitable, Callable
 
 from httpx import AsyncClient
-
-from krauken.daemon.app import Daemon
-from krauken.daemon.control_loop import control_tick
 
 STAGES = [
     {
@@ -27,32 +24,14 @@ STAGES = [
 ]
 
 
-async def _scan_and_map(client: AsyncClient) -> None:
-    resp = await client.post("/api/v1/hardware/scan")
-    scan_id = resp.json()["scan_id"]
-    for _ in range(50):
-        status = (await client.get(f"/api/v1/hardware/scan/{scan_id}")).json()
-        if status["state"] == "complete":
-            break
-        await asyncio.sleep(0.02)
-    else:
-        raise AssertionError("scan never completed")
-
-    save = await client.put(
-        "/api/v1/hardware/mapping",
-        json={"roles": {"chamber_temp": "simulator:chamber", "beer_temp": "simulator:tilt"}},
-    )
-    assert save.json()["valid"] is True
-
-
 async def test_start_requires_hardware_mapped(client: AsyncClient):
     resp = await client.post("/api/v1/fermentations", json={"name": "Too early", "stages": STAGES})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "hardware_incomplete"
 
 
-async def test_start_then_get_reflects_the_new_fermentation(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_start_then_get_reflects_the_new_fermentation(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "og": 1.055, "stages": STAGES})
     assert start.status_code == 200
     fermentation_id = start.json()["fermentation_id"]
@@ -69,16 +48,16 @@ async def test_start_then_get_reflects_the_new_fermentation(client: AsyncClient)
     assert state.json()["active_fermentation_id"] == fermentation_id
 
 
-async def test_cannot_start_a_second_fermentation_while_one_is_active(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_cannot_start_a_second_fermentation_while_one_is_active(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     await client.post("/api/v1/fermentations", json={"name": "First", "stages": STAGES})
     second = await client.post("/api/v1/fermentations", json={"name": "Second", "stages": STAGES})
     assert second.status_code == 409
     assert second.json()["error"]["code"] == "fermentation_already_active"
 
 
-async def test_manual_advance_moves_to_the_next_stage(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_manual_advance_moves_to_the_next_stage(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
@@ -93,8 +72,8 @@ async def test_manual_advance_moves_to_the_next_stage(client: AsyncClient):
     assert detail["stages"][1]["state"] == "running"
 
 
-async def test_advancing_past_the_last_stage_completes_the_fermentation(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_advancing_past_the_last_stage_completes_the_fermentation(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
@@ -109,8 +88,8 @@ async def test_advancing_past_the_last_stage_completes_the_fermentation(client: 
     assert state.json()["active_fermentation_id"] is None
 
 
-async def test_terminate_ends_the_batch_and_skips_the_running_stage(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_terminate_ends_the_batch_and_skips_the_running_stage(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
@@ -125,8 +104,8 @@ async def test_terminate_ends_the_batch_and_skips_the_running_stage(client: Asyn
     assert detail["stages"][0]["end_actual_reason"] == "terminated"
 
 
-async def test_terminate_on_a_non_active_fermentation_404s(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_terminate_on_a_non_active_fermentation_404s(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     await client.post(f"/api/v1/fermentations/{fermentation_id}/terminate", json={})
@@ -136,8 +115,8 @@ async def test_terminate_on_a_non_active_fermentation_404s(client: AsyncClient):
     assert again.json()["error"]["code"] == "no_active_fermentation"
 
 
-async def test_edit_running_stage_updates_its_fields(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_edit_running_stage_updates_its_fields(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -155,8 +134,8 @@ async def test_edit_running_stage_updates_its_fields(client: AsyncClient):
     assert detail["stages"][0]["end_hours"] == 6.0
 
 
-async def test_cannot_edit_a_finished_stage(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_cannot_edit_a_finished_stage(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -172,8 +151,8 @@ async def test_cannot_edit_a_finished_stage(client: AsyncClient):
     assert resp.json()["error"]["code"] == "validation_error"
 
 
-async def test_turning_off_a_pending_stage_marks_it_skipped(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_turning_off_a_pending_stage_marks_it_skipped(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -191,8 +170,8 @@ async def test_turning_off_a_pending_stage_marks_it_skipped(client: AsyncClient)
     assert detail["stages"][1]["started_at"] is None
 
 
-async def test_turning_a_skipped_stage_back_on_reverts_to_pending(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_turning_a_skipped_stage_back_on_reverts_to_pending(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -209,8 +188,8 @@ async def test_turning_a_skipped_stage_back_on_reverts_to_pending(client: AsyncC
     assert detail["stages"][1]["end_actual_reason"] is None
 
 
-async def test_cannot_turn_off_the_active_stage(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_cannot_turn_off_the_active_stage(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -223,14 +202,14 @@ async def test_cannot_turn_off_the_active_stage(client: AsyncClient):
     assert resp.json()["error"]["code"] == "validation_error"
 
 
-async def test_advancing_skips_over_a_stage_turned_off(client: AsyncClient):
+async def test_advancing_skips_over_a_stage_turned_off(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
     three_stages = STAGES + [
         {
             "name": "Conditioning", "temp_mode": "constant", "temp_f": 60.0,
             "end_mode": "time", "end_hours": 1.0, "advance_mode": "manual",
         },
     ]
-    await _scan_and_map(client)
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": three_stages})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -247,17 +226,16 @@ async def test_advancing_skips_over_a_stage_turned_off(client: AsyncClient):
 
 
 async def test_series_projection_appears_once_a_sample_exists_for_an_active_batch(
-    client: AsyncClient, daemon: Daemon
+    client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]], tick: Callable[[], Awaitable[None]]
 ):
-    await _scan_and_map(client)
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
     # _compute_projection needs a real sample to project forward from --
     # ticking once directly (rather than waiting on the real-time
     # background loop) keeps this test fast without touching Clock/timing.
-    async with daemon.server.state_lock:
-        await control_tick(daemon.ctx)
+    await tick()
 
     series = (await client.get(f"/api/v1/fermentations/{fermentation_id}/series")).json()
     assert series["projection"] is not None
@@ -265,8 +243,8 @@ async def test_series_projection_appears_once_a_sample_exists_for_an_active_batc
     assert len(series["projection"]["beer_temp_f"]) == len(series["projection"]["ts"])
 
 
-async def test_insert_stage_appends_at_the_end_by_default(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_insert_stage_appends_at_the_end_by_default(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
@@ -284,8 +262,8 @@ async def test_insert_stage_appends_at_the_end_by_default(client: AsyncClient):
     assert detail["stages"][2]["state"] == "pending"
 
 
-async def test_insert_stage_after_a_specific_stage_shifts_later_ones(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_insert_stage_after_a_specific_stage_shifts_later_ones(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     running_stage_id = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()["stages"][0]["id"]
@@ -307,8 +285,8 @@ async def test_insert_stage_after_a_specific_stage_shifts_later_ones(client: Asy
     assert [s["seq"] for s in detail["stages"]] == [0, 1, 2]
 
 
-async def test_insert_stage_after_a_finished_stage_is_rejected(client: AsyncClient):
-    await _scan_and_map(client)
+async def test_insert_stage_after_a_finished_stage_is_rejected(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
     running_stage_id = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()["stages"][0]["id"]
@@ -326,12 +304,14 @@ async def test_insert_stage_after_a_finished_stage_is_rejected(client: AsyncClie
     assert resp.json()["error"]["code"] == "validation_error"
 
 
-async def test_reorder_stages_reassigns_seq_to_match_the_requested_order(client: AsyncClient):
+async def test_reorder_stages_reassigns_seq_to_match_the_requested_order(
+    client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]
+):
     three_stages = STAGES + [
         {"name": "Conditioning", "temp_mode": "constant", "temp_f": 60.0,
          "end_mode": "time", "end_hours": 1.0, "advance_mode": "manual"},
     ]
-    await _scan_and_map(client)
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": three_stages})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -350,12 +330,14 @@ async def test_reorder_stages_reassigns_seq_to_match_the_requested_order(client:
     assert detail["stages"][0]["id"] == running_id
 
 
-async def test_reorder_stages_rejects_a_set_that_doesnt_match_exactly(client: AsyncClient):
+async def test_reorder_stages_rejects_a_set_that_doesnt_match_exactly(
+    client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]
+):
     three_stages = STAGES + [
         {"name": "Conditioning", "temp_mode": "constant", "temp_f": 60.0,
          "end_mode": "time", "end_hours": 1.0, "advance_mode": "manual"},
     ]
-    await _scan_and_map(client)
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": three_stages})
     fermentation_id = start.json()["fermentation_id"]
     detail = (await client.get(f"/api/v1/fermentations/{fermentation_id}")).json()
@@ -369,13 +351,14 @@ async def test_reorder_stages_rejects_a_set_that_doesnt_match_exactly(client: As
     assert resp.json()["error"]["code"] == "validation_error"
 
 
-async def test_series_projection_is_none_for_a_completed_batch(client: AsyncClient, daemon: Daemon):
-    await _scan_and_map(client)
+async def test_series_projection_is_none_for_a_completed_batch(
+    client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]], tick: Callable[[], Awaitable[None]]
+):
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "My IPA", "stages": STAGES})
     fermentation_id = start.json()["fermentation_id"]
 
-    async with daemon.server.state_lock:
-        await control_tick(daemon.ctx)
+    await tick()
     await client.post(f"/api/v1/fermentations/{fermentation_id}/advance")
     await client.post(f"/api/v1/fermentations/{fermentation_id}/advance")  # completes it
 
@@ -383,7 +366,7 @@ async def test_series_projection_is_none_for_a_completed_batch(client: AsyncClie
     assert series["projection"] is None
 
 
-async def test_gravity_below_stage_round_trips(client: AsyncClient):
+async def test_gravity_below_stage_round_trips(client: AsyncClient, scan_and_map: Callable[..., Awaitable[None]]):
     """API-level acceptance of the new end_mode -- reuses gravity_hi (the
     threshold) and hold_hours (the duration), no new fields. Control-loop
     *timing* for this gate has its own dedicated unit coverage in
@@ -395,7 +378,7 @@ async def test_gravity_below_stage_round_trips(client: AsyncClient):
             "end_mode": "gravity_below", "gravity_hi": 1.020, "hold_hours": 12.0, "advance_mode": "auto",
         },
     ]
-    await _scan_and_map(client)
+    await scan_and_map()
     start = await client.post("/api/v1/fermentations", json={"name": "Threshold batch", "stages": gravity_below_stages})
     assert start.status_code == 200
     fermentation_id = start.json()["fermentation_id"]

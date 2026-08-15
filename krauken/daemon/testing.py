@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from krauken.contracts.clock import SimulatorClock
-from krauken.contracts.control_constants import ControlTuning
 from krauken.daemon.app import Daemon, build_daemon
 
 # An arbitrary-but-real past Unix timestamp (2023-11-14T22:13:20Z) rather
@@ -27,17 +26,19 @@ def build_scenario_daemon(
     *,
     db_path: Path,
     socket_path: Path,
+    simulator_socket: Path,
+    manual_socket: Path,
     start_ts: float = DEFAULT_SCENARIO_START_TS,
     control_tick_interval_s: float = 600.0,
-    control_tuning: ControlTuning | None = None,
 ) -> tuple[Daemon, SimulatorClock]:
     clock = SimulatorClock(start=start_ts)
     daemon = build_daemon(
         db_path=db_path,
         clock=clock,
         socket_path=socket_path,
+        simulator_socket=simulator_socket,
+        manual_socket=manual_socket,
         heartbeat_interval_s=3600.0,
         control_tick_interval_s=control_tick_interval_s,
-        control_tuning=control_tuning,
     )
     return daemon, clock

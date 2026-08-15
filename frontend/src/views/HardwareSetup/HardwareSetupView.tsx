@@ -187,7 +187,7 @@ export function HardwareSetupView() {
   const saveNote = saveError
     ? saveError
     : !preview.valid
-      ? "Blocked -- resolve the issues above before saving."
+      ? "Blocked -- fill in the required roles below before saving."
       : saveResult
         ? saveResult.valid
           ? "Mapping is consistent. The Krauken is using it now."
@@ -232,21 +232,6 @@ export function HardwareSetupView() {
           </Button>
         </div>
       </div>
-
-      {(preview.blocking.length > 0 || preview.warnings.length > 0) && (
-        <div className={styles.notices}>
-          {preview.blocking.map((b, i) => (
-            <div key={i} className={`${styles.notice} ${styles.danger}`}>
-              {b.message}
-            </div>
-          ))}
-          {preview.warnings.map((w, i) => (
-            <div key={i} className={`${styles.notice} ${styles.warn}`}>
-              {w.message}
-            </div>
-          ))}
-        </div>
-      )}
 
       {saveResult && saveResult.auto_resolved.length > 0 && (
         <div className={styles.notices}>

@@ -16,6 +16,9 @@ def main() -> None:
     daemon = build_daemon(
         db_path=cfg.db_path,
         socket_path=cfg.daemon_socket,
+        simulator_socket=cfg.simulator_socket,
+        manual_socket=cfg.manual_socket,
+        tilt_hci_device=cfg.tilt_hci_device,
         heartbeat_interval_s=cfg.heartbeat_interval_s,
         control_tick_interval_s=cfg.control_tick_interval_s,
         # clock left unset -- build_daemon()'s _select_clock() picks

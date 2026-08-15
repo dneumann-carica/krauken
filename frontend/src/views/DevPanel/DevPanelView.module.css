@@ -44,7 +44,7 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--kr-space-1);
 }
 .label {
   font: var(--kr-type-caption);
@@ -65,7 +65,7 @@
 .select:focus-visible {
   outline: none;
   border-color: var(--kr-accent);
-  box-shadow: 0 0 0 3px var(--kr-accent-faint);
+  box-shadow: var(--kr-ring-focus);
 }
 
 .clockNow {

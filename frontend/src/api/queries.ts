@@ -1,6 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "./client";
+import { api, ApiError } from "./client";
 import type { FermentationStartRequest, StageInput, TestAction } from "./types";
+
+// Re-exported so views never need their own import from api/client.ts --
+// queries.ts is the one HTTP-aware layer views talk to (see project
+// layering notes); reaching around it for ApiError specifically would be
+// the one crack in that seam.
+export { ApiError };
+
+/** `err instanceof ApiError ? err.message : fallback` -- the one place that
+ * ternary is spelled out, instead of once per catch block across every
+ * mutation handler that wants "show the server's real message when there
+ * is one, otherwise a generic fallback." */
+export function apiErrorMessage(err: unknown, fallback: string): string {
+  return err instanceof ApiError ? err.message : fallback;
+}
 
 export function useAppState() {
   return useQuery({
