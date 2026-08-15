@@ -1,5 +1,69 @@
 # BrewPi + Tilt implementation: decisions to ratify
 
+## v0.1.5: real control-loop crash, caught live testing on brewpi.local
+
+You'd remapped a live fermentation's `beer_temp`/`beer_gravity` from the
+real Tilt to `simulator:tilt` (to see it run on the accelerated clock),
+and asked me to restart the daemon to pick that up. Within about 2
+minutes, the daemon was pinned at ~44% CPU (this Pi Zero W's whole
+single core) and spamming >100 log lines/second -- caught and stopped
+immediately, then root-caused from the real tracebacks, not guessed.
+
+**What actually happened**, end to end:
+1. `daemon/app.py`'s `_select_clock()` is evaluated once, at daemon
+   startup -- with the mapping now pure-simulator, it correctly picked
+   `SimulatorClock` (real behavior, working as documented).
+2. `SimulatorClock.sleep()` never actually waits -- it advances its own
+   counters by the full requested amount and returns immediately, so
+   `_control_loop()`'s `while True` fires control ticks as fast as the
+   event loop and real IPC round-trips allow, each one advancing
+   simulated elapsed time (`t_h`) by another `control_tick_interval_s`
+   (30s) regardless. This is the whole point of the accelerated clock
+   (complete a multi-week fermentation in real seconds) -- not itself a
+   bug.
+3. `platforms/simulator/plant.py`'s `gravity_at()` -- a plain logistic
+   decay curve, `terminal + (og-terminal) / (1 + exp((t_h-midpoint_h)/
+   steepness_h))` -- needs a genuinely large *positive* exponent once
+   `t_h` gets far enough past `midpoint_h`. `math.exp()` of a large
+   positive number overflows (`OverflowError: math range error`).
+   Every *other* `math.exp()` call in this same module
+   (`advance_chamber_temp`'s exact-solution decay, `exotherm_f_per_h`'s
+   Gaussian) has an exponent that's unconditionally <= 0 by
+   construction, so extreme inputs only ever safely underflow toward 0
+   -- deliberately, per `advance_physics`'s own docstring, which
+   documents a prior, similar real incident (a ~1e200°F projected
+   temperature that crashed the chart's projection loop). `gravity_at()`
+   alone was never given the same treatment.
+4. `_control_loop()`'s own resilience ("one bad tick must never
+   permanently kill control", by design, so a transient failure
+   self-heals next tick) caught the exception, logged it, and moved on
+   -- but `clock.sleep()` still runs unconditionally at the end of every
+   loop iteration regardless of that tick's success/failure, so `t_h`
+   kept growing every single iteration. Since the *same* overflow
+   recurs at any `t_h` past the threshold, this specific failure could
+   never self-heal the way the resilience mechanism assumes transient
+   failures will -- it just retried the identical doomed read as fast
+   as the CPU allowed, forever.
+
+**Fixed**: `gravity_at()` rewritten with the standard numerically-stable
+sigmoid form (only ever exponentiate whichever side of the midpoint is
+non-positive) -- verified via a new `tests/unit/test_simulator_plant.py`
+(plant.py had zero direct unit tests before this) to produce identical
+output to the original formula for every normal input, and to correctly
+saturate at the curve's own asymptotes for extreme `t_h` instead of
+raising.
+
+**Deliberately not done, flagged instead of silently expanded into**:
+hardening `_control_loop()` itself so a *repeatable* (not transient)
+failure can't spin forever regardless of root cause -- e.g. some ceiling
+on ticks-per-real-second, or treating N consecutive identical failures
+differently from one transient one. The immediate, concrete bug is
+fixed and verified; a broader control-loop resilience redesign is a
+real, separate design decision worth your input, not something to
+fold in unprompted.
+
+
+
 Built per your "build both platforms, don't block on questions, document
 decisions" instruction, then corrected per your walkthrough feedback on
 items #6-#8 below. Everything here is implemented, tested (278 passing

@@ -5,6 +5,19 @@ deployment-shape conversation (packaging, CI/CD, legacy-BrewPi handling),
 `krauken-hwid` (the Krauken HAT EEPROM provisioning tool), and now the
 actual `.deb`/Actions/Pages pipeline itself.
 
+## v0.1.5: a real control-loop crash, caught live while testing v0.1.4
+
+Found while remapping a live fermentation to pure-simulator hardware and
+restarting the daemon to pick up the accelerated `SimulatorClock` --
+`gravity_at()`'s logistic formula overflowed once the never-waiting
+clock pushed elapsed simulated time far enough, and the control loop's
+own resilience then retried the identical failing read forever,
+pinning the Pi's CPU. Full writeup (root cause, the fix, why every
+*other* `math.exp()` call in that module was already safe) lives in
+`plans/brewpi-tilt-implementation-decisions.md`, since this is a
+Simulator plant-model bug, not a packaging one -- this entry is just the
+cross-reference for the version-history trail.
+
 ## v0.1.4: install was genuinely slow, and demo data was silently missing
 
 Two things you actually noticed running v0.1.3 on the real Pi Zero W

@@ -129,7 +129,28 @@ def exotherm_f_per_h(p: ExothermParams, t_h: float) -> float:
 
 
 def gravity_at(p: GravityParams, t_h: float) -> float:
-    return p.terminal + (p.og - p.terminal) / (1 + math.exp((t_h - p.midpoint_h) / p.steepness_h))
+    """Logistic decay from og to terminal, centered at midpoint_h. Unlike
+    every other math.exp() call in this module (advance_chamber_temp's
+    exact-solution decay, exotherm_f_per_h's Gaussian), whose exponents
+    are unconditionally <= 0 by construction and so only ever safely
+    underflow toward 0 for extreme inputs (see advance_physics's own
+    docstring on the real ~1e200F incident that motivated that pattern),
+    a plain logistic's exponent is unbounded in BOTH directions -- large
+    positive t_h genuinely does need math.exp() of a large POSITIVE
+    number, which overflows. A real, if exceptional, control-loop bug
+    (a runaway/never-waiting SimulatorClock racing t_h far past any
+    realistic fermentation length after an unrelated failure blocked the
+    stage-completion check that would normally have stopped ticking)
+    reached exactly this case. Standard stable-sigmoid rewrite: whichever
+    side of the midpoint t_h is on, only ever exponentiate the
+    non-positive half."""
+    x = (t_h - p.midpoint_h) / p.steepness_h
+    if x >= 0:
+        e = math.exp(-x)
+        fraction = e / (1 + e)
+    else:
+        fraction = 1 / (1 + math.exp(x))
+    return p.terminal + (p.og - p.terminal) * fraction
 
 
 def initial_state(p: PlantParams) -> PlantState:

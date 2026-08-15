@@ -1,3 +1,29 @@
+krauken (0.1.5) stable; urgency=high
+
+  * Fix: platforms/simulator/plant.py's gravity_at() raised
+    OverflowError ("math range error") for a sufficiently large
+    positive elapsed-time input -- unlike every other math.exp() call
+    in this module, whose exponents are unconditionally <= 0 by
+    construction (see advance_physics's own docstring on a prior,
+    similar incident), gravity_at()'s plain logistic formula needed a
+    genuinely positive exponent past its midpoint, which overflows.
+    Caught live on real hardware: a remapped-to-pure-simulator active
+    fermentation, after a daemon restart onto the accelerated
+    SimulatorClock, hit this on essentially the first control tick,
+    and the control loop's own "one bad tick must never kill control"
+    resilience then retried the identical failing read forever --
+    with SimulatorClock never actually waiting between ticks, this
+    pinned the Pi's single CPU core and produced >100 log lines/second
+    indefinitely. Fixed with the standard numerically-stable sigmoid
+    rewrite (only ever exponentiate the non-positive half, whichever
+    side of the midpoint t_h is on) -- verified identical output to the
+    original formula for every normal input, and that extreme t_h now
+    correctly saturates at the curve's own asymptotes instead of
+    raising. New tests/unit/test_simulator_plant.py (plant.py had no
+    direct unit coverage at all before this).
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 15 Aug 2026 16:39:30 -0400
+
 krauken (0.1.4) stable; urgency=medium
 
   * Fix: postinst re-ran the full `pip install -e '.[pi]'` on every
