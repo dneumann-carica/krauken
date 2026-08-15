@@ -60,6 +60,13 @@ override_dh_auto_install:
 	mkdir -p debian/krauken/etc/krauken
 	cp deploy/krauken.conf.example debian/krauken/etc/krauken/krauken.conf.example
 
+	# krauken-seed-demo.service installed directly here, NOT via
+	# dh_installsystemd (see override_dh_installsystemd's own comment) --
+	# it must never be enabled or auto-(re)started on upgrade; postinst
+	# alone decides when to `systemctl start` it (fresh installs only).
+	mkdir -p debian/krauken/usr/lib/systemd/system
+	cp deploy/krauken-seed-demo.service debian/krauken/usr/lib/systemd/system/
+
 # dh_installtmpfiles' default lookup (bare debian/<package>.tmpfiles, a
 # single file) just works -- but dh_installsystemd's default lookup ONLY
 # ever checks debian/<package>.<EXTENSION> (a SINGLE unit named after the
@@ -76,6 +83,12 @@ override_dh_auto_install:
 # FUNCTIONAL... do not enable this unit yet" (no krauken-supervisor
 # console script exists in pyproject.toml's [project.scripts] either),
 # so auto-enabling it would fail to start on every install.
+# krauken-seed-demo also deliberately excluded, for the opposite reason:
+# it's fully functional, but a one-shot, postinst-triggered-only unit
+# (see its own file, copied directly in override_dh_auto_install below)
+# -- dh_installsystemd's generated snippets always restart a unit it
+# manages on every upgrade, which would re-seed a demo batch into a
+# database that may already hold real fermentation history.
 override_dh_installsystemd:
 	dh_installsystemd --name=krauken-daemon
 	dh_installsystemd --name=krauken-api

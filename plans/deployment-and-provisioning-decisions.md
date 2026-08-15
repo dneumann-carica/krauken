@@ -5,6 +5,45 @@ deployment-shape conversation (packaging, CI/CD, legacy-BrewPi handling),
 `krauken-hwid` (the Krauken HAT EEPROM provisioning tool), and now the
 actual `.deb`/Actions/Pages pipeline itself.
 
+## v0.1.4: install was genuinely slow, and demo data was silently missing
+
+Two things you actually noticed running v0.1.3 on the real Pi Zero W
+(brewpi.local), neither a crash, both worth real measurement rather than
+a guessed fix:
+
+1. **"The install is super slow -- can we speed it up?"** Confirmed with
+   real numbers, not assumed: SSH'd in, timed a fresh `pip install` of
+   `pydantic-core` and `lgpio` in a throwaway venv on the actual Pi.
+   Both resolved to real piwheels-prebuilt `armv6l` wheels (so the
+   ship-source/native-install architecture decision is working exactly
+   as designed -- nothing is compiling from source) -- but
+   `pydantic-core` alone still cost ~50s of CPU time just to
+   unpack/install, on this hardware's single 1GHz ARM11 core. `postinst`
+   was re-running the *entire* `pip install -e '.[pi]'` (the whole
+   dependency set) on every single upgrade, including completely no-op
+   ones like 0.1.2->0.1.3 (zero `pyproject.toml` changes) -- real,
+   needless minutes every time. Fixed: skip the pip step entirely
+   unless `pyproject.toml` actually changed since the last successful
+   install (a stored sha256 hash) -- editable installs already pick up
+   plain code changes for free, so this is the ONLY thing that ever
+   needed rerunning. Verified the fix's actual `set -e` behavior (a
+   missing hash file's command substitution) and the full fresh-install
+   -> no-op-upgrade -> real-change -> no-op-again sequence in a local
+   shell simulation before shipping, not just reasoned about.
+2. **"The clean install didn't include any sample data."** Real gap, not
+   an oversight in your testing -- `krauken-db seed-demo` (wired to
+   `krauken/db/seed.py`'s `seed_demo_batch()`) already existed as a CLI
+   command, tested, but was never actually invoked anywhere in the
+   install flow. Now triggered automatically on a genuinely fresh
+   install (keyed off whether the real db file exists yet -- never on
+   upgrade, so it can't re-seed over real fermentation history).
+   Backgrounded via a new one-shot `krauken-seed-demo.service` --
+   deliberately NOT installed via `dh_installsystemd` (would auto-enable
+   and auto-restart on every upgrade otherwise) and not enabled at boot,
+   so `apt install` returns promptly instead of blocking on a real
+   compressed fermentation run to completion, which is genuinely
+   multiple minutes of work on hardware this weak.
+
 ## v0.1.2: two more real bugs, found by actually upgrading to v0.1.1 on real hardware
 
 Upgrading to v0.1.1 got the systemd units installed and enabled at last,

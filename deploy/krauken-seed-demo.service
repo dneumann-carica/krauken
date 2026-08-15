@@ -1,0 +1,23 @@
+[Unit]
+Description=Krauken demo fermentation data (one-time, fresh installs only)
+# Deliberately NOT installed via dh_installsystemd (see debian/rules'
+# own comment) -- no [Install] section, never systemctl enable'd, never
+# auto-started/restarted on upgrade. postinst explicitly `systemctl
+# start --no-block`s this exactly once, only when /var/lib/krauken/
+# krauken.db (or whatever KRAUKEN_DB_PATH actually points at) doesn't
+# exist yet -- an upgrade must never re-seed a demo batch into a
+# database that may already hold a real user's real fermentation
+# history.
+
+[Service]
+Type=oneshot
+User=krauken
+Group=krauken
+EnvironmentFile=/etc/krauken/krauken.conf
+# seed_demo_batch() (krauken/db/seed.py) is fully self-contained -- it
+# spins up its own scratch Simulator/Manual/daemon trio against a
+# throwaway scratch db, runs a real compressed fermentation to
+# completion, then copies just the result into the real db. No
+# ordering dependency on krauken-daemon/-simulator/-manual actually
+# being up yet.
+ExecStart=/opt/krauken/.venv/bin/krauken-db seed-demo --db ${KRAUKEN_DB_PATH}

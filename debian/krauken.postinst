@@ -53,16 +53,54 @@ case "$1" in
         cp /etc/krauken/krauken.conf.example /etc/krauken/krauken.conf
     fi
 
-    # 3. The actual Python virtualenv. Created once; `pip install` is
-    # re-run on every postinst (upgrade included) since pip's own
-    # dependency resolution is fast and correct when nothing actually
-    # changed, and this is the one thing that keeps the venv in sync with
-    # whatever this particular package version actually needs.
+    # 3. The actual Python virtualenv. `pip install` only re-runs when
+    # pyproject.toml has actually changed since the last successful
+    # install (tracked via a stored hash), not unconditionally on every
+    # upgrade -- editable installs already pick up plain code changes
+    # for free (${SRC} is referenced directly, not copied), so the only
+    # reason to ever re-run pip here is a real dependency/entry-point
+    # change. This used to re-resolve the whole [pi] dependency set on
+    # every single upgrade, including pure no-op ones -- measured on a
+    # real Pi Zero W (single 1GHz ARM11 core): even a package with a
+    # piwheels-prebuilt wheel already available, like pydantic-core,
+    # costs ~50s of CPU time just to unpack/install; across the full
+    # dependency set that's real, needless minutes on every upgrade.
+    # piwheels' per-architecture wheels (this whole design's reason for
+    # existing) still resolve in full whenever a real change DOES need it.
+    fresh_venv=false
     if [ ! -x "$VENV/bin/python3" ]; then
         python3 -m venv "$VENV"
+        fresh_venv=true
     fi
-    "$VENV/bin/pip" install --quiet --upgrade pip
-    "$VENV/bin/pip" install --quiet -e "${SRC}[pi]"
+    hash_file="$VENV/.krauken-pyproject-sha256"
+    new_hash="$(sha256sum "${SRC}/pyproject.toml" | cut -d' ' -f1)"
+    old_hash="$(cat "$hash_file" 2>/dev/null || true)"
+    if [ "$fresh_venv" = true ] || [ "$new_hash" != "$old_hash" ]; then
+        "$VENV/bin/pip" install --quiet --upgrade pip
+        "$VENV/bin/pip" install --quiet -e "${SRC}[pi]"
+        echo "$new_hash" > "$hash_file"
+    fi
+
+    # 3b. Demo fermentation data -- fresh installs only, never on
+    # upgrade: keyed off whether the real db file exists yet (not
+    # fresh_venv above -- the venv and the db are independent things,
+    # and a reinstalled venv over a real, populated db must never
+    # re-seed). Backgrounded via a one-shot systemd unit (see deploy/
+    # krauken-seed-demo.service's own comment -- deliberately not
+    # installed via dh_installsystemd, never enabled, never restarted on
+    # upgrade) rather than run inline here, since seed_demo_batch() runs
+    # a real compressed fermentation to completion -- real, measurable
+    # minutes of work on weak hardware (a Raspberry Pi Zero W's single
+    # core), not something `apt install` itself should block on.
+    db_path=/var/lib/krauken/krauken.db
+    if [ -e /etc/krauken/krauken.conf ]; then
+        . /etc/krauken/krauken.conf
+        db_path="${KRAUKEN_DB_PATH:-$db_path}"
+    fi
+    if [ ! -e "$db_path" ]; then
+        systemctl daemon-reload
+        systemctl start --no-block krauken-seed-demo.service || true
+    fi
 
     # 4. eeptools (eepmake/eepflash.sh/eepdump) -- only needed for genuine
     # Krauken PCB hardware's EEPROM provisioning (krauken-hwid), not for

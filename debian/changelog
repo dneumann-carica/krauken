@@ -1,3 +1,25 @@
+krauken (0.1.4) stable; urgency=medium
+
+  * Fix: postinst re-ran the full `pip install -e '.[pi]'` on every
+    single upgrade, even completely no-op ones -- measured on a real
+    Raspberry Pi Zero W (single 1GHz ARM11 core): ~50s of CPU time just
+    to unpack a single already-cached, piwheels-prebuilt wheel
+    (pydantic-core), so re-resolving the whole dependency set on every
+    upgrade was real, needless minutes of install time. Now skipped
+    entirely unless pyproject.toml has actually changed since the last
+    successful install (tracked via a stored hash) -- editable installs
+    already pick up plain code changes for free.
+  * New: demo fermentation data (krauken-db seed-demo, already existed
+    as a CLI command but was never wired into the install) now seeds
+    automatically on a genuinely fresh install (keyed off whether the
+    real db file exists yet, never on upgrade). Backgrounded via a new
+    one-shot krauken-seed-demo.service, not installed via
+    dh_installsystemd and never auto-(re)started, so `apt install`
+    itself isn't blocked on a real compressed fermentation run -- real,
+    measurable minutes of work on hardware this weak.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 15 Aug 2026 16:07:18 -0400
+
 krauken (0.1.3) stable; urgency=medium
 
   * Internal architecture: the daemon composition root no longer
