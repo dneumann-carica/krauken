@@ -34,16 +34,57 @@ actual `.deb`/Actions/Pages pipeline itself.
    key" step) and publishes it alongside the repo as
    `krauken-archive-keyring.asc`.
 
-The actual pipeline code is written, and validated as much as possible
-without a real Debian/Linux host: `dpkg-source`/`dpkg-parsechangelog`/
-`dpkg-buildpackage`'s own pre-flight checks all pass locally (source
-format, changelog, control field syntax), and `actionlint` + `shellcheck`
-are clean on the workflow and every shell script. What's NOT yet verified:
-a full `dpkg-buildpackage` run (needs `debhelper`, which isn't packaged
-for macOS -- Docker/Colima wouldn't start locally either), and the actual
-signing/Pages steps end-to-end. **Next real step: push a `v0.1.0` tag and
-watch the workflow run for real** (`gh run watch`) — this is the first
-genuine full-pipeline verification.
+## Verified end-to-end with a real `v0.1.0` release
+
+Pushed the tag and watched `build-deb.yml` run for real (`gh run watch`).
+Took three iterations to go green — all three were genuine bugs, not
+CI flakiness, each fixed and the tag re-pushed pointing at the fix:
+
+1. **`Unmet build dependencies: nodejs (>= 18) npm`.** `actions/setup-node`
+   only puts Node on `PATH` via its tool cache; `dpkg-checkbuilddeps`
+   consults dpkg's own installed-package database, which never heard
+   about it. Fixed: also `apt-get install nodejs npm` alongside the other
+   packaging tools (setup-node's version still wins on `PATH` for the
+   actual frontend build).
+2. **Two real, pre-existing test bugs**, both invisible until the suite
+   ran against a genuinely fresh checkout for the first time:
+   - `debian/rules`' `override_dh_auto_test` installed `.[dev]` only, not
+     `.[dev,pi]` — `pyserial` wasn't importable, so 6 BrewPi platform
+     tests failed with `ModuleNotFoundError` instead of exercising the
+     real fake-serial-backed path. Fixed by installing `.[dev,pi]` (all
+     three extras build/import cleanly on x86_64; `lgpio` only touches
+     real hardware lazily, at instantiation).
+   - `test_speed_and_advance_routes_no_longer_exist` asserted the response
+     content-type excludes `application/json` — true only because this
+     dev machine has a stale `frontend/dist` → `_static` build lying
+     around. In a real fresh checkout (any CI run; specifically
+     `debian/rules`' test step, which runs before `override_dh_auto_install`
+     stages `_static`), `static.py`'s own fallback correctly returns a
+     harmless JSON 404 — the test conflated "route retired" with
+     "frontend happens to be built." Fixed to assert the actual invariant
+     (no old speed-panel JSON payload) regardless of which shape wins.
+3. **`Tag "v0.1.0" is not allowed to deploy to github-pages due to
+   environment protection rules.`** Enabling Pages auto-creates a
+   `github-pages` environment with a deployment branch policy that, by
+   default, allows only `main` — no tag refs at all, so the tag-triggered
+   `sign-and-publish` job's `deploy-pages` step was rejected outright.
+   Fixed via the API, not the UI: added a `v*` tag policy
+   (`POST .../environments/github-pages/deployment-branch-policies`,
+   `{name: "v*", type: "tag"}`).
+
+All green on the fourth run. Confirmed live, not just "workflow succeeded":
+- `gh release view v0.1.0` → `krauken_0.1.0_all.deb` attached.
+- `https://dneumann-carica.github.io/krauken/` serves the real
+  `index.html`, with the actual Pages URL (not a placeholder) in both the
+  `curl`/`gpg --dearmor` line and the `sources.list` entry.
+- `dists/stable/Release` and `krauken-archive-keyring.asc` both resolve
+  and contain real, signed content.
+
+**Genuinely still unverified**: nothing has installed this `.deb` on a
+real Raspberry Pi yet (the `postinst` venv-creation/piwheels/eeptools-build
+path, the `python3-lgpio | python3-rpi-lgpio` dependency name, and the
+debconf BrewPi-replacement prompt are all only validated by inspection and
+by the x86_64 build-machine test run, not a real install).
 
 ## Packaging shape — built
 
