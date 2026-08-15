@@ -1,3 +1,21 @@
+krauken (0.1.3) stable; urgency=medium
+
+  * Internal architecture: the daemon composition root no longer
+    constructs or knows about any concrete hardware platform class
+    (BrewPiConnection, TiltScanner, ManualIpcConnection,
+    SimulatorIpcConnection) or their configuration (socket paths,
+    KRAUKEN_TILT_HCI_DEVICE) -- platforms/registry.py's new
+    PlatformRegistry class now owns constructing and running all of
+    them, via each platform's own build_state factory. No user-facing
+    behavior change; verified locally end-to-end with Playwright
+    (hardware discovery, role mapping, live control-tick dispatch) and
+    on a real running instance before release.
+  * KRAUKEN_SIMULATOR_TILT_ENABLED (default on, since Krauken isn't in
+    production yet) gates the Simulator's second ("Simulated Tilt")
+    discover() candidate independently of its chamber candidate.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 15 Aug 2026 15:35:03 -0400
+
 krauken (0.1.2) stable; urgency=high
 
   * Fix: krauken-api.service specified User=krauken-api -- a user that
