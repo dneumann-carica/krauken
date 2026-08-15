@@ -1,11 +1,40 @@
 # Deployment, packaging, and Krauken HAT provisioning: decisions to ratify
 
 Companion to `plans/brewpi-tilt-implementation-decisions.md`. Covers the
-deployment-shape conversation (packaging, CI/CD, legacy-BrewPi handling)
-and the one piece of it that's actually built and tested so far:
-`krauken-hwid`, the Krauken HAT EEPROM provisioning tool.
+deployment-shape conversation (packaging, CI/CD, legacy-BrewPi handling),
+`krauken-hwid` (the Krauken HAT EEPROM provisioning tool), and now the
+actual `.deb`/Actions/Pages pipeline itself.
 
-## Packaging shape (design only — nothing built yet)
+## Two things blocking a real (not just written) release — need your input
+
+1. **The repo is private** (confirmed via `gh repo view`). `actions/
+   deploy-pages` needs GitHub Pages enabled, and Pages on a private repo
+   is a paid-plan feature (Free doesn't support it) — I can't tell from
+   here whether your account's plan covers this. Options: confirm your
+   plan supports it and I'll enable Pages via the API; make the repo
+   public; or host the apt repo somewhere other than Pages (a different
+   static host, or skip the "add our apt repo" experience and only ship
+   the raw `.deb` via GitHub Releases, which needs no Pages at all).
+2. **No GPG signing key exists yet.** I didn't generate one unilaterally
+   — a production signing key that ends up trusted by everyone who
+   installs this is exactly the kind of thing worth your explicit call
+   rather than me silently picking parameters. Do you want me to generate
+   a fresh keypair now and install it as `KRAUKEN_GPG_PRIVATE_KEY`/
+   `KRAUKEN_GPG_KEY_ID` repo secrets (I have the `gh` access to do this
+   directly), or do you have an existing key/process you'd rather use?
+
+Nothing else below is blocked on these two — the actual pipeline code is
+written, and validated as much as possible without a real Debian/Linux
+host: `dpkg-source`/`dpkg-parsechangelog`/`dpkg-buildpackage`'s own
+pre-flight checks all pass locally (source format, changelog, control
+field syntax), and `actionlint` + `shellcheck` are clean on the workflow
+and every shell script. What's NOT yet verified: a full `dpkg-buildpackage`
+run (needs `debhelper`, which isn't packaged for macOS -- Docker/Colima
+wouldn't start locally either, so this needs a real CI run to confirm),
+and obviously the signing/Pages steps themselves, pending the two
+decisions above.
+
+## Packaging shape — built
 
 - **`.deb` + apt repository**, per your explicit direction over the
   git-clone-and-shell-installer alternative I'd originally proposed.
@@ -16,35 +45,49 @@ and the one piece of it that's actually built and tested so far:
   file tree) since GitHub Packages has no native apt/`.deb` repository
   type; **GitHub Releases** hosts the raw `.deb` for direct
   download/`dpkg -i` as a simpler fallback path.
-- Real architecture wrinkle, not yet resolved: the target hardware is
-  `armv6l` (the original Pi/Pi Zero chip) — most GitHub-hosted ARM
-  runners and prebuilt cross-build images target ARMv7+/ARM64. Our own
-  dependencies are pure Python (`pyserial`, `aioblescan`) so this mostly
-  doesn't matter, **except** `lgpio` (a compiled C extension via `swig`).
-  Plan: avoid bundling a compiled `lgpio` wheel ourselves — `Depends:` on
-  whatever GPIO package Raspberry Pi OS's own repo already ships prebuilt
-  for ARMv6, so `apt` resolves it from Raspberry Pi's own archive instead
-  of us cross-building it. **Not yet verified**: the exact current package
-  name for that.
+- **Architecture wrinkle resolved by design, not by cross-compiling**: the
+  target hardware is `armv6l` (original Pi/Pi Zero), and most GitHub-hosted
+  ARM runners/cross-build images don't cover it, plus `pydantic-core`
+  (pydantic v2's compiled Rust extension -- a transitive dependency, not
+  even one we chose directly) would need a real ARMv6 wheel. Solution:
+  `Architecture: all` -- the `.deb` ships Python SOURCE, and `postinst`
+  creates the venv and runs `pip install` **natively on the target
+  device** at install time, not at CI build time. Raspberry Pi OS's own
+  `pip` is pre-configured to pull prebuilt wheels from `piwheels.org`
+  (the Raspberry Pi community's own ARMv6/armhf/arm64 wheel mirror),
+  which correctly resolves for whatever the real device's architecture
+  actually is. Trade-off: install needs network access (apt already
+  requires this to fetch the `.deb` in the first place, so this isn't a
+  new category of requirement, just one more use of it) and takes longer
+  than a fully pre-built package would. Same reasoning applied to
+  `krauken-hwid`'s `eeptools` dependency: vendored as source (`vendor/
+  rpi-utils` submodule, pinned to a specific commit) and compiled via
+  `cmake`/`make` in `postinst`, not at package-build time.
+- `lgpio`: `Depends: python3-lgpio | python3-rpi-lgpio` (an "either"
+  dependency) rather than installing it ourselves via pip -- lets `apt`
+  resolve whichever one Raspberry Pi OS's own repo actually provides.
+  **Not independently verified**: the exact current package name(s);
+  worth confirming against a real Raspberry Pi OS install before trusting
+  this at release time.
 - **`brewpi.service` handling, per your answer**: NOT auto-disabled.
-  Requires an explicit `--replace-brewpi` flag, or an interactive y/n
-  prompt if run from a terminal without the flag; refuses and prints
-  instructions if run non-interactively with neither. This logic will
-  live in the package's `postinst` maintainer script once the `.deb`
-  itself exists — likely via `debconf` (Debian's standard
-  interactive/preseedable during-install prompt mechanism), not a
-  bespoke flag, since that's the idiomatic home for exactly this kind of
-  "found something conflicting, what do you want to do" question in a
-  proper package. Belt-and-suspenders addition: `Conflicts=brewpi.service`
-  in our own systemd unit, so the two can never both be active regardless
-  of what the installer decided — a no-op if `brewpi.service` doesn't
-  exist on a given box.
+  `debian/krauken.templates` + `debian/krauken.config` ask a real
+  `debconf` question (`krauken/replace-brewpi`) -- but only if
+  `brewpi.service` is actually detected on the box in the first place;
+  `debian/krauken.postinst` reads the answer back and only stops+
+  disables if it was actually accepted. Never uninstalls the underlying
+  BrewPi Remix files. Belt-and-suspenders addition, now actually in
+  `deploy/krauken-daemon.service`: `Conflicts=brewpi.service` (a no-op if
+  that unit doesn't exist on a given box) -- this was only documented as
+  a plan last time, not yet added to the real file; it is now.
 - **Ratified**: `CAP_NET_RAW` via `AmbientCapabilities` (from the BrewPi/
   Tilt build) — you confirmed this is fine.
 
-None of the above is built yet — no `debian/` packaging directory, no
-Actions workflow, no signing key generated. This section is the agreed
-shape to build against, not a status report.
+Built: `debian/` (control, rules, changelog, postinst/postrm, debconf
+templates+config, source format, symlinks into `deploy/` for
+`dh_installsystemd`/`dh_installtmpfiles` to auto-discover), `.github/
+workflows/build-deb.yml`, `scripts/publish-apt-repo.sh`. See the top of
+this doc for the two things still blocking an actual (not just written)
+release.
 
 ## `krauken-hwid` — built, tested, not yet hardware-verified
 
