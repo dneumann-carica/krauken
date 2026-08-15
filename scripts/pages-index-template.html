@@ -4,149 +4,179 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Krauken</title>
-<meta name="description" content="Open-source fermentation chamber controller for BrewPi, Tilt, and the Krauken PCB -- apt install instructions and project overview.">
+<meta name="description" content="Open-source fermentation chamber controller for BrewPi and the Krauken PCB -- apt install instructions and project overview.">
 <style>
+  /* Same token set as frontend/src/design/tokens/*.css -- copied rather
+     than imported, since this page is built and served independently of
+     the React app (no bundler step here), but kept in sync by hand so
+     the apt-repo homepage doesn't look like a different product from the
+     UI it's advertising. */
   :root {
-    --bg: #faf8f5;
-    --bg-raised: #ffffff;
-    --text: #2b2420;
-    --text-dim: #6b6058;
-    --border: #e4ddd3;
-    --accent: #a05a2c;
-    --accent-text: #ffffff;
-    --code-bg: #2b2420;
-    --code-text: #f3ede4;
-    --code-border: #453a30;
-    --link: #8a4a1f;
+    color-scheme: light dark;
+
+    --kr-accent:       #FF4002;
+    --kr-accent-deep:  #E03601;
+    --kr-accent-tint:  #FFE7DF;
+    --kr-accent-faint: #FFF3EF;
+    --kr-accent-ink:   #A32A02;
+
+    --kr-ink:            #262D4C;
+    --kr-ink-body:       #3F4757;
+    --kr-ink-muted:      #7E8A99;
+    --kr-surface:        #FFFFFF;
+    --kr-surface-sunken: #F7F8FA;
+    --kr-surface-page:   #F0F2F4;
+    --kr-border:         #E2E6EB;
+    --kr-border-strong:  #CBD2DB;
+    --kr-ink-rgb:        38 45 76;
+
+    --kr-font-display: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --kr-font-sans:    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --kr-font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+    --kr-space-1: 4px;  --kr-space-2: 8px;  --kr-space-3: 12px; --kr-space-4: 16px;
+    --kr-space-5: 20px; --kr-space-6: 24px; --kr-space-8: 32px; --kr-space-10: 40px;
+
+    --kr-container-max: 720px;
+
+    --kr-radius-md: 10px;
+    --kr-radius-lg: 14px;
+    --kr-radius-full: 999px;
+
+    --kr-shadow-sm: 0 1px 3px rgb(var(--kr-ink-rgb) / 0.08), 0 1px 2px rgb(var(--kr-ink-rgb) / 0.04);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #1c1815;
-      --bg-raised: #262019;
-      --text: #ece5db;
-      --text-dim: #a89c8d;
-      --border: #3a322a;
-      --accent: #d98b4f;
-      --accent-text: #1c1815;
-      --code-bg: #14110e;
-      --code-text: #f3ede4;
-      --code-border: #3a322a;
-      --link: #e2a06a;
+      --kr-ink:            #E7EAF2;
+      --kr-ink-body:       #C7CCDA;
+      --kr-ink-muted:      #8B94A8;
+      --kr-surface:        #14172A;
+      --kr-surface-sunken: #1B1E33;
+      --kr-surface-page:   #0E1020;
+      --kr-border:         #2A2E45;
+      --kr-border-strong:  #3B4059;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.55;
+    background: var(--kr-surface-page);
+    color: var(--kr-ink-body);
+    font: 400 16px/1.5 var(--kr-font-sans);
   }
   main {
-    max-width: 46rem;
+    max-width: var(--kr-container-max);
     margin: 0 auto;
-    padding: 3rem 1.25rem 4rem;
+    padding: var(--kr-space-10) var(--kr-space-4) var(--kr-space-10);
   }
-  header.hero { margin-bottom: 2.5rem; }
-  .hero h1 {
-    font-size: 2rem;
-    margin: 0 0 0.35rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .hero p.tagline {
-    margin: 0;
-    color: var(--text-dim);
-    font-size: 1.05rem;
-  }
-  .badges {
-    margin-top: 0.9rem;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
+  h1, h2, h3 { font-family: var(--kr-font-display); color: var(--kr-ink); margin: 0; }
+
+  header.hero { margin-bottom: var(--kr-space-8); }
+  .hero h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.01em; }
+  .hero p.tagline { margin: var(--kr-space-2) 0 0; color: var(--kr-ink-body); font-size: 18px; }
+  .badges { margin-top: var(--kr-space-3); display: flex; flex-wrap: wrap; gap: var(--kr-space-2); }
   .badge {
-    display: inline-block;
-    font-size: 0.8rem;
-    padding: 0.2rem 0.6rem;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    background: var(--bg-raised);
+    font: 500 12px/1 var(--kr-font-sans);
+    padding: 5px 10px;
+    border-radius: var(--kr-radius-full);
+    border: 1px solid var(--kr-border);
+    color: var(--kr-ink-muted);
+    background: var(--kr-surface);
   }
-  section { margin-bottom: 2.25rem; }
+
+  section { margin-bottom: var(--kr-space-8); }
   h2 {
-    font-size: 1.15rem;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 0.4rem;
-    margin: 0 0 0.9rem;
+    font-size: 20px; font-weight: 700;
+    border-bottom: 1px solid var(--kr-border);
+    padding-bottom: var(--kr-space-2);
+    margin-bottom: var(--kr-space-4);
   }
-  p { margin: 0 0 0.9rem; }
+  p { margin: 0 0 var(--kr-space-3); }
+  ul { padding-left: 1.2rem; margin: 0 0 var(--kr-space-3); }
+  li { margin-bottom: var(--kr-space-2); }
+
   .callout {
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent);
-    border-radius: 0.35rem;
-    padding: 0.85rem 1rem;
-    font-size: 0.95rem;
-    color: var(--text-dim);
+    display: flex; flex-direction: column; gap: var(--kr-space-1);
+    background: var(--kr-surface);
+    border: 1px solid var(--kr-border);
+    border-left: 3px solid var(--kr-accent);
+    border-radius: var(--kr-radius-lg);
+    box-shadow: var(--kr-shadow-sm);
+    padding: 14px 18px;
+    font-size: 14px;
+    color: var(--kr-ink-body);
   }
-  ul { padding-left: 1.25rem; margin: 0 0 0.9rem; }
-  li { margin-bottom: 0.4rem; }
+
   code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-family: var(--kr-font-mono);
     font-size: 0.88em;
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 0.25rem;
+    background: var(--kr-surface);
+    border: 1px solid var(--kr-border);
+    border-radius: 4px;
     padding: 0.1rem 0.35rem;
   }
+
+  .step {
+    display: flex;
+    gap: var(--kr-space-4);
+    margin-bottom: var(--kr-space-5);
+  }
+  .step-num {
+    flex: 0 0 auto;
+    width: 28px; height: 28px;
+    border-radius: var(--kr-radius-full);
+    background: var(--kr-accent-faint);
+    color: var(--kr-accent-ink);
+    font: 700 14px/28px var(--kr-font-sans);
+    text-align: center;
+  }
+  .step-body { flex: 1 1 auto; min-width: 0; }
+  .step-title { font-weight: 700; color: var(--kr-ink); margin-bottom: var(--kr-space-1); }
+  .step-why { font-size: 14px; color: var(--kr-ink-muted); margin-bottom: var(--kr-space-2); }
+
   .install-block {
     position: relative;
-    background: var(--code-bg);
-    color: var(--code-text);
-    border: 1px solid var(--code-border);
-    border-radius: 0.5rem;
-    padding: 1.1rem 1rem;
+    background: var(--kr-ink);
+    color: #F3EDE4;
+    border-radius: var(--kr-radius-md);
+    padding: 14px 16px;
     overflow-x: auto;
   }
   .install-block pre {
     margin: 0;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.85rem;
+    font-family: var(--kr-font-mono);
+    font-size: 13px;
     white-space: pre;
   }
   .copy-btn {
     position: absolute;
-    top: 0.6rem;
-    right: 0.6rem;
-    font-size: 0.75rem;
-    padding: 0.3rem 0.6rem;
-    border-radius: 0.3rem;
-    border: 1px solid var(--code-border);
+    top: 8px; right: 8px;
+    font: 500 12px/1 var(--kr-font-sans);
+    padding: 5px 9px;
+    border-radius: 6px;
+    border: 1px solid rgb(255 255 255 / 0.25);
     background: transparent;
-    color: var(--code-text);
+    color: #F3EDE4;
     cursor: pointer;
-    font-family: inherit;
   }
-  .copy-btn:hover { background: rgba(255,255,255,0.08); }
-  a { color: var(--link); }
+  .copy-btn:hover { background: rgb(255 255 255 / 0.08); }
+
+  a { color: var(--kr-accent-ink); }
   footer {
-    color: var(--text-dim);
-    font-size: 0.85rem;
-    border-top: 1px solid var(--border);
-    padding-top: 1.25rem;
+    color: var(--kr-ink-muted);
+    font-size: 13px;
+    border-top: 1px solid var(--kr-border);
+    padding-top: var(--kr-space-5);
   }
   footer a { color: inherit; text-decoration: underline; }
-  .links { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-bottom: 0.6rem; }
+  .links { display: flex; flex-wrap: wrap; gap: var(--kr-space-5); margin-bottom: var(--kr-space-2); }
 </style>
 </head>
 <body>
 <main>
 
   <header class="hero">
-    <h1>🦑 Krauken</h1>
+    <h1>Krauken</h1>
     <p class="tagline">Open-source fermentation chamber controller for a Raspberry Pi.</p>
     <div class="badges">
       <span class="badge">v{{VERSION}}</span>
@@ -159,47 +189,98 @@
     <h2>What this is</h2>
     <p>
       Krauken drives a fermentation chamber end to end: a control daemon and
-      hardware supervisor, a web API, and a React frontend, all running as one
-      service on a Raspberry Pi. It can talk to a BrewPi-compatible Arduino
-      controller, Tilt hydrometers over Bluetooth LE, and the Krauken
-      project's own custom PCB -- pick whichever hardware you actually have.
+      hardware supervisor, a web API, and a React frontend, all running as
+      one service on a Raspberry Pi. It can control the chamber through
+      either a BrewPi-compatible Arduino controller (the common DIY
+      fermentation-chamber setup) or the Krauken project's own custom PCB,
+      and it can read Tilt hydrometers over Bluetooth LE alongside either
+      one.
     </p>
     <div class="callout">
-      Early days -- v{{VERSION}}. This is a DIY project: the Krauken PCB
-      isn't sold anywhere, so most of what you'll actually run today is the
-      BrewPi/Tilt support. Expect rough edges.
+      Early days -- v{{VERSION}}. The Krauken PCB is an open-source
+      hardware design, not a product -- when it's ready, the design files
+      go public and you build or order your own; nobody is selling
+      assembled boards. Until then, this software runs on BrewPi/Tilt
+      hardware you already have.
     </div>
   </section>
 
   <section>
     <h2>Install</h2>
-    <p>Adds this apt repository, then installs the package normally:</p>
-    <div class="install-block">
-      <button class="copy-btn" type="button" data-copy-target="install-cmd">Copy</button>
-      <pre id="install-cmd">curl -fsSL {{PAGES_URL}}/krauken-archive-keyring.asc \
-  | sudo gpg --dearmor -o /usr/share/keyrings/krauken-archive-keyring.gpg
+    <p>Three steps: trust the signing key, add the repository, then install normally.</p>
 
-echo "deb [signed-by=/usr/share/keyrings/krauken-archive-keyring.gpg] {{PAGES_URL}} stable main" \
-  | sudo tee /etc/apt/sources.list.d/krauken.list
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <div class="step-title">Trust the signing key</div>
+        <div class="step-why">
+          Downloads Krauken's public signing key and converts it to the
+          binary format apt expects (<code>gpg --dearmor</code>). This is
+          what lets apt tell a genuine Krauken package apart from an
+          impostor claiming the same name.
+        </div>
+        <div class="install-block">
+          <button class="copy-btn" type="button" data-copy-target="step1">Copy</button>
+          <pre id="step1">curl -fsSL {{PAGES_URL}}/krauken-archive-keyring.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/krauken-archive-keyring.gpg</pre>
+        </div>
+      </div>
+    </div>
 
-sudo apt update && sudo apt install krauken</pre>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <div class="step-title">Add the repository</div>
+        <div class="step-why">
+          Registers this apt repository as a package source, and tells
+          apt to trust it specifically using the key from step 1 -- not
+          just any key on your system. Nothing installs yet.
+        </div>
+        <div class="install-block">
+          <button class="copy-btn" type="button" data-copy-target="step2">Copy</button>
+          <pre id="step2">echo "deb [signed-by=/usr/share/keyrings/krauken-archive-keyring.gpg] {{PAGES_URL}} stable main" \
+  | sudo tee /etc/apt/sources.list.d/krauken.list</pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <div class="step-title">Update and install</div>
+        <div class="step-why">
+          <code>apt update</code> re-reads every configured repository's
+          package list, including the one you just added.
+          <code>apt install krauken</code> then actually downloads and
+          installs it -- see below for what happens during that step.
+        </div>
+        <div class="install-block">
+          <button class="copy-btn" type="button" data-copy-target="step3">Copy</button>
+          <pre id="step3">sudo apt update && sudo apt install krauken</pre>
+        </div>
+      </div>
     </div>
   </section>
 
   <section>
-    <h2>Before you install</h2>
+    <h2>What happens during install</h2>
     <ul>
       <li>Target is Raspberry Pi OS (or any Debian-based distro) on a Pi --
-        <code>armv6l</code>, <code>armhf</code>, and <code>arm64</code> are all supported.</li>
-      <li>The package ships as source, not a prebuilt binary: on first
-        install, it creates a real Python virtualenv and compiles a small
-        EEPROM utility natively on your Pi (using
-        <a href="https://www.piwheels.org/">piwheels.org</a> for prebuilt
-        wheels of compiled dependencies). This needs network access and
-        takes longer than a typical <code>apt install</code>.</li>
-      <li>If <code>brewpi.service</code> is already running on the box, the
-        installer asks before stopping/disabling it -- it never deletes
-        BrewPi's own files.</li>
+        <code>armv6l</code>, <code>armhf</code>, and <code>arm64</code> are
+        all supported.</li>
+      <li>The package ships as source, not a prebuilt binary: it creates a
+        real Python virtualenv and installs into it natively on your Pi
+        (using <a href="https://www.piwheels.org/">piwheels.org</a> for
+        prebuilt wheels of compiled dependencies). This needs network
+        access and takes longer than a typical <code>apt install</code>.</li>
+      <li>If you're installing on genuine Krauken PCB hardware, the
+        installer can also build the small tool that provisions its ID
+        EEPROM for auto-discovery -- but since the hardware hasn't
+        shipped yet, that question is currently dormant and always
+        skipped; nobody pays for a compile step they don't need.</li>
+      <li>If <code>brewpi.service</code> is already running on the box,
+        the installer asks before stopping/disabling it -- it never
+        deletes BrewPi's own files.</li>
     </ul>
   </section>
 
@@ -210,12 +291,14 @@ sudo apt update && sudo apt install krauken</pre>
       <pre>systemctl status krauken-api krauken-daemon</pre>
     </div>
     <p>
-      By default the web API only listens on <code>127.0.0.1:8080</code>
-      (localhost). To reach it from another device on your network, edit
-      <code>/etc/krauken/krauken.conf</code>, set
-      <code>KRAUKEN_API_HOST=0.0.0.0</code>, then
-      <code>sudo systemctl restart krauken-api</code> and browse to
-      <code>http://&lt;your-pi's-address&gt;:8080</code>.
+      The web API listens on every interface (<code>0.0.0.0:8080</code>)
+      by default, since the Pi it runs on is normally headless -- browse
+      to <code>http://&lt;your-pi's-address&gt;:8080</code> from any
+      device on your LAN with no extra setup. To restrict a given install
+      back down to loopback-only, set
+      <code>KRAUKEN_API_HOST=127.0.0.1</code> in
+      <code>/etc/krauken/krauken.conf</code> and
+      <code>sudo systemctl restart krauken-api</code>.
     </p>
   </section>
 

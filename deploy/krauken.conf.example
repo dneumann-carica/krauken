@@ -20,3 +20,9 @@ KRAUKEN_TILT_HCI_DEVICE=0
 # ttyUSB* and identifies a real BrewPi by its version response, rather
 # than needing a configured port (a single-chamber install has at most
 # one BrewPi to find).
+
+# The API listens on 0.0.0.0 (every interface) by default, since the Pi
+# this runs on is normally headless -- reachable at http://<pi>:8080 from
+# any device on your LAN with no extra setup. Uncomment to restrict a
+# given install back down to loopback-only:
+# KRAUKEN_API_HOST=127.0.0.1

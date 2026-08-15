@@ -86,6 +86,58 @@ path, the `python3-lgpio | python3-rpi-lgpio` dependency name, and the
 debconf BrewPi-replacement prompt are all only validated by inspection and
 by the x86_64 build-machine test run, not a real install).
 
+## Homepage rewrite + three follow-on product decisions, per your review
+
+Reviewing the live Pages homepage, you asked for six changes -- three are
+copy/design, three are real behavior changes:
+
+- **Reused the actual frontend design tokens** (`frontend/src/design/
+  tokens/*.css`'s `--kr-*` colors/type/spacing/effects), copied inline
+  rather than imported (this page has no bundler step of its own) so it
+  doesn't read as a different product from the app it's installing.
+  Dropped the squid emoji -- just the wordmark now.
+- **Install is now 3 explained steps**, not one opaque block: trust the
+  key (and why -- proves genuine vs. impostor), add the repository (and
+  why -- registers the source, trusts only that key), update+install
+  (and why -- re-reads package lists, then actually installs). Exact
+  commands unchanged from before, verified byte-for-byte via a local
+  substitution test against a real `.deb`.
+- **API now defaults to `0.0.0.0`, not `127.0.0.1`.** Real code change,
+  not just copy -- `krauken/config.py`'s `DEFAULT_API_HOST`. Per your
+  call: the Pi is headless, so a loopback-only default left a fresh
+  install unreachable until someone already knew to SSH in and edit a
+  config file. Not a new security hole: `api/security.py`'s CSRF-style
+  mitigation (required custom header + same-origin CORS on every
+  mutating request) was already written assuming LAN reachability --
+  this just matches the binding to what that layer already defends
+  against. `deploy/krauken.conf.example` now documents
+  `KRAUKEN_API_HOST=127.0.0.1` as the commented-out way to lock a given
+  install back down. No test asserted the old default; full suite
+  (291 tests) still green.
+- **Homepage now explains both hardware paths**: BrewPi-compatible
+  Arduino (available today) or the Krauken PCB (not released --
+  explicitly framed as open-source hardware once it ships, not a
+  product anyone will sell).
+- **EEPROM tool (`krauken-hwid`/eeptools) build is now gated on a new
+  debconf question**, `krauken/has-krauken-hardware` (default false),
+  matching the existing `replace-brewpi` pattern -- `krauken.postinst`
+  only compiles eeptools if that answer is true.  Unlike
+  `replace-brewpi`'s `brewpi.service` detection, there's no runtime
+  signal for "do you have a Krauken PCB" (that's exactly what the EEPROM
+  this question gates would provision -- chicken-and-egg), so
+  `krauken.config` guards the actual `db_input` call behind a hardcoded
+  `KRAUKEN_HARDWARE_RELEASED=false` flag rather than asking a question
+  nobody could truthfully answer yes to yet. The template's own
+  `Default: false` is what silently applies to every install today, so
+  the net effect is what you asked for -- "stubbed into the install but
+  skipped" -- while leaving the real, working mechanism in place for
+  when the flag flips.
+
+Not yet re-verified against a real CI run as of this edit -- next step is
+moving the `v0.1.0` tag forward again and confirming the rendered
+homepage and the (still-skipped) eeptools gating both behave as
+expected.
+
 ## Packaging shape — built
 
 - **`.deb` + apt repository**, per your explicit direction over the

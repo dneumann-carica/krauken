@@ -12,3 +12,18 @@ Description: Disable the existing BrewPi Remix service?
  uninstalled. Your existing BrewPi Remix installation is left in place at
  /home/brewpi, and you can re-enable it by hand at any time with
  `systemctl enable --now brewpi` if you ever need to revert.
+
+Template: krauken/has-krauken-hardware
+Type: boolean
+Default: false
+Description: Are you installing this on genuine Krauken hardware?
+ Krauken's own custom PCB carries an ID EEPROM that lets this software
+ auto-discover the hardware, the same way a Raspberry Pi HAT normally
+ works. Building the small tool that provisions that EEPROM
+ (krauken-hwid) needs a C compiler and a few minutes on first install;
+ skip it entirely if you're only using a BrewPi-compatible Arduino
+ and/or a Tilt hydrometer, since neither needs it.
+ .
+ This question is currently dormant -- it isn't asked yet because the
+ Krauken PCB itself hasn't been released, so nobody could truthfully
+ answer yes. The default (skip) is always what applies today.

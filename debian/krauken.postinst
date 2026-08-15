@@ -56,10 +56,16 @@ case "$1" in
     "$VENV/bin/pip" install --quiet --upgrade pip
     "$VENV/bin/pip" install --quiet -e "${SRC}[pi]"
 
-    # 4. eeptools (eepmake/eepflash.sh/eepdump), built from the vendored
-    # source the same "native to this machine" way -- only if not already
-    # present, so an upgrade doesn't rebuild these every time.
-    if ! command -v eepmake >/dev/null 2>&1; then
+    # 4. eeptools (eepmake/eepflash.sh/eepdump) -- only needed for genuine
+    # Krauken PCB hardware's EEPROM provisioning (krauken-hwid), not for
+    # BrewPi or Tilt. Gated on krauken/has-krauken-hardware so a BrewPi/
+    # Tilt-only install (everyone, today -- see krauken.config's own
+    # comment) never pays for a C compile it'll never use. Built from the
+    # vendored source the same "native to this machine" way, only if not
+    # already present, so an upgrade doesn't rebuild it every time.
+    RET=""
+    db_get krauken/has-krauken-hardware || true
+    if [ "$RET" = "true" ] && ! command -v eepmake >/dev/null 2>&1; then
         build_dir="$(mktemp -d)"
         cp -r "${EEPTOOLS_SRC}/." "$build_dir/"
         cmake -S "$build_dir" -B "$build_dir/build" >/dev/null

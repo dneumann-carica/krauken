@@ -13,12 +13,17 @@ DEFAULT_DAEMON_SOCKET = "/run/krauken/daemon.sock"
 DEFAULT_SUPERVISOR_SOCKET = "/run/krauken/supervisor.sock"
 DEFAULT_SIMULATOR_SOCKET = "/run/krauken/simulator.sock"
 DEFAULT_MANUAL_SOCKET = "/run/krauken/manual.sock"
-# Loopback-only by default -- deliberately conservative even though this is
-# a zero-auth LAN appliance by design (see api/security.py's module
-# docstring): a fresh install shouldn't be reachable from the network until
-# someone explicitly opts in via KRAUKEN_API_HOST (e.g. "0.0.0.0" to reach
-# it from a phone on the same LAN).
-DEFAULT_API_HOST = "127.0.0.1"
+# LAN-reachable by default -- the Pi this runs on is headless, so a
+# loopback-only default would leave a fresh install unreachable from
+# anywhere until someone already knew to SSH in and edit a config file.
+# api/security.py's CSRF-style mitigation (a required custom header on
+# every mutating request, enforced alongside a same-origin CORS policy)
+# was already built assuming LAN reachability -- "any hostile webpage a
+# browser on that network visits" -- so this isn't removing a security
+# layer, just matching the binding to what that layer already defends
+# against. Set KRAUKEN_API_HOST=127.0.0.1 to lock a given install back
+# down to loopback-only.
+DEFAULT_API_HOST = "0.0.0.0"
 DEFAULT_API_PORT = 8080
 # Which hci device (bluetoothd numbering, hci0/hci1/...) aioblescan opens
 # a raw socket against -- matches aioblescan's own --device CLI flag. No
