@@ -1,0 +1,14 @@
+Template: krauken/replace-brewpi
+Type: boolean
+Default: false
+Description: Disable the existing BrewPi Remix service?
+ An active brewpi.service was detected on this system. Krauken fully
+ replaces BrewPi Remix's control daemon and cannot share the same serial
+ port with it -- both processes fighting over the same Arduino will
+ corrupt both (and krauken-daemon's own systemd unit already declares a
+ hard Conflicts= against brewpi.service, so at most one can run anyway).
+ .
+ If you accept, brewpi.service will be stopped and disabled now -- not
+ uninstalled. Your existing BrewPi Remix installation is left in place at
+ /home/brewpi, and you can re-enable it by hand at any time with
+ `systemctl enable --now brewpi` if you ever need to revert.

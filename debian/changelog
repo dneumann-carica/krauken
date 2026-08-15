@@ -1,0 +1,6 @@
+krauken (0.1.0) stable; urgency=medium
+
+  * Initial packaged release: control daemon, API, web UI, BrewPi/Tilt
+    hardware platforms, and krauken-hwid HAT provisioning tool.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 15 Aug 2026 08:44:00 -0400

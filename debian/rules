@@ -1,0 +1,63 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+# Architecture-independent build (Architecture: all, see debian/control's
+# long description for why) -- this only produces the frontend's static
+# assets, which ARE safe to build once here regardless of target
+# architecture. Nothing Python-side gets built or installed into a venv
+# at package-build time; that's postinst's job, running natively on the
+# actual target device -- see debian/krauken.postinst's own comment.
+override_dh_auto_build:
+	cd frontend && npm ci && npm run build
+
+# Runs the real test suite against the source this package is about to
+# ship, on the BUILD machine (x86_64 GitHub Actions runner) -- safe and
+# correct even though the target is a different architecture, since
+# these are source-level tests, not anything architecture-specific.
+override_dh_auto_test:
+	python3 -m venv /tmp/krauken-build-venv
+	/tmp/krauken-build-venv/bin/pip install --quiet -e '.[dev]'
+	/tmp/krauken-build-venv/bin/pytest -q
+	rm -rf /tmp/krauken-build-venv
+
+override_dh_auto_install:
+	# Python source + packaging metadata -- NOT a built venv. postinst
+	# creates the real one and runs pip install natively on the target
+	# device, so its own pip/piwheels.org resolve correctly for whatever
+	# architecture actually ends up running this.
+	mkdir -p debian/krauken/opt/krauken/src
+	cp -r krauken pyproject.toml debian/krauken/opt/krauken/src/
+	find debian/krauken/opt/krauken/src -name '__pycache__' -exec rm -rf {} +
+
+	# Pre-built frontend static assets -- plain JS/CSS/HTML, genuinely
+	# architecture-independent, safe to bake in at build time rather than
+	# rebuilding on every target device.
+	mkdir -p debian/krauken/opt/krauken/src/krauken/api/_static
+	cp -r frontend/dist/* debian/krauken/opt/krauken/src/krauken/api/_static/
+
+	# Vendored eeptools SOURCE (vendor/rpi-utils/eeptools, a pinned git
+	# submodule) -- not compiled here, same "build natively on the real
+	# target" reasoning as the Python venv above. See
+	# krauken/cli/hwid.py's own module docstring.
+	mkdir -p debian/krauken/opt/krauken/eeptools-src
+	cp -r vendor/rpi-utils/eeptools/* debian/krauken/opt/krauken/eeptools-src/
+
+	# systemd units and the tmpfiles.d rule are NOT copied here --
+	# debian/krauken.*.service and debian/krauken.tmpfiles (symlinks into
+	# deploy/, one source of truth) are picked up automatically by
+	# dh_installsystemd/dh_installtmpfiles as part of the plain `dh $@`
+	# sequence, which also generates the correct enable/start/create
+	# maintainer-script snippets -- more reliable than hand-rolling that
+	# logic in postinst ourselves.
+
+	# Shipped as .example, never as the live config -- postinst copies
+	# this to /etc/krauken/krauken.conf only if that doesn't already
+	# exist, so an upgrade never clobbers a real, edited config. The
+	# .example itself IS safe to overwrite on every upgrade (it's not the
+	# conffile -- see debian/krauken.postinst).
+	mkdir -p debian/krauken/etc/krauken
+	cp deploy/krauken.conf.example debian/krauken/etc/krauken/krauken.conf.example

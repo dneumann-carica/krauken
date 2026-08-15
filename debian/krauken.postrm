@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  purge)
+    rm -rf /opt/krauken
+    rm -f /etc/krauken/krauken.conf /etc/krauken/krauken.conf.example
+    rmdir /etc/krauken 2>/dev/null || true
+    # eeptools' own `cmake --install` step (postinst) installs to a
+    # standard system path -- best-effort removal here, since dpkg never
+    # tracked these as part of this package's own file list in the first
+    # place (they were built natively on this machine, not shipped).
+    rm -f /usr/local/bin/eepmake /usr/local/bin/eepflash.sh /usr/local/bin/eepdump
+
+    # Deliberately NOT removing the krauken system user/group on purge --
+    # standard Debian practice is to leave system users in place even
+    # after a purge, so a future UID reuse never inherits this one's
+    # leftover file permissions somewhere unexpected.
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

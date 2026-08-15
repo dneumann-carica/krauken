@@ -1,0 +1,122 @@
+name: Build and publish .deb
+
+# Two triggers: a version tag (v*) does the full build -> sign -> publish
+# -> Release/Pages pipeline; workflow_dispatch lets you run just the build
+# job on demand (e.g. to sanity-check debian/ packaging changes on a
+# branch) without cutting a real release. The sign/publish job is gated
+# on the tag push specifically (see its own `if:`) so a manual dispatch
+# never accidentally publishes an untagged build to the public apt repo.
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # attach the .deb to a GitHub Release
+  pages: write # publish the apt repo to GitHub Pages
+  id-token: write # required by actions/deploy-pages
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # vendor/rpi-utils (eeptools source)
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Debian packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debhelper dpkg-dev devscripts build-essential
+
+      # debian/rules' override_dh_auto_test creates its own throwaway venv
+      # and runs the real pytest suite against THIS source, on this build
+      # machine -- x86_64 is fine for that even though the target is a
+      # different architecture, since these are source-level tests, not
+      # anything architecture-specific. python3-venv isn't always
+      # preinstalled on ubuntu-latest.
+      - name: Install python3-venv
+        run: sudo apt-get install -y --no-install-recommends python3-venv python3-pip
+
+      - name: Build the .deb
+        # Rules-Requires-Root: no in debian/control means this genuinely
+        # doesn't need fakeroot -- confirmed against dpkg-buildpackage's
+        # own behavior for that field, not assumed.
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Collect build output
+        run: |
+          mkdir -p dist
+          mv ../krauken_*.deb dist/
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: krauken-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  sign-and-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4 # for scripts/publish-apt-repo.sh
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: krauken-deb
+          path: dist
+
+      - name: Install repo-building tools
+        # Fresh runner -- does NOT inherit the build job's installed
+        # packages, jobs are isolated. dpkg-dev for dpkg-scanpackages,
+        # apt-utils for apt-ftparchive, gnupg for signing.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils gnupg
+
+      - name: Import signing key
+        env:
+          KRAUKEN_GPG_PRIVATE_KEY: ${{ secrets.KRAUKEN_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$KRAUKEN_GPG_PRIVATE_KEY" | gpg --batch --import
+          # Confirms a real secret key actually landed, before anything
+          # downstream assumes signing will work -- a missing/misconfigured
+          # secret should fail loudly here, not produce an unsigned repo
+          # that silently isn't what it claims to be.
+          gpg --batch --list-secret-keys | grep -q sec
+
+      - name: Export the public key (for repo consumers to trust)
+        env:
+          GPG_KEY_ID: ${{ secrets.KRAUKEN_GPG_KEY_ID }}
+        run: gpg --batch --armor --export --output krauken-archive-keyring.asc "$GPG_KEY_ID"
+
+      - name: Build and sign the apt repository
+        env:
+          GPG_KEY_ID: ${{ secrets.KRAUKEN_GPG_KEY_ID }}
+        run: ./scripts/publish-apt-repo.sh dist public krauken-archive-keyring.asc "$GPG_KEY_ID"
+
+      - name: Attach .deb to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          fail_on_unmatched_files: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - uses: actions/deploy-pages@v4
+        id: deployment

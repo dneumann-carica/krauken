@@ -1,6 +1,14 @@
 [Unit]
 Description=Krauken control daemon
 After=network.target
+# Belt-and-suspenders alongside the .deb installer's own debconf-driven
+# stop+disable prompt (see debian/krauken.postinst) -- Conflicts= is a
+# no-op if brewpi.service doesn't exist on a given box, but if it does,
+# systemd itself guarantees the two can never both be active: starting
+# one stops the other, automatically, forever, even if someone manually
+# re-enables the wrong one later. Both can't hold /dev/ttyACM0 at once
+# without corrupting each other's view of the Arduino.
+Conflicts=brewpi.service
 # Not ordered After=/Wants=krauken-supervisor.service: the daemon must
 # tolerate the supervisor being absent or late (BrewPi-only installs never
 # run it at all, and it's not yet functional regardless -- see that unit's

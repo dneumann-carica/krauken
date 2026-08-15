@@ -1,0 +1,3 @@
+[submodule "vendor/rpi-utils"]
+	path = vendor/rpi-utils
+	url = https://github.com/raspberrypi/utils.git

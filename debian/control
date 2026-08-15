@@ -1,0 +1,45 @@
+Source: krauken
+Section: misc
+Priority: optional
+Maintainer: The Krauken Project <dneumann@arpio.io>
+Build-Depends: debhelper-compat (= 13), nodejs (>= 18), npm
+Standards-Version: 4.6.2
+Homepage: https://github.com/dneumann-carica/krauken
+Rules-Requires-Root: no
+
+Package: krauken
+Architecture: all
+Pre-Depends: debconf (>= 0.5) | debconf-2.0
+Depends: ${misc:Depends},
+ python3 (>= 3.11),
+ python3-venv,
+ build-essential,
+ cmake (>= 3.10),
+ git,
+ python3-lgpio | python3-rpi-lgpio
+Description: Fermentation chamber controller
+ Control daemon, hardware supervisor, web API, and web UI for the Krauken
+ fermentation controller -- drives BrewPi (Arduino) and Krauken hardware
+ chambers, reads Tilt hydrometers, and serves a local web UI for
+ monitoring and controlling a fermentation.
+ .
+ Architecture "all", not a real architecture: this package ships PYTHON
+ SOURCE, not a pre-built venv or compiled extensions -- postinst creates
+ the actual virtualenv and runs `pip install` natively on the machine
+ being installed on, at install time, not at package-build time. This is
+ a deliberate choice (see debian/postinst's own comment), not an
+ oversight: Raspberry Pi OS's own pip is already configured to pull
+ prebuilt wheels for compiled dependencies (pydantic-core, etc.) from
+ piwheels.org, which correctly covers the target's real armv6l/armhf/
+ arm64 architecture -- something a GitHub Actions x86_64 runner cross-
+ building or QEMU-emulating a wheel itself cannot reliably guarantee,
+ particularly for the original Pi/Pi Zero's armv6l, which most modern
+ ARM cross-build tooling doesn't target at all.
+ .
+ python3-lgpio (or python3-rpi-lgpio, whichever Raspberry Pi OS's current
+ repos actually provide -- NOT independently confirmed at packaging time,
+ verify before relying on this) supplies GPIO access for BrewPi/Krauken
+ hardware and krauken-hwid's EEPROM write-protect toggle. build-essential
+ + cmake are for compiling the vendored raspberrypi/utils eeptools
+ sources (also done in postinst, same "build natively on the target"
+ reasoning) -- see krauken/cli/hwid.py's own module docstring.

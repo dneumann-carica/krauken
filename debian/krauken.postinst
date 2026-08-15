@@ -1,0 +1,87 @@
+#!/bin/sh
+# Real provisioning happens here, natively on the machine this package is
+# being installed on -- NOT baked into the .deb at build time. See
+# debian/control's long description for why (piwheels.org / real
+# target-architecture wheel resolution for compiled deps like
+# pydantic-core, which a GitHub Actions x86_64 runner cross-building or
+# QEMU-emulating for armv6l cannot reliably guarantee).
+#
+# The #DEBHELPER# marker below is where dh_installsystemd/
+# dh_installtmpfiles insert their own auto-generated snippets (systemctl
+# enable/start, systemd-tmpfiles --create) -- deliberately NOT hand-rolled
+# here, since debhelper's own generated logic already handles the
+# upgrade/fresh-install/reinstall cases correctly.
+set -e
+
+. /usr/share/debconf/confmodule
+
+VENV=/opt/krauken/.venv
+SRC=/opt/krauken/src
+EEPTOOLS_SRC=/opt/krauken/eeptools-src
+
+case "$1" in
+  configure)
+    # 1. System user/group. Idempotent -- getent-guarded rather than
+    # relying on adduser's own "already exists" behavior being a clean
+    # no-op across every Debian/Ubuntu version this might run on.
+    if ! getent group krauken >/dev/null; then
+        addgroup --system krauken
+    fi
+    if ! getent passwd krauken >/dev/null; then
+        adduser --system --ingroup krauken --home /var/lib/krauken --no-create-home \
+            --shell /usr/sbin/nologin krauken
+    fi
+    # dialout: BrewPi serial port access (platforms/brewpi/connection.py's
+    # auto-scan opens /dev/ttyACM*/ttyUSB*). Tilt's raw-HCI BLE access
+    # comes from AmbientCapabilities=CAP_NET_RAW in the systemd unit
+    # itself, not group membership -- nothing to do for that here.
+    usermod -aG dialout krauken || true
+
+    # 2. Real config file -- ONLY on a genuinely fresh install. Never
+    # overwrite an existing (possibly hand-edited) krauken.conf on
+    # upgrade; the .example alongside it is always safe to have been
+    # refreshed by dh_auto_install, since it's never the live config.
+    if [ ! -e /etc/krauken/krauken.conf ] && [ -e /etc/krauken/krauken.conf.example ]; then
+        cp /etc/krauken/krauken.conf.example /etc/krauken/krauken.conf
+    fi
+
+    # 3. The actual Python virtualenv. Created once; `pip install` is
+    # re-run on every postinst (upgrade included) since pip's own
+    # dependency resolution is fast and correct when nothing actually
+    # changed, and this is the one thing that keeps the venv in sync with
+    # whatever this particular package version actually needs.
+    if [ ! -x "$VENV/bin/python3" ]; then
+        python3 -m venv "$VENV"
+    fi
+    "$VENV/bin/pip" install --quiet --upgrade pip
+    "$VENV/bin/pip" install --quiet -e "${SRC}[pi]"
+
+    # 4. eeptools (eepmake/eepflash.sh/eepdump), built from the vendored
+    # source the same "native to this machine" way -- only if not already
+    # present, so an upgrade doesn't rebuild these every time.
+    if ! command -v eepmake >/dev/null 2>&1; then
+        build_dir="$(mktemp -d)"
+        cp -r "${EEPTOOLS_SRC}/." "$build_dir/"
+        cmake -S "$build_dir" -B "$build_dir/build" >/dev/null
+        cmake --build "$build_dir/build" >/dev/null
+        cmake --install "$build_dir/build"
+        rm -rf "$build_dir"
+    fi
+
+    # 5. Legacy BrewPi Remix handling. db_get is only ever meaningfully
+    # "true" here if debian/krauken.config actually asked the question
+    # (i.e. only if brewpi.service was detected on this box in the first
+    # place) -- otherwise this is a silent no-op.
+    RET=""
+    db_get krauken/replace-brewpi || true
+    if [ "$RET" = "true" ]; then
+        systemctl stop brewpi.service 2>/dev/null || true
+        systemctl disable brewpi.service 2>/dev/null || true
+        echo "krauken: brewpi.service stopped and disabled. Its own files are untouched at /home/brewpi -- re-enable by hand with 'systemctl enable --now brewpi' if you ever need to revert."
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
