@@ -21,6 +21,13 @@ KRAUKEN_TILT_HCI_DEVICE=0
 # than needing a configured port (a single-chamber install has at most
 # one BrewPi to find).
 
+# The Simulator's discover() emits a second, independent "Simulated Tilt"
+# candidate alongside its chamber controller -- on by default since
+# Krauken isn't in production yet (nobody's relying on a clean device
+# list). Uncomment to hide it once real installs matter more than
+# exercising the mock hydrometer path:
+# KRAUKEN_SIMULATOR_TILT_ENABLED=0
+
 # The API listens on 0.0.0.0 (every interface) by default, since the Pi
 # this runs on is normally headless -- reachable at http://<pi>:8080 from
 # any device on your LAN with no extra setup. Uncomment to restrict a

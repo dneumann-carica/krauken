@@ -30,12 +30,14 @@ throwaway daemon+socket, is fine for a script that runs once and exits.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from krauken.daemon.testing import build_scenario_daemon
 from krauken.db.connection import open_ro, open_rw
@@ -105,6 +107,27 @@ async def _scan_and_wait(client: AsyncIPCClient) -> None:
     raise AssertionError("scan never completed")
 
 
+@contextlib.contextmanager
+def _env_override(**values: str) -> Iterator[None]:
+    """Temporarily sets environment variables, restoring whatever was
+    there before (or unsetting, if it wasn't set at all) on exit -- used
+    below to point ManualIpcConnection/SimulatorIpcConnection (which
+    resolve their own socket path from KRAUKEN_MANUAL_SOCKET/
+    KRAUKEN_SIMULATOR_SOCKET -- see platforms/ipc_driver.py) at this
+    scratch run's own throwaway sockets without leaking that override
+    past this one call, the way a test's monkeypatch fixture would."""
+    previous = {k: os.environ.get(k) for k in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for k, v in previous.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 async def _generate(scratch_db: Path, socket_path: Path, simulator_socket: Path, manual_socket: Path) -> int:
     """Runs a real daemon -- talking to a real, separately-running
     Simulator process over IPC, exactly like production -- through the
@@ -116,10 +139,17 @@ async def _generate(scratch_db: Path, socket_path: Path, simulator_socket: Path,
     manual_service = build_manual_service(socket_path=manual_socket)
     await simulator_service.start()
     await manual_service.start()
-    daemon, clock = build_scenario_daemon(
-        db_path=scratch_db, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
-        control_tick_interval_s=CONTROL_TICK_INTERVAL_S,
-    )
+    # build_scenario_daemon() no longer accepts simulator_socket/
+    # manual_socket -- the daemon's HAL resolves them itself from these
+    # same env vars (platforms/registry.py's PlatformRegistry).
+    with _env_override(
+        KRAUKEN_SIMULATOR_SOCKET=str(simulator_socket),
+        KRAUKEN_MANUAL_SOCKET=str(manual_socket),
+    ):
+        daemon, clock = build_scenario_daemon(
+            db_path=scratch_db, socket_path=socket_path,
+            control_tick_interval_s=CONTROL_TICK_INTERVAL_S,
+        )
     await daemon.start()
     client = AsyncIPCClient(socket_path)
     try:

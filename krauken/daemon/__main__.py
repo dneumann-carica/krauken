@@ -16,11 +16,12 @@ def main() -> None:
     daemon = build_daemon(
         db_path=cfg.db_path,
         socket_path=cfg.daemon_socket,
-        simulator_socket=cfg.simulator_socket,
-        manual_socket=cfg.manual_socket,
-        tilt_hci_device=cfg.tilt_hci_device,
         heartbeat_interval_s=cfg.heartbeat_interval_s,
         control_tick_interval_s=cfg.control_tick_interval_s,
+        # No simulator_socket/manual_socket/tilt_hci_device -- build_daemon()
+        # no longer accepts them at all. Each platform's own HAL resolves
+        # its own configuration (env vars) internally now -- see
+        # platforms/registry.py's PlatformRegistry/PlatformBinding.
         # clock left unset -- build_daemon()'s _select_clock() picks
         # SimulatorClock/ProductionClock based on what's actually mapped in
         # hardware_config, independent of KRAUKEN_DEV_PANEL (see its

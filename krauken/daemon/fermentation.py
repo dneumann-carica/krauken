@@ -100,12 +100,16 @@ async def start_fermentation(ctx: Any, args: dict[str, Any]) -> dict[str, Any]:
     # isn't even the mapped platform -- called unconditionally, same as
     # ChamberDriver.set_ambient_location's own "every tick regardless"
     # idiom. Best-effort: if the Simulator process is currently unreachable
-    # there's no batch-critical state to lose here (nothing was ever going
-    # to read that stale physics anyway), so this just logs nothing and
-    # moves on rather than failing the whole start_fermentation call over
-    # a platform this batch may not even be using.
-    with contextlib.suppress(PlatformUnavailable):
-        await ctx.simulator_client.call("simulator.reset_for_new_batch")
+    # (or the platform isn't enabled on this install at all -- ctx.registry.
+    # state_for() then returns None) there's no batch-critical state to
+    # lose here (nothing was ever going to read that stale physics anyway),
+    # so this just logs nothing and moves on rather than failing the whole
+    # start_fermentation call over a platform this batch may not even be
+    # using.
+    simulator = ctx.registry.state_for("simulator")
+    if simulator is not None:
+        with contextlib.suppress(PlatformUnavailable):
+            await simulator.call("simulator.reset_for_new_batch")
     return {"fermentation_id": fermentation_id, "profile_id": profile_id, "stage_ids": stage_ids}
 
 

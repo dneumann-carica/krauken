@@ -22,8 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 from krauken.contracts.interfaces import BeerTempSource, ChamberDriver, GravitySource
-from krauken.ipc.persistent_client import PersistentIPCClient
-from krauken.platforms.ipc_driver import sync_clock
+from krauken.platforms.ipc_driver import IpcPlatformConnection, sync_clock
 from krauken.platforms.registry import PLATFORM_BINDINGS
 
 
@@ -31,21 +30,30 @@ def chamber_driver(ctx: Any, platform: str | None, device_id: str | None = None)
     binding = PLATFORM_BINDINGS.get(platform)
     if binding is None or binding.chamber_driver_cls is None:
         return None
-    return binding.chamber_driver_cls(getattr(ctx, binding.state_attr), device_id)
+    state_obj = ctx.registry.state_for(platform)
+    if state_obj is None:
+        return None
+    return binding.chamber_driver_cls(state_obj, device_id)
 
 
 def beer_temp_source(ctx: Any, platform: str | None, device_id: str | None = None) -> BeerTempSource | None:
     binding = PLATFORM_BINDINGS.get(platform)
     if binding is None or binding.beer_temp_source_cls is None:
         return None
-    return binding.beer_temp_source_cls(getattr(ctx, binding.state_attr), device_id)
+    state_obj = ctx.registry.state_for(platform)
+    if state_obj is None:
+        return None
+    return binding.beer_temp_source_cls(state_obj, device_id)
 
 
 def gravity_source(ctx: Any, platform: str | None, device_id: str | None = None) -> GravitySource | None:
     binding = PLATFORM_BINDINGS.get(platform)
     if binding is None or binding.gravity_source_cls is None:
         return None
-    return binding.gravity_source_cls(getattr(ctx, binding.state_attr), device_id)
+    state_obj = ctx.registry.state_for(platform)
+    if state_obj is None:
+        return None
+    return binding.gravity_source_cls(state_obj, device_id)
 
 
 async def sync_remote_clocks(ctx: Any) -> None:
@@ -56,11 +64,13 @@ async def sync_remote_clocks(ctx: Any) -> None:
     unconditionally" idiom as ChamberDriver.set_ambient_location. Iterates
     PLATFORM_BINDINGS rather than naming "simulator"/"manual" specifically,
     so a future real Supervisor binding picks this up automatically the
-    moment its own state_attr holds a PersistentIPCClient -- nothing here
-    needs to change when that lands."""
+    moment its own state object is an IpcPlatformConnection -- nothing here
+    needs to change when that lands. Asks ctx.registry for each platform's
+    state object by name (state_for()), not ctx itself -- the daemon
+    doesn't hold these under named attributes any more."""
     now = ctx.clock.now()
     monotonic = ctx.clock.monotonic()
-    for binding in PLATFORM_BINDINGS.values():
-        client = getattr(ctx, binding.state_attr, None)
-        if isinstance(client, PersistentIPCClient):
-            await sync_clock(client, now=now, monotonic=monotonic)
+    for platform_id in PLATFORM_BINDINGS:
+        state_obj = ctx.registry.state_for(platform_id)
+        if isinstance(state_obj, IpcPlatformConnection):
+            await sync_clock(state_obj, now=now, monotonic=monotonic)

@@ -49,16 +49,25 @@ async def manual_service() -> AsyncIterator[ManualService]:
 
 @pytest_asyncio.fixture
 async def daemon(
-    tmp_path: Path, simulator_service: SimulatorService, manual_service: ManualService
+    tmp_path: Path,
+    simulator_service: SimulatorService,
+    manual_service: ManualService,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[Daemon]:
     db_path = tmp_path / "krauken.db"
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))
     socket_path = short_tmp / "d.sock"
+    # build_daemon() no longer accepts simulator_socket/manual_socket --
+    # ManualIpcConnection/SimulatorIpcConnection resolve their own path
+    # from these same env vars (platforms/registry.py's PlatformRegistry
+    # constructs them), so pointing the daemon at THIS fixture's specific
+    # simulator_service/manual_service instances means setting the env
+    # vars they'll read, not passing the path directly.
+    monkeypatch.setenv("KRAUKEN_SIMULATOR_SOCKET", str(simulator_service.server.socket_path))
+    monkeypatch.setenv("KRAUKEN_MANUAL_SOCKET", str(manual_service.server.socket_path))
     d = build_daemon(
         db_path=db_path,
         socket_path=socket_path,
-        simulator_socket=simulator_service.server.socket_path,
-        manual_socket=manual_service.server.socket_path,
         heartbeat_interval_s=3600,
     )
     await d.start()
@@ -72,17 +81,18 @@ async def client(daemon: Daemon, monkeypatch: pytest.MonkeyPatch) -> AsyncIterat
     # Point the API tier's dependencies at the SAME db/socket/simulator/
     # manual the daemon fixture just created -- this is a real integration
     # test (real HTTP -> real IPC -> real daemon/simulator/manual -> real
-    # SQLite), nothing mocked. daemon.ctx.simulator_client/manual_client
-    # already hold these exact socket paths (build_daemon() was given them
-    # directly above) -- reading them back here instead of threading
+    # SQLite), nothing mocked. daemon.ctx.registry.state_for("simulator")/
+    # state_for("manual") already hold these exact socket paths (the
+    # `daemon` fixture above set the env vars build_daemon() read them
+    # from) -- reading them back here instead of threading
     # simulator_service/manual_service into this fixture too keeps the
     # dependency list to just `daemon`.
     test_config = Config(
         db_path=daemon.ctx.db_path,
         daemon_socket=daemon.server.socket_path,
         supervisor_socket=Path(f"/tmp/krauken-test-supervisor-{uuid.uuid4().hex}.sock"),
-        simulator_socket=Path(daemon.ctx.simulator_client.socket_path),
-        manual_socket=Path(daemon.ctx.manual_client.socket_path),
+        simulator_socket=Path(daemon.ctx.registry.state_for("simulator").socket_path),
+        manual_socket=Path(daemon.ctx.registry.state_for("manual").socket_path),
     )
     monkeypatch.setattr(deps, "_config", test_config)
 

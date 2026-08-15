@@ -25,11 +25,11 @@ async def test_control_loop_survives_an_exception_and_keeps_ticking(tmp_path: Pa
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))  # AF_UNIX path-length limit -- see tests/api/conftest.py
     socket_path = short_tmp / "d.sock"
     # control_tick is fully monkeypatched below -- nothing here ever
-    # dispatches to Simulator/Manual, so these sockets never need a real
-    # process listening on them (PersistentIPCClient.start() is
-    # non-blocking regardless -- see its own docstring).
-    simulator_socket = short_tmp / "sim.sock"
-    manual_socket = short_tmp / "man.sock"
+    # dispatches to Simulator/Manual, so there's no need to point their
+    # HALs at a real process at all (IpcPlatformConnection.start() is
+    # non-blocking regardless of whether anything's listening -- see its
+    # own docstring); the default (unreachable in this test environment)
+    # socket is exactly as harmless as a specific throwaway one would be.
 
     call_count = 0
 
@@ -42,7 +42,7 @@ async def test_control_loop_survives_an_exception_and_keeps_ticking(tmp_path: Pa
     monkeypatch.setattr(app_module, "control_tick", flaky_control_tick)
 
     daemon, _clock = build_scenario_daemon(
-        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        db_path=db_path, socket_path=socket_path,
         control_tick_interval_s=0.0,
     )
     await daemon.start()

@@ -30,6 +30,7 @@ response belongs to which request.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import glob
 import json
 import logging
@@ -38,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from krauken.contracts.clock import Clock
+from krauken.contracts.errors import PlatformUnavailable
 from krauken.platforms.base import requires_optional
 
 log = logging.getLogger("krauken.platforms.brewpi")
@@ -104,6 +106,7 @@ class BrewPiConnection:
         # on this shared connection object does.
         self.commanded_target_f: float | None = None
         self._lock = asyncio.Lock()
+        self._connect_task: asyncio.Task | None = None
 
     @property
     def connected(self) -> bool:
@@ -185,6 +188,37 @@ class BrewPiConnection:
                 await asyncio.to_thread(self._serial.write, f"{body}\n".encode("ascii"))
             except Exception:  # noqa: BLE001 -- best-effort; next read_temps() surfaces UNREACHABLE
                 log.warning("failed to write set_fridge_target(%r) to BrewPi", temp_f)
+
+    async def start(self) -> None:
+        """Backgrounds identify_and_connect() -- it can take several real
+        seconds (the Arduino's DTR-triggered boot delay, times however many
+        candidate serial ports get tried), and platforms/registry.py's
+        PlatformRegistry.start_all() calls start() on every enabled
+        platform generically, uniformly, without waiting for any one of
+        them. This used to be daemon/app.py's own responsibility
+        (asyncio.create_task(self._connect_brewpi()), a background task it
+        tracked itself) -- moved here so the daemon never needs to know
+        BrewPi specifically might be slow to connect. identify_and_connect()
+        itself is untouched and still directly awaitable/callable on its
+        own (see discover(), and tests that call it directly for its real
+        boolean return)."""
+        self._connect_task = asyncio.create_task(self._background_connect())
+
+    async def _background_connect(self) -> None:
+        try:
+            found = await self.identify_and_connect()
+            if not found:
+                log.info("BrewPi not found at startup -- will retry on next Hardware Setup scan")
+        except PlatformUnavailable as e:
+            log.warning("BrewPi connection not attempted at startup: %s", e)
+
+    async def stop(self) -> None:
+        if self._connect_task is not None:
+            self._connect_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._connect_task
+            self._connect_task = None
+        await self.close()
 
     async def close(self) -> None:
         async with self._lock:

@@ -8,6 +8,70 @@ tests, `.venv/bin/pytest`), and verified against your real hardware
 Nothing is blocked on the items below; they're things you may want to
 revisit, not open questions holding up the build.
 
+## Architecture correction: the daemon no longer knows any concrete platform exists
+
+Flagged by you, in three escalating rounds, after reviewing the actual
+`Daemon`/`DaemonContext` code: it knew too much about Manual/Simulator/
+BrewPi/Tilt specifically — first their raw IPC client class, then their
+socket paths, finally the concrete classes (`BrewPiConnection`,
+`TiltScanner`, IPC connections) and Tilt's `hci_device` config
+themselves. Each round went one layer deeper; the final, complete fix:
+
+- **`krauken/platforms/registry.py`** is now the sole owner of
+  constructing every platform's concrete state object. `PlatformBinding`
+  gained `build_state: Callable[[Clock], Any]` (replacing `state_attr`, a
+  ctx-attribute-name string) — a factory the new **`PlatformRegistry`**
+  class calls itself, once per enabled platform, at daemon startup.
+  `PlatformRegistry` is iterable (yields `PlatformDriver`s for
+  `discover()`, so `daemon/discovery.py` needed zero changes),
+  `state_for(platform_id)` is how `daemon/drivers.py`'s role-dispatch
+  asks for the underlying object by name now, and `start_all()`/
+  `stop_all()` generically start/stop whatever was actually constructed
+  — with a shared try/except (not special-cased to Tilt the way the old
+  code was), a real improvement: every platform's start/stop now gets
+  the same "a dependency that's down must never block or crash the
+  rest" treatment, not just Tilt's.
+- **`krauken/platforms/ipc_driver.py`**'s new `IpcPlatformConnection`
+  (base) + `ManualIpcConnection`/`SimulatorIpcConnection` (concrete)
+  resolve their OWN socket path from `KRAUKEN_MANUAL_SOCKET`/
+  `KRAUKEN_SIMULATOR_SOCKET` (imported defaults from `krauken/config.py`,
+  not duplicated) — nothing external ever passes one in during normal
+  (zero-arg) construction. An optional override exists only for tests
+  that need a specific throwaway socket.
+- **`krauken/platforms/brewpi/connection.py`** gained `start()`/`stop()`
+  — the "background `identify_and_connect()`, it can take several real
+  seconds" logic that used to live in `daemon/app.py` (as
+  `Daemon._connect_brewpi()`, with its own tracked task) moved into
+  `BrewPiConnection` itself, so `PlatformRegistry` can treat it exactly
+  like every other platform: call `.start()`, nothing more.
+  `identify_and_connect()`/`close()` themselves are untouched.
+- **`krauken/platforms/tilt/scanner.py`**'s `hci_device` is now
+  self-resolving (`KRAUKEN_TILT_HCI_DEVICE` + a `DEFAULT_HCI_DEVICE`
+  constant that lives in this module now, not `krauken/config.py`, since
+  nothing else needs it once the daemon stops threading it through) —
+  same explicit-override-for-tests shape as the IPC connections.
+- **`krauken/daemon/app.py`** shrank accordingly: `DaemonContext` holds
+  only `registry` — no `brewpi_connection`/`tilt_scanner`/
+  `manual_connection`/`simulator_connection` attributes, no imports of
+  any concrete platform class. `build_daemon()`'s public signature lost
+  `simulator_socket`, `manual_socket`, and `tilt_hci_device` entirely.
+- Real fallout, not just renames: `krauken/db/seed.py`'s demo-batch
+  generator and `tests/scenarios/test_full_fermentation.py`'s four
+  scenario tests both called the now-gone `simulator_socket=`/
+  `manual_socket=` kwargs — fixed via a scoped env-var override
+  (`monkeypatch.setenv` in tests; a save/restore context manager in
+  `seed.py`, which isn't test code and has no `monkeypatch` available).
+  `tests/api/conftest.py`'s shared `daemon` fixture got the same
+  treatment — the only fixture that needed it; everything depending on
+  `daemon`/`client` elsewhere needed no changes at all.
+- Verified end to end, not just via the 294 passing tests: manually ran
+  a scenario daemon with `KRAUKEN_PLATFORMS=brewpi,tilt` and confirmed
+  `registry.state_for("manual")`/`state_for("simulator")` come back
+  `None` cleanly, `brewpi`/`tilt` still construct and start correctly
+  (Tilt's real "no AF_BLUETOOTH on macOS" unavailability caught and
+  logged by the new generic `start_all()`, not a crash), and
+  start/stop completes with no errors.
+
 ## What shipped
 
 - `krauken/platforms/base.py` — new `@requires_optional` decorator for

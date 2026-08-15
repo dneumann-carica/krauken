@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,6 +61,15 @@ TILT_COLOR_BY_UUID: dict[str, str] = {
 }
 ALL_TILT_COLORS: frozenset[str] = frozenset(TILT_COLOR_BY_UUID.values())
 
+# Which hci device (bluetoothd numbering, hci0/hci1/...) aioblescan opens a
+# raw socket against -- matches aioblescan's own --device CLI flag. Lives
+# here, not krauken/config.py, since nothing outside this module needs it
+# any more (platforms/registry.py's PlatformRegistry constructs a
+# TiltScanner with zero arguments -- this is purely Tilt-hardware-specific
+# configuration, resolved by the HAL itself, same reasoning as
+# ipc_driver.py's IpcPlatformConnection resolving its own socket path).
+DEFAULT_HCI_DEVICE = 0
+
 # No beacon within this long and the color reads as dropped out (latest()
 # returns None) -- matches the design doc's "no beacon seen within a
 # timeout" framing verbatim. Tilt advertises roughly once/second; the real
@@ -83,7 +93,13 @@ class TiltScanner:
     color) is figured out per-packet, not per-listener. Watches for all
     8 known colors unconditionally (see module docstring)."""
 
-    def __init__(self, clock: Clock, *, hci_device: int = 0):
+    def __init__(self, clock: Clock, *, hci_device: int | None = None):
+        # None -> resolve from KRAUKEN_TILT_HCI_DEVICE (or the default)
+        # ourselves; an explicit override is still accepted for tests that
+        # want a specific value without env-var choreography (same shape
+        # as ipc_driver.py's IpcPlatformConnection socket_path override).
+        if hci_device is None:
+            hci_device = int(os.environ.get("KRAUKEN_TILT_HCI_DEVICE", str(DEFAULT_HCI_DEVICE)))
         self.clock = clock
         self.colors = ALL_TILT_COLORS
         self._hci_device = hci_device

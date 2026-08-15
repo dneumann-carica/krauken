@@ -14,6 +14,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from krauken.daemon.testing import build_scenario_daemon
 from krauken.db.connection import open_ro
 from krauken.ipc.client import AsyncIPCClient
@@ -80,14 +82,19 @@ async def _scan_and_wait(client: AsyncIPCClient) -> None:
     raise AssertionError("scan never completed")
 
 
-async def test_compressed_two_stage_fermentation_runs_to_completion(tmp_path: Path):
+async def test_compressed_two_stage_fermentation_runs_to_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db_path = tmp_path / "krauken.db"
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))  # AF_UNIX path-length limit -- see tests/api/conftest.py
     socket_path = short_tmp / "d.sock"
     simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
+    # build_scenario_daemon() no longer accepts simulator_socket/
+    # manual_socket -- ManualIpcConnection/SimulatorIpcConnection resolve
+    # their own path from these same env vars.
+    monkeypatch.setenv("KRAUKEN_SIMULATOR_SOCKET", str(simulator_socket))
+    monkeypatch.setenv("KRAUKEN_MANUAL_SOCKET", str(manual_socket))
 
     daemon, clock = build_scenario_daemon(
-        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        db_path=db_path, socket_path=socket_path,
         control_tick_interval_s=600.0,
     )
     await daemon.start()
@@ -165,7 +172,7 @@ async def test_compressed_two_stage_fermentation_runs_to_completion(tmp_path: Pa
         conn.close()
 
 
-async def test_control_tick_writes_rich_live_state_telemetry(tmp_path: Path):
+async def test_control_tick_writes_rich_live_state_telemetry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A dedicated, non-racing check for live_state's content while a
     fermentation is active: calling control_tick() directly, once, side-
     steps the scenario test's own background loop (which -- being driven by
@@ -176,9 +183,14 @@ async def test_control_tick_writes_rich_live_state_telemetry(tmp_path: Path):
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))
     socket_path = short_tmp / "d.sock"
     simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
+    # build_scenario_daemon() no longer accepts simulator_socket/
+    # manual_socket -- ManualIpcConnection/SimulatorIpcConnection resolve
+    # their own path from these same env vars.
+    monkeypatch.setenv("KRAUKEN_SIMULATOR_SOCKET", str(simulator_socket))
+    monkeypatch.setenv("KRAUKEN_MANUAL_SOCKET", str(manual_socket))
 
     daemon, clock = build_scenario_daemon(
-        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        db_path=db_path, socket_path=socket_path,
         control_tick_interval_s=600.0,
     )
     await daemon.start()
@@ -210,7 +222,7 @@ async def test_control_tick_writes_rich_live_state_telemetry(tmp_path: Path):
         shutil.rmtree(short_tmp, ignore_errors=True)
 
 
-async def test_full_fermentation_profile_completes_with_correct_decisions(tmp_path: Path):
+async def test_full_fermentation_profile_completes_with_correct_decisions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The actual "did the daemon make the right calls" gate: a real
     multi-stage profile -- gravity-gated Primary, then two time-gated
     stages spanning both a heat demand (72F, warmer than Primary's 68F
@@ -237,9 +249,14 @@ async def test_full_fermentation_profile_completes_with_correct_decisions(tmp_pa
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))
     socket_path = short_tmp / "d.sock"
     simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
+    # build_scenario_daemon() no longer accepts simulator_socket/
+    # manual_socket -- ManualIpcConnection/SimulatorIpcConnection resolve
+    # their own path from these same env vars.
+    monkeypatch.setenv("KRAUKEN_SIMULATOR_SOCKET", str(simulator_socket))
+    monkeypatch.setenv("KRAUKEN_MANUAL_SOCKET", str(manual_socket))
 
     daemon, clock = build_scenario_daemon(
-        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        db_path=db_path, socket_path=socket_path,
         control_tick_interval_s=300.0,
     )
     await daemon.start()
@@ -327,7 +344,7 @@ async def test_full_fermentation_profile_completes_with_correct_decisions(tmp_pa
         conn.close()
 
 
-async def test_full_fermentation_auto_detects_og_when_not_supplied(tmp_path: Path):
+async def test_full_fermentation_auto_detects_og_when_not_supplied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """OG auto-detection (contracts/og_detection.py): a fermentation
     started without an explicit og should end up with one locked in on
     its own, close to the simulator's true GravityParams.og (1.052) --
@@ -342,9 +359,14 @@ async def test_full_fermentation_auto_detects_og_when_not_supplied(tmp_path: Pat
     short_tmp = Path(tempfile.mkdtemp(prefix="kr-"))
     socket_path = short_tmp / "d.sock"
     simulator_service, manual_service, simulator_socket, manual_socket = await _start_platform_services(short_tmp)
+    # build_scenario_daemon() no longer accepts simulator_socket/
+    # manual_socket -- ManualIpcConnection/SimulatorIpcConnection resolve
+    # their own path from these same env vars.
+    monkeypatch.setenv("KRAUKEN_SIMULATOR_SOCKET", str(simulator_socket))
+    monkeypatch.setenv("KRAUKEN_MANUAL_SOCKET", str(manual_socket))
 
     daemon, clock = build_scenario_daemon(
-        db_path=db_path, socket_path=socket_path, simulator_socket=simulator_socket, manual_socket=manual_socket,
+        db_path=db_path, socket_path=socket_path,
         control_tick_interval_s=300.0,
     )
     await daemon.start()

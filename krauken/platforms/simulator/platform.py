@@ -16,6 +16,7 @@ never-changing snapshot.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping, Sequence
 
 from krauken.contracts.models import DeviceCandidate, Health
@@ -24,6 +25,21 @@ from krauken.platforms.simulator.live import PROBE_1_ADDRESS, PROBE_2_ADDRESS, S
 
 PLATFORM_ID = "simulator"
 DISPLAY_NAME = "Simulator"
+
+# Not in production yet -- True for now. Once real installs exist, this
+# stays unset there (see deploy/krauken.conf.example), which reads as
+# disabled -- unlike simulator:chamber, simulator:tilt isn't gated by
+# whether krauken-simulator.service is even reachable (it's a second
+# candidate this SAME platform's discover() emits, not a separate
+# service/socket), so it needs its own toggle.
+DEFAULT_TILT_ENABLED = True
+
+
+def _tilt_enabled() -> bool:
+    # Read fresh per call, matching registry.py's enabled_platform_ids()
+    # -- not cached at construction time.
+    raw = os.environ.get("KRAUKEN_SIMULATOR_TILT_ENABLED")
+    return DEFAULT_TILT_ENABLED if raw is None else raw == "1"
 
 
 class SimulatorPlatform:
@@ -39,7 +55,7 @@ class SimulatorPlatform:
         gravity_sg = self._engine.read_gravity().gravity_sg if self._engine is not None else 1.042
         probe2 = bool(self._engine is not None and self._engine.probe2_enabled)
 
-        return [
+        candidates = [
             DeviceCandidate(
                 device_id="simulator:chamber",
                 platform=PLATFORM_ID,
@@ -55,6 +71,10 @@ class SimulatorPlatform:
                 simulated=True,
                 available_tests=("fire_outlet", "identify_probes"),
             ),
+        ]
+        if not _tilt_enabled():
+            return candidates
+        candidates.append(
             DeviceCandidate(
                 device_id="simulator:tilt",
                 platform=PLATFORM_ID,
@@ -71,5 +91,6 @@ class SimulatorPlatform:
                 identity={"rssi_dbm": -60, "battery_weeks": 3},
                 simulated=True,
                 available_tests=("live_read",),
-            ),
-        ]
+            )
+        )
+        return candidates

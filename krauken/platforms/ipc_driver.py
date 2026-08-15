@@ -25,8 +25,11 @@ zero probes exist.
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from krauken.config import DEFAULT_MANUAL_SOCKET, DEFAULT_SIMULATOR_SOCKET
 from krauken.contracts.errors import PlatformUnavailable
 from krauken.contracts.models import BeerReading, ChamberMode, ChamberReading, DeviceCandidate, GravityReading, Health
 from krauken.ipc.persistent_client import PersistentIPCClient
@@ -34,7 +37,59 @@ from krauken.ipc.persistent_client import PersistentIPCClient
 log = logging.getLogger("krauken.platforms.ipc_driver")
 
 
-async def sync_clock(client: PersistentIPCClient, *, now: float, monotonic: float) -> None:
+class IpcPlatformConnection:
+    """Owns the persistent connection to an out-of-process platform's HAL
+    (Simulator, Manual, and eventually the real Hardware Supervisor) --
+    the one place "how do I reach this platform's process, including
+    which socket" lives. Subclasses set env_var/default_socket_path --
+    each knows its OWN path; nothing external resolves or passes one in
+    during normal (zero-arg) construction. platforms/registry.py's
+    PlatformRegistry is the only thing that ever constructs these, and it
+    always does so with zero arguments -- daemon/app.py used to own both
+    the raw PersistentIPCClient AND the socket path itself (an
+    abstraction violation); this class is where that knowledge now lives,
+    the same way BrewPiConnection/TiltScanner already own their own
+    connection details.
+
+    The optional `socket_path` override exists ONLY for tests that need a
+    specific throwaway socket without env-var choreography (e.g.
+    tests/unit/test_ipc_service.py's direct driver tests) -- production
+    construction (PlatformBinding.build_state) always calls these with
+    zero arguments."""
+
+    env_var: str
+    default_socket_path: str
+
+    def __init__(self, socket_path: Path | str | None = None, **client_kwargs: Any):
+        if socket_path is None:
+            socket_path = os.environ.get(self.env_var, self.default_socket_path)
+        self._client = PersistentIPCClient(socket_path, **client_kwargs)
+
+    @property
+    def socket_path(self) -> str:
+        return self._client.socket_path
+
+    async def start(self) -> None:
+        await self._client.start()
+
+    async def stop(self) -> None:
+        await self._client.stop()
+
+    async def call(self, op_name: str, args: Mapping[str, Any] | None = None, *, deadline_ms: int = 3000) -> Any:
+        return await self._client.call(op_name, args, deadline_ms=deadline_ms)
+
+
+class ManualIpcConnection(IpcPlatformConnection):
+    env_var = "KRAUKEN_MANUAL_SOCKET"
+    default_socket_path = DEFAULT_MANUAL_SOCKET
+
+
+class SimulatorIpcConnection(IpcPlatformConnection):
+    env_var = "KRAUKEN_SIMULATOR_SOCKET"
+    default_socket_path = DEFAULT_SIMULATOR_SOCKET
+
+
+async def sync_clock(client: IpcPlatformConnection, *, now: float, monotonic: float) -> None:
     """Tells the remote process's RemoteClock what time the daemon is
     currently using -- see contracts/clock.py's RemoteClock and
     daemon/drivers.py's sync_remote_clocks(), which calls this once per
@@ -79,29 +134,29 @@ class IpcPlatformDriver:
     platform_id: str
     display_name: str
 
-    def __init__(self, client: PersistentIPCClient):
-        self._client = client
+    def __init__(self, connection: IpcPlatformConnection):
+        self._connection = connection
 
     async def discover(self, ctx: Mapping[str, Any]) -> Sequence[DeviceCandidate]:
         # Deliberately NOT caught here: PlatformUnavailable propagating out
         # of discover() is exactly what daemon/discovery.py's _discover_one
         # already expects and handles (a platform_status of "unavailable"
         # for this scan, not a crashed scan).
-        result = await self._client.call("platform.discover")
+        result = await self._connection.call("platform.discover")
         return [_candidate_from_wire(c) for c in result["candidates"]]
 
 
 class IpcChamberDriver:
-    def __init__(self, client: PersistentIPCClient, device_id: str | None = None):
+    def __init__(self, connection: IpcPlatformConnection, device_id: str | None = None):
         # device_id unused -- Manual/Simulator each expose exactly one
         # chamber device, so there's nothing to disambiguate (see
         # daemon/drivers.py's own docstring on why every dispatch function
         # passes it uniformly regardless).
-        self._client = client
+        self._connection = connection
 
     async def read_chamber(self) -> ChamberReading:
         try:
-            r = await self._client.call("chamber.read_chamber")
+            r = await self._connection.call("chamber.read_chamber")
         except PlatformUnavailable:
             return ChamberReading(temp_f=None, mode=ChamberMode.IDLE, health=Health.UNREACHABLE, last_good_ts=None)
         return ChamberReading(
@@ -115,47 +170,47 @@ class IpcChamberDriver:
 
     async def set_target(self, temp_f: float | None) -> None:
         try:
-            await self._client.call("chamber.set_target", {"temp_f": temp_f})
+            await self._connection.call("chamber.set_target", {"temp_f": temp_f})
         except PlatformUnavailable as e:
             log.warning("set_target(%s) dropped: %s", temp_f, e)
 
     async def commanded_target(self) -> float | None:
         try:
-            r = await self._client.call("chamber.commanded_target")
+            r = await self._connection.call("chamber.commanded_target")
         except PlatformUnavailable:
             return None
         return r["temp_f"]
 
     async def set_ambient_location(self, location: str | None) -> None:
         try:
-            await self._client.call("chamber.set_ambient_location", {"location": location})
+            await self._connection.call("chamber.set_ambient_location", {"location": location})
         except PlatformUnavailable as e:
             log.warning("set_ambient_location(%r) dropped: %s", location, e)
 
     async def probe_temps(self) -> dict[str, float | None]:
-        r = await self._client.call("chamber.probe_temps")
+        r = await self._connection.call("chamber.probe_temps")
         return r["temps"]
 
 
 class IpcBeerTempSource:
-    def __init__(self, client: PersistentIPCClient, device_id: str | None = None):
-        self._client = client  # device_id unused -- see IpcChamberDriver's own comment
+    def __init__(self, connection: IpcPlatformConnection, device_id: str | None = None):
+        self._connection = connection  # device_id unused -- see IpcChamberDriver's own comment
 
     async def read(self) -> BeerReading:
         try:
-            r = await self._client.call("beer_temp.read")
+            r = await self._connection.call("beer_temp.read")
         except PlatformUnavailable:
             return BeerReading(temp_f=None, health=Health.UNREACHABLE, last_good_ts=None)
         return BeerReading(temp_f=r["temp_f"], health=Health(r["health"]), last_good_ts=r["last_good_ts"])
 
 
 class IpcGravitySource:
-    def __init__(self, client: PersistentIPCClient, device_id: str | None = None):
-        self._client = client  # device_id unused -- see IpcChamberDriver's own comment
+    def __init__(self, connection: IpcPlatformConnection, device_id: str | None = None):
+        self._connection = connection  # device_id unused -- see IpcChamberDriver's own comment
 
     async def read(self) -> GravityReading:
         try:
-            r = await self._client.call("gravity.read")
+            r = await self._connection.call("gravity.read")
         except PlatformUnavailable:
             return GravityReading(gravity_sg=None, health=Health.UNREACHABLE, last_good_ts=None)
         return GravityReading(gravity_sg=r["gravity_sg"], health=Health(r["health"]), last_good_ts=r["last_good_ts"])

@@ -25,14 +25,19 @@ DEFAULT_MANUAL_SOCKET = "/run/krauken/manual.sock"
 # down to loopback-only.
 DEFAULT_API_HOST = "0.0.0.0"
 DEFAULT_API_PORT = 8080
-# Which hci device (bluetoothd numbering, hci0/hci1/...) aioblescan opens
-# a raw socket against -- matches aioblescan's own --device CLI flag. No
-# color config at all -- project decision (explicit user direction): the
-# Tilt scanner watches for all 8 known colors unconditionally and
-# discover() surfaces whichever are actually detected as candidates, the
-# same "scan and see what's really there" philosophy as BrewPi's
-# auto-scan, rather than requiring the color be known/configured up front.
-DEFAULT_TILT_HCI_DEVICE = 0
+# No KRAUKEN_TILT_HCI_DEVICE here -- that's Tilt-hardware-specific
+# configuration, and lives entirely inside platforms/tilt/scanner.py's own
+# TiltScanner now (reads the env var itself), not threaded through Config/
+# the daemon composition root. Same reasoning as simulator_socket/
+# manual_socket below NOT including a "the daemon needs this" comment
+# anymore -- see platforms/registry.py's PlatformRegistry, which is the
+# only thing that ever constructs a TiltScanner/BrewPiConnection/IPC
+# connection now. No color config at all for Tilt either -- project
+# decision (explicit user direction): the Tilt scanner watches for all 8
+# known colors unconditionally and discover() surfaces whichever are
+# actually detected as candidates, the same "scan and see what's really
+# there" philosophy as BrewPi's auto-scan, rather than requiring the color
+# be known/configured up front.
 # No DEFAULT_BREWPI_* either, for the identical reason -- auto-scan every
 # /dev/ttyACM*/ttyUSB* rather than a configured port (see
 # platforms/brewpi/platform.py), since a single-chamber install has at
@@ -50,15 +55,19 @@ class Config:
     api_host: str = DEFAULT_API_HOST
     api_port: int = DEFAULT_API_PORT
     # Simulator/Manual's own sockets -- the API talks to these DIRECTLY for
-    # dev-panel ops (api/routers/dev_panel.py), never through the daemon;
-    # the daemon separately holds its own PersistentIPCClient to each (see
-    # platforms/registry.py's PLATFORM_BINDINGS) for live control. Same
-    # "one socket per out-of-process platform" shape supervisor_socket
-    # already established, just for the two mock platforms instead of real
-    # hardware.
+    # dev-panel ops (api/routers/dev_panel.py), never through the daemon.
+    # The daemon no longer reads these fields at all -- platforms/
+    # ipc_driver.py's ManualIpcConnection/SimulatorIpcConnection read the
+    # same KRAUKEN_MANUAL_SOCKET/KRAUKEN_SIMULATOR_SOCKET env vars
+    # themselves (platforms/registry.py's PlatformRegistry is what
+    # constructs them, never the daemon composition root). These fields
+    # stay here because platforms/simulator/__main__.py and platforms/
+    # manual/__main__.py's own service processes still need to know their
+    # OWN bind path. Same "one socket per out-of-process platform" shape
+    # supervisor_socket already established, just for the two mock
+    # platforms instead of real hardware.
     simulator_socket: Path = Path(DEFAULT_SIMULATOR_SOCKET)
     manual_socket: Path = Path(DEFAULT_MANUAL_SOCKET)
-    tilt_hci_device: int = DEFAULT_TILT_HCI_DEVICE
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -73,5 +82,4 @@ class Config:
             api_port=int(os.environ.get("KRAUKEN_API_PORT", str(DEFAULT_API_PORT))),
             simulator_socket=Path(os.environ.get("KRAUKEN_SIMULATOR_SOCKET", DEFAULT_SIMULATOR_SOCKET)),
             manual_socket=Path(os.environ.get("KRAUKEN_MANUAL_SOCKET", DEFAULT_MANUAL_SOCKET)),
-            tilt_hci_device=int(os.environ.get("KRAUKEN_TILT_HCI_DEVICE", str(DEFAULT_TILT_HCI_DEVICE))),
         )
