@@ -18,9 +18,15 @@ override_dh_auto_build:
 # ship, on the BUILD machine (x86_64 GitHub Actions runner) -- safe and
 # correct even though the target is a different architecture, since
 # these are source-level tests, not anything architecture-specific.
+# '.[dev,pi]', not just '.[dev]' -- without the pi extra, pyserial/
+# aioblescan/lgpio aren't importable and BrewPi's platform tests fail with
+# ModuleNotFoundError instead of exercising the real (fake-serial-backed)
+# code path. All three build/import fine on x86_64 (lgpio only *talks* to
+# real GPIO hardware lazily, at instantiation -- see cli/hwid.py's
+# LgpioBackend); only actual pin access needs a real Pi.
 override_dh_auto_test:
 	python3 -m venv /tmp/krauken-build-venv
-	/tmp/krauken-build-venv/bin/pip install --quiet -e '.[dev]'
+	/tmp/krauken-build-venv/bin/pip install --quiet -e '.[dev,pi]'
 	/tmp/krauken-build-venv/bin/pytest -q
 	rm -rf /tmp/krauken-build-venv
 

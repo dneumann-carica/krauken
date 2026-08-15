@@ -126,8 +126,16 @@ async def test_speed_and_advance_routes_no_longer_exist(client: AsyncClient):
     post_resp = await client.post("/api/v1/dev/clock/advance", json={"seconds": 60.0})
     assert post_resp.status_code != 200
 
+    # Whether this falls through to the SPA shell (text/html, if the
+    # frontend happens to be built) or static.py's own "frontend not built"
+    # JSON stub (if it isn't -- e.g. in this exact CI test run, which
+    # deliberately runs before debian/rules' override_dh_auto_install
+    # stages _static) depends only on build-environment state, not
+    # anything this test should assert on. The real invariant is that no
+    # old speed-panel JSON payload comes back, whichever shape wins.
     get_resp = await client.get("/api/v1/dev/speed")
-    assert "application/json" not in get_resp.headers.get("content-type", "")
+    if "application/json" in get_resp.headers.get("content-type", ""):
+        assert "speed" not in get_resp.json()
 
     put_resp = await client.put("/api/v1/dev/speed", json={"speed": 100})
     assert put_resp.status_code != 200
