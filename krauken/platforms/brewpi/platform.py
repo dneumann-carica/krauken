@@ -74,6 +74,36 @@ class BrewPiPlatform:
                 readings={"chamber_temp_f": chamber_f, "beer_temp_f": beer_f},
                 identity={"serial_port": self._connection.port, "firmware": version, "probe_addresses": probe_addresses},
                 simulated=False,
-                available_tests=("live_read", "identify_probes"),
+                # No fire_outlet here -- BrewPi's firmware decides which
+                # relay does what internally, so there's no independent
+                # relay to fire the way Manual/Simulator's outlets can be.
+                # identify_probes/confirm_heater are superseded as SETUP
+                # mechanisms by the device-configuration wizard below (both
+                # assumed probe/pin roles were already assigned via
+                # BrewPi's own classic web UI, which is often untrue --
+                # confirmed this session against the actual reference rig,
+                # which has a cooling actuator installed and NO heat
+                # device installed anywhere). confirm_heater itself is kept
+                # as a standalone post-setup diagnostic (HardwareSetupView's
+                # "Test heater" button), not exposed through the guided
+                # wizard's available_tests here.
+                #
+                # The five actions below (platforms/brewpi/device_config.py,
+                # dispatched via PLATFORM_BINDINGS["brewpi"].test_runners --
+                # see daemon/tests_runtime.py's start_test()) are what let
+                # Krauken discover and install probe/relay mappings itself,
+                # so a user never needs BrewPi's own Device Configuration
+                # page: brewpi_devices (full device list with live values),
+                # identify_onewire_probes (chamber/beer probe ID from raw
+                # OneWire addresses), sweep_relay (cool/heat pin sweep),
+                # finalize_device_config (push final config + reset).
+                available_tests=(
+                    "live_read",
+                    "brewpi_devices",
+                    "identify_onewire_probes",
+                    "sweep_relay",
+                    "finalize_device_config",
+                    "reset_brewpi",
+                ),
             ),
         ]

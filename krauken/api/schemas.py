@@ -95,7 +95,22 @@ class DeviceResponse(BaseModel):
 
 
 class TestStartRequest(BaseModel):
-    action: Literal["fire_outlet", "identify_probes", "live_read"]
+    # confirm_heater was previously missing here entirely -- a real API call
+    # to start it was rejected by pydantic before ever reaching
+    # tests_runtime.py. The five identify_onewire_probes/brewpi_devices/
+    # sweep_relay/finalize_device_config/reset_brewpi actions are BrewPi's
+    # own device-configuration wizard (platforms/brewpi/device_config.py).
+    action: Literal[
+        "fire_outlet",
+        "identify_probes",
+        "live_read",
+        "confirm_heater",
+        "identify_onewire_probes",
+        "brewpi_devices",
+        "sweep_relay",
+        "finalize_device_config",
+        "reset_brewpi",
+    ]
     params: dict[str, Any] = {}
 
 

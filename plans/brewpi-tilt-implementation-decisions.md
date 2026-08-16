@@ -1,5 +1,92 @@
 # BrewPi + Tilt implementation: decisions to ratify
 
+## v0.1.6: Krauken takes over BrewPi's Device Configuration entirely
+
+The shipped `confirm_heater`/`identify_probes` setup flow silently assumed
+BrewPi's classic web UI had already mapped which OneWire probe is chamber/
+beer and which pin drives cooling/heating. Checked against the actual
+reference rig (`brewpi.local`) and that assumption is false in practice:
+a cooling actuator is installed, but no heat device is installed at all,
+anywhere -- `confirm_heater` could only ever report "not confirmed" there,
+correctly, but for the wrong reason (no device to drive, not "no heater
+wired"). Decision: Krauken discovers and installs the mapping itself, via
+a guided wizard built on four new BrewPi serial commands.
+
+**Protocol facts, all confirmed against the real Arduino (firmware
+0.2.13) and `brewpi-remix/brewpi-firmware-rmx`'s actual source, not
+guessed:**
+- `d{}`/`d{r:1}` (installed devices, optionally with live values),
+  `h{u:-1}`/`h{u:-1,v:1}` (available devices) -- a bare `'h'` with no
+  argument returns a different, undocumented mixed list; never used.
+- `U<json>` installs/updates a device. `DeviceManager.cpp`'s
+  `parseDeviceDefinition()` rejects an install with `"i":-1` or omitted
+  entirely, silently, at its very first range check
+  (`inRangeInt8(dev.id, 0, MAX_DEVICE_SLOT)`) -- confirmed by two live
+  attempts that both produced no response and no installed device.
+  Reading the source explained why: the firmware doesn't auto-assign a
+  slot at all; the caller must supply an explicit, currently-unused slot
+  number (0-15, `MAX_DEVICE_SLOT=16`). A third live attempt with
+  `"i":0` confirmed the fix -- installed cleanly, `"f":0` uninstalled
+  cleanly, rig back to its exact starting baseline.
+- `R` triggers a real AVR watchdog reset (`main.cpp`'s `handleReset()`).
+  EEPROM survives; RAM does not.
+- Anti-short-cycle protection (`TempControl.h`/`.cpp`) is the crux of the
+  whole design. `TempControl::init()` zeroes `lastHeatTime`/`lastCoolTime`
+  on every boot specifically to force a wait after any reset (source
+  comment: *"Do not allow heating/cooling directly after reset...
+  could damage the compressor"*) -- rebooting does NOT clear the wait,
+  it restarts it. But `lastHeatTime`/`lastCoolTime` track the *logical
+  function's* engagement history, not which physical pin backs it
+  (confirmed via `DeviceManager.cpp`'s `parseDeviceDefinition`, which
+  swaps the actuator pointer without resetting either): once any relay
+  has genuinely engaged, reassigning that function to a different
+  candidate pin engages the new one within one control-loop tick. Pay
+  the ~10-minute wait once per session, sweep the rest near-instantly.
+- A positively-identified relay is deliberately left energized while the
+  sweep continues for the other function, rather than reverted --
+  confirmed the protection timers guard against *rapid cycling*, not
+  continuous running, so this doesn't violate what they're actually for.
+  The final pushed configuration is followed by a real reset, which
+  deterministically forces every pin to a safe level: `ActuatorPin.h`'s
+  `DigitalPinActuator` constructor calls `setActive(false)` *before*
+  `pinMode(pin, OUTPUT)`, so any pin reconstructed from EEPROM at boot is
+  forced correct regardless of what state it was left in.
+- A real firmware quirk found empirically, not by inspection: `'d'`/`'h'`
+  responses sometimes interleave an unrelated log message mid-array,
+  splitting one JSON array across physical lines
+  (`d:[D:{"logType":"E",...}` on one line, the rest of the array on the
+  next). `connection.py`'s existing single-line `_query_locked()` would
+  silently fail to parse this; a dedicated `_query_device_list_locked()`
+  strips embedded log fragments and accumulates lines until the result
+  parses as a JSON array.
+
+**Also found live, off to the side of this feature**: a second physical
+OneWire probe on the reference rig was intermittently "detected but
+unreadable" (`v: null`, paired with a firmware warning: `"Temperature
+sensor disconnected pin %d, address %s"`, confirmed via
+`LogMessages.h`). Isolated via a physical swap test (moved the *working*
+probe into the suspect slot; it immediately showed the classic DS18B20
+85°C/`185°F` power-on-reset value) -- the fault is the slot's wiring, not
+either sensor. The wizard's `identify_onewire_probes` action tracks
+`readable` per address explicitly for exactly this reason: a
+detected-but-unreadable probe is a real, ongoing hardware state, not a
+transient hiccup to retry into "reading…" forever.
+
+**Architecture note, corrected mid-implementation**: the original draft
+of this plan put all five new job runners directly in
+`daemon/tests_runtime.py`, hardcoding the string `"brewpi"` -- exactly
+the daemon-composition-root violation the `PlatformRegistry` refactor
+(see below) existed to prevent. Corrected before writing production code:
+`platforms/registry.py`'s `PlatformBinding` gained a `test_runners` table
+(via a new `PlatformTestRunner` in `contracts/interfaces.py`, to avoid a
+circular import back into `tests_runtime.py`), so `daemon/tests_runtime.py`
+never needs to know BrewPi exists -- it just falls back to
+`PLATFORM_BINDINGS[platform].test_runners` for any action it doesn't
+recognize generically. `confirm_heater`/`identify_probes`/`fire_outlet`
+needed no such move: re-reading them confirmed they already dispatch
+purely through the abstract `ChamberDriver`/`ChamberMode` Protocol, with
+zero references to any concrete platform.
+
 ## v0.1.5: real control-loop crash, caught live testing on brewpi.local
 
 You'd remapped a live fermentation's `beer_temp`/`beer_gravity` from the

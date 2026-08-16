@@ -43,12 +43,13 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from krauken.contracts.clock import Clock
 from krauken.contracts.errors import PlatformUnavailable
-from krauken.contracts.interfaces import BeerTempSource, ChamberDriver, GravitySource, PlatformDriver
+from krauken.contracts.interfaces import BeerTempSource, ChamberDriver, GravitySource, PlatformDriver, PlatformTestRunner
+from krauken.platforms.brewpi import device_config as brewpi_device_config
 from krauken.platforms.brewpi.connection import BrewPiConnection
 from krauken.platforms.brewpi.live import BrewPiBeerTempSource, BrewPiChamberDriver
 from krauken.platforms.brewpi.platform import BrewPiPlatform
@@ -98,6 +99,18 @@ class PlatformBinding:
     chamber_driver_cls: type[ChamberDriver] | None = None
     beer_temp_source_cls: type[BeerTempSource] | None = None
     gravity_source_cls: type[GravitySource] | None = None
+    test_runners: Mapping[str, PlatformTestRunner] = field(default_factory=dict)
+    """Platform-owned hardware-SETUP test actions that don't fit the three
+    role-driver Protocols above -- device configuration, not device
+    operation (e.g. BrewPi's device_config.py: installing a probe/relay
+    mapping, not reading/driving one). daemon/tests_runtime.py's
+    start_test() tries its fixed set of generic actions first
+    (fire_outlet/identify_probes/confirm_heater/live_read -- these already
+    work through the abstract driver Protocols and need no per-platform
+    knowledge), then falls back to this table by device_id's platform
+    prefix. Empty for every platform except BrewPi today; a future real
+    Krauken-hardware platform populates its own entries here rather than
+    teaching tests_runtime.py a new platform name."""
 
 
 PLATFORM_BINDINGS: dict[str, PlatformBinding] = {
@@ -122,6 +135,7 @@ PLATFORM_BINDINGS: dict[str, PlatformBinding] = {
         beer_temp_source_cls=BrewPiBeerTempSource,
         # No GravitySource -- BrewPi has no hydrometer of its own.
         gravity_source_cls=None,
+        test_runners=brewpi_device_config.TEST_RUNNERS,
     ),
     "tilt": PlatformBinding(
         # No hci_device passed -- TiltScanner resolves KRAUKEN_TILT_HCI_DEVICE

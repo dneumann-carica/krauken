@@ -15,14 +15,17 @@ layer" piece changes.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from krauken.contracts.errors import TestAlreadyRunning, UnknownTest, ValidationError
+from krauken.contracts.errors import FermentationAlreadyActive, TestAlreadyRunning, UnknownTest, ValidationError
+from krauken.contracts.models import ChamberMode
 from krauken.daemon import drivers
 from krauken.daemon.timefmt import iso as _iso
 from krauken.db import queries
+from krauken.platforms.registry import PLATFORM_BINDINGS
 
 FIRE_OUTLET_DURATION_S = 10.0
 # A genuine "hold it in your hand" interaction needs real time -- 3s was
@@ -31,6 +34,31 @@ FIRE_OUTLET_DURATION_S = 10.0
 IDENTIFY_PROBES_WINDOW_S = 90.0
 IDENTIFY_PROBES_POLL_S = 1.0
 IDENTIFY_PROBES_DELTA_F = 3.0
+
+# BrewPi (and any future firmware-managed chamber controller) never lets us
+# fire a relay directly -- the firmware's own fridge-constant mode decides
+# that. Instead we push a setpoint far enough past the current reading to
+# force the firmware into HEATING, then watch its own reported state --
+# this is a REAL functional test (the relay either engages or it doesn't),
+# not a simulated countdown. +15F is comfortably past any realistic
+# ambient/ferment-temp gap without being an unsafe target for the few
+# minutes this runs.
+CONFIRM_HEATER_FORCE_DELTA_F = 15.0
+CONFIRM_HEATER_POLL_S = 2.0
+# Real BrewPi firmware enforces anti-short-cycle protection -- a minimum
+# time between switching relays, and a separate minimum wait since boot --
+# commonly several minutes (confirmed via BrewPi's own community docs, not
+# guessed; this project's own contracts/control_constants.py models the
+# same shape for the Simulator -- MIN_OFF_S=5min, OPPOSITE_LOCKOUT_S=30min).
+# A from-cold-start heat demand only ever needs to clear MIN_OFF_S (no
+# prior relay direction to lock out against), so this window sits well
+# past that with real margin, not right on the boundary -- a short timeout
+# would misreport "no heater" whenever this rig happens to still be inside
+# that window. The wizard's own UI carries an explicit "no heater detected
+# / skip anyway" escape hatch for the rarer case (this test re-run soon
+# after a real relay just ran the opposite direction) where even this
+# isn't enough.
+CONFIRM_HEATER_WINDOW_S = 600.0
 
 
 @dataclass
@@ -85,12 +113,43 @@ def start_test(ctx: Any, device_id: str, action: str, params: dict[str, Any]) ->
         window_s = float(params.get("window_s", IDENTIFY_PROBES_WINDOW_S))
         job = TestJob(job_id=job_id, kind=action, device_id=device_id, started_ts=now, ends_ts=now + window_s)
         job._task = asyncio.create_task(_run_identify_probes(ctx, job, device_id, probe_addresses, window_s))
+    elif action == "confirm_heater":
+        # Forces a real setpoint on the mapped chamber driver -- blocked
+        # while a fermentation is active for the same reason
+        # hardware.py's stop_chamber() is: exactly one active batch is a
+        # DB-level invariant, and this driver is the one it's still using.
+        if queries.active_fermentation(ctx.conn) is not None:
+            raise FermentationAlreadyActive("a fermentation is active -- can't run a live heat test on the chamber right now")
+        window_s = float(params.get("window_s", CONFIRM_HEATER_WINDOW_S))
+        job = TestJob(job_id=job_id, kind=action, device_id=device_id, started_ts=now, ends_ts=now + window_s)
+        job._task = asyncio.create_task(_run_confirm_heater(ctx, job, device_id, window_s))
     elif action == "live_read":
         job = TestJob(job_id=job_id, kind=action, device_id=device_id, started_ts=now, ends_ts=now)
         job.state = "completed"
         job.result = {"message": "live_read has no countdown -- poll the device's own readings instead"}
     else:
-        raise ValidationError(f"unknown test action {action!r}")
+        # Platform-owned actions that don't fit the ChamberDriver/
+        # BeerTempSource/GravitySource Protocols above -- hardware
+        # CONFIGURATION, not hardware OPERATION (installing a device,
+        # reading raw firmware state, pushing OneWire addresses). No
+        # per-platform knowledge lives here; PLATFORM_BINDINGS is the one
+        # place that maps a platform_id to its own test_runners (see
+        # platforms/registry.py, platforms/brewpi/device_config.py).
+        platform = device_id.split(":", 1)[0]
+        binding = PLATFORM_BINDINGS.get(platform)
+        entry = binding.test_runners.get(action) if binding else None
+        if entry is None:
+            raise ValidationError(f"unknown test action {action!r}")
+        # Checked HERE, synchronously, before the task is ever created --
+        # same reason confirm_heater's own check above is inline rather
+        # than inside its task body: an async check buried inside the
+        # runner would only ever surface as an unhandled exception in a
+        # Task, never as something this function's caller can catch.
+        if entry.requires_no_active_fermentation and queries.active_fermentation(ctx.conn) is not None:
+            raise FermentationAlreadyActive(f"a fermentation is active -- can't run {action!r} right now")
+        window_s = float(params.get("window_s", 600.0))
+        job = TestJob(job_id=job_id, kind=action, device_id=device_id, started_ts=now, ends_ts=now + window_s)
+        job._task = asyncio.create_task(entry.run(ctx, job, device_id, params))
 
     ctx.jobs[job_id] = job
     return job.to_dict()
@@ -109,8 +168,6 @@ async def cancel_test(ctx: Any, job_id: str) -> dict[str, Any]:
         raise UnknownTest(f"no test job {job_id}")
     if job.state == "running" and job._task is not None:
         job._task.cancel()
-        import contextlib
-
         with contextlib.suppress(asyncio.CancelledError):
             await job._task
         job.state = "cancelled"
@@ -125,6 +182,58 @@ async def _run_fire_outlet(ctx: Any, job: TestJob, duration_s: float, outlet: An
     except asyncio.CancelledError:
         job.state = "cancelled"
         raise
+
+
+async def _run_confirm_heater(ctx: Any, job: TestJob, device_id: str, window_s: float) -> None:
+    """Forces the mapped chamber driver's setpoint to CONFIRM_HEATER_FORCE_DELTA_F
+    above the current reading, then polls read_chamber()'s own reported
+    ChamberMode -- confirmed the moment the firmware itself reports HEAT,
+    same as identify_probes trusts the driver's own readings rather than
+    the caller's say-so. Dispatches through drivers.chamber_driver()
+    exactly like the control loop does, so this has no hardcoded knowledge
+    of which platform is running it (BrewPi today; any future
+    firmware-managed bundle device tomorrow)."""
+    platform = device_id.split(":", 1)[0]
+    driver = drivers.chamber_driver(ctx, platform, device_id)
+    if driver is None:
+        job.state = "failed"
+        job.error = "no chamber driver mapped for this device"
+        return
+
+    baseline = await driver.read_chamber()
+    if baseline.temp_f is None:
+        job.state = "failed"
+        job.error = "chamber probe isn't reading -- can't run a live heat test"
+        return
+
+    forced_target = baseline.temp_f + CONFIRM_HEATER_FORCE_DELTA_F
+    await driver.set_target(forced_target)
+    try:
+        confirmed = False
+        current_f = baseline.temp_f
+        job.result = {"confirmed": confirmed, "baseline_f": baseline.temp_f, "forced_target_f": forced_target, "current_f": current_f}
+        elapsed_s = 0.0
+        while elapsed_s < window_s:
+            await ctx.clock.sleep(CONFIRM_HEATER_POLL_S)
+            elapsed_s += CONFIRM_HEATER_POLL_S
+            reading = await driver.read_chamber()
+            current_f = reading.temp_f
+            confirmed = reading.mode == ChamberMode.HEAT
+            job.result = {"confirmed": confirmed, "baseline_f": baseline.temp_f, "forced_target_f": forced_target, "current_f": current_f}
+            if confirmed:
+                break
+        job.state = "completed"
+    except asyncio.CancelledError:
+        job.state = "cancelled"
+        raise
+    finally:
+        # Always release back to idle -- confirmed, timed out, or
+        # cancelled -- never leave the forced setpoint behind. Matches
+        # hardware.py's stop_chamber() convention: an explicit
+        # set_target(None) release is the only contract a chamber driver
+        # makes; nothing auto-restores "whatever it was before".
+        with contextlib.suppress(Exception):
+            await driver.set_target(None)
 
 
 async def _read_probe_temps(ctx: Any, device_id: str) -> dict[str, float | None]:

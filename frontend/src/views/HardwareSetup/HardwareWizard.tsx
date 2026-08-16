@@ -1,16 +1,47 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Button, Dialog } from "../../design/primitives";
-import { useSaveMapping, useStartTest, useTestStatus } from "../../api/queries";
+import { useCancelTest, useSaveMapping, useStartTest, useTestStatus } from "../../api/queries";
 import type { DeviceResponse, MappingSaveResponse } from "../../api/types";
 import { CHAMBER_BUNDLE, Role } from "../../hardware/resolve";
 import styles from "./HardwareWizard.module.css";
 
-type Stage = "intro" | "relayA" | "heatB" | "coolB" | "noheat" | "nocool" | "probes" | "summary";
+type Stage =
+  | "intro"
+  | "relayA"
+  | "heatB"
+  | "coolB"
+  | "noheat"
+  | "nocool"
+  | "probes"
+  | "summary"
+  // BrewPi's device-configuration wizard (platforms/brewpi/device_config.py) --
+  // replaces identify_probes/confirm_heater as the SETUP mechanism for any
+  // firmware-managed chamber controller: Krauken discovers and installs
+  // probe/relay mappings itself, rather than assuming BrewPi's own classic
+  // web UI already did it (confirmed this session that assumption is often
+  // false -- the real reference rig has cooling installed and no heat
+  // device installed anywhere).
+  | "deviceProbeId"
+  | "deviceNoProbe"
+  | "deviceCoolSweep"
+  | "deviceNoCool"
+  | "deviceHeatSweep"
+  | "deviceFinalizing";
 
 // Matches daemon/tests_runtime.py's FIRE_OUTLET_DURATION_S -- the real,
 // settled default, not a shortened dev-testing value.
 const FIRE_DURATION_S = 10;
+
+// DeviceFunction/DeviceHardware codes -- platforms/brewpi/device_config.py's
+// exact values, confirmed against the real firmware source this session.
+// Only the pin-hardware/actuator codes are needed here: identify_onewire_probes'
+// job result already only ever contains OneWire addresses (the backend does
+// its own hardware-type filtering), so this view never needs to filter by
+// hardware type itself for probes.
+const DEVICE_FUNCTION_CHAMBER_COOL = 3;
+const DEVICE_FUNCTION_CHAMBER_HEAT = 2;
+const DEVICE_HARDWARE_PIN = 1;
 
 const STEP_LABELS: Record<Stage, string> = {
   intro: "Step 1 of 3",
@@ -21,11 +52,81 @@ const STEP_LABELS: Record<Stage, string> = {
   nocool: "Step 2b · no cooling",
   probes: "Step 3 of 3",
   summary: "Summary",
+  deviceProbeId: "Step 1 of 3",
+  deviceNoProbe: "Step 1 of 3 · no probe",
+  deviceCoolSweep: "Step 2 of 3",
+  deviceNoCool: "Step 2 of 3 · no cooling",
+  deviceHeatSweep: "Step 2 of 3",
+  deviceFinalizing: "Finishing up",
 };
 
 interface Picks {
   cool?: 0 | 1;
   heat?: 0 | 1 | null;
+}
+
+// --- BrewPi device-configuration wire shapes (mirrors
+// platforms/brewpi/device_config.py's BrewPiDevice.to_dict() and each
+// runner's job.result exactly). ---
+
+interface RawBrewPiDevice {
+  slot: number;
+  chamber: number;
+  beer: number;
+  function: number;
+  hardware: number;
+  deactivated: number;
+  pin: number | null;
+  address: string | null;
+  calibration: number | null;
+  invert: number | null;
+  value: number | null;
+}
+
+interface BrewPiDevicesResult {
+  devices: RawBrewPiDevice[];
+}
+
+interface IdentifyOnewireResult {
+  identified_address: string | null;
+  baseline_f: Record<string, number | null>;
+  current_f: Record<string, number | null>;
+  readable: Record<string, boolean>;
+}
+
+type SweepOutcome = "waiting" | "engaged" | "timeout";
+
+interface SweepRelayResult {
+  outcome: SweepOutcome;
+  baseline_f: number;
+  forced_target_f: number;
+  current_f: number | null;
+  slot: number;
+}
+
+interface FinalizeResult {
+  pushed: RawBrewPiDevice[];
+  installed: RawBrewPiDevice[];
+}
+
+interface ProbeIdentity {
+  address: string;
+  pin: number;
+}
+
+interface RelayIdentity {
+  pin: number;
+  invert: number;
+}
+
+// Wizard-local picks for the device-config flow -- deliberately separate
+// from Picks above (the outlet-fire flow's own shape): these track raw
+// probe addresses and relay pins, not outlet-fired booleans.
+interface DevicePicks {
+  chamberProbe?: ProbeIdentity;
+  beerProbe?: ProbeIdentity | null;
+  cool?: RelayIdentity;
+  heat?: RelayIdentity | null;
 }
 
 interface Props {
@@ -39,15 +140,42 @@ interface Props {
 export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish }: Props) {
   const [stage, setStage] = useState<Stage>("intro");
   const [picks, setPicks] = useState<Picks>({});
+  const [devicePicks, setDevicePicks] = useState<DevicePicks>({});
   const [testId, setTestId] = useState<string>();
   const [, setTick] = useState(0);
 
+  // The full device list (installed + available, with live values) --
+  // fetched once per device-config phase transition via brewpi_devices,
+  // used to build each sweep's candidate list and to learn the OneWire
+  // bus pin (every OneWire device on this rig shares one bus pin,
+  // confirmed via real captured data) for the probe-identification
+  // stage's config payload.
+  const [deviceList, setDeviceList] = useState<RawBrewPiDevice[]>();
+  const [probePhase, setProbePhase] = useState<"chamber" | "beer">("chamber");
+  const [sweepCandidateIndex, setSweepCandidateIndex] = useState(0);
+  // Distinguishes "haven't decided to test for a heater yet" (show the
+  // upfront skip/test choice, never auto-start) from "decided, now
+  // testing candidate 0" -- sweepCandidateIndex alone can't carry this,
+  // since clicking "Test for a heater" doesn't necessarily change it away
+  // from its already-0 default.
+  const [heatSweepStarted, setHeatSweepStarted] = useState(false);
+
   const startTest = useStartTest();
+  const cancelTest = useCancelTest();
   const testStatus = useTestStatus(device.device_id, testId);
   const saveMapping = useSaveMapping();
 
   const availableTests = (device.metadata.available_tests as string[] | undefined) ?? [];
   const canIdentify = availableTests.includes("identify_probes");
+  // BrewPi (and any future firmware-managed chamber controller) has no
+  // way to independently fire just the cooling or just the heating
+  // relay -- the real, running firmware decides that internally. Those
+  // devices skip straight from intro to the device-configuration wizard
+  // below instead of the outlet-firing stages: Krauken discovers which
+  // OneWire probe is chamber/beer and which pin drives cool/heat itself,
+  // rather than assuming BrewPi's own classic web UI already set that up.
+  const canFireOutlets = availableTests.includes("fire_outlet");
+  const canConfigureDevices = availableTests.includes("finalize_device_config");
   const probeAddresses = (device.metadata.probe_addresses as string[] | undefined) ?? [];
   const twoProbes = probeAddresses.length >= 2;
 
@@ -93,7 +221,12 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   function resetLocal() {
     setStage("intro");
     setPicks({});
+    setDevicePicks({});
     setTestId(undefined);
+    setDeviceList(undefined);
+    setProbePhase("chamber");
+    setSweepCandidateIndex(0);
+    setHeatSweepStarted(false);
   }
 
   function goTo(next: Stage, nextPicks?: Picks) {
@@ -118,7 +251,154 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     );
   }
 
-  const heatingConfirmed = picks.heat === 0 || picks.heat === 1;
+  // --- BrewPi device-configuration helpers ---
+
+  function runBrewPiDevices() {
+    startTest.mutate(
+      { deviceId: device.device_id, action: "brewpi_devices", params: {} },
+      { onSuccess: (r) => setTestId(r.test_id) },
+    );
+  }
+
+  function runIdentifyOnewire(exclude: string[]) {
+    setTestId(undefined);
+    startTest.mutate(
+      { deviceId: device.device_id, action: "identify_onewire_probes", params: { exclude_addresses: exclude } },
+      { onSuccess: (r) => setTestId(r.test_id) },
+    );
+  }
+
+  function runSweepRelay(fn: "cool" | "heat", candidate: RawBrewPiDevice) {
+    setTestId(undefined);
+    startTest.mutate(
+      {
+        deviceId: device.device_id,
+        action: "sweep_relay",
+        params: { function: fn, candidate: { pin: candidate.pin, invert: candidate.invert ?? 0 } },
+      },
+      { onSuccess: (r) => { localStartRef.current = Date.now(); setTestId(r.test_id); } },
+    );
+  }
+
+  function runFinalize(config: {
+    chamber_probe?: ProbeIdentity;
+    beer_probe?: ProbeIdentity | null;
+    cool?: RelayIdentity;
+    heat?: RelayIdentity | null;
+  }) {
+    setTestId(undefined);
+    startTest.mutate(
+      { deviceId: device.device_id, action: "finalize_device_config", params: { config } },
+      { onSuccess: (r) => setTestId(r.test_id) },
+    );
+  }
+
+  // The sweep can genuinely run for several real minutes on real hardware
+  // (BrewPi's own anti-short-cycle protection) for the FIRST candidate
+  // that ever engages -- a user who already knows the answer, or wants to
+  // move to the next candidate, shouldn't have to wait it out. Also a
+  // real correctness requirement, not just UX: the daemon only allows one
+  // running test per device_id at a time (TestAlreadyRunning), so the
+  // previous candidate's job MUST be cancelled before starting the next
+  // one's -- cancel_test() is a safe no-op if it already completed.
+  function cancelCurrentTest() {
+    if (testId !== undefined) {
+      cancelTest.mutate({ deviceId: device.device_id, testId });
+    }
+  }
+
+  // brewpi_devices completing populates deviceList and clears testId --
+  // the stage-specific effects below (identify_onewire_probes/sweep_relay)
+  // only start their own real test once deviceList is set, so clearing
+  // testId here is what lets them proceed with a fresh test_id rather than
+  // being blocked by this now-finished lookup still occupying it.
+  useEffect(() => {
+    if (testStatus.data?.kind === "brewpi_devices" && testStatus.data.state === "completed") {
+      const result = testStatus.data.result as BrewPiDevicesResult | null;
+      setDeviceList(result?.devices ?? []);
+      setTestId(undefined);
+    }
+  }, [testStatus.data]);
+
+  // Auto-starts each device-config test the instant its stage is ready for
+  // it -- matches the plan's "runs on entry" design (the user is expected
+  // to already be warming a probe, or waiting on a relay, by the time they
+  // see the corresponding screen) rather than requiring an extra click.
+  useEffect(() => {
+    if (stage === "deviceProbeId" && deviceList === undefined && testId === undefined && !startTest.isPending) {
+      runBrewPiDevices();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, deviceList, testId]);
+
+  useEffect(() => {
+    if (stage !== "deviceProbeId" || deviceList === undefined) return;
+    if (testId !== undefined || startTest.isPending) return;
+    const exclude = probePhase === "beer" && devicePicks.chamberProbe ? [devicePicks.chamberProbe.address] : [];
+    runIdentifyOnewire(exclude);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, deviceList, probePhase]);
+
+  function buildCandidateList(fn: "cool" | "heat"): RawBrewPiDevice[] {
+    const wantFunction = fn === "cool" ? DEVICE_FUNCTION_CHAMBER_COOL : DEVICE_FUNCTION_CHAMBER_HEAT;
+    const pins = (deviceList ?? []).filter((d) => d.hardware === DEVICE_HARDWARE_PIN);
+    // Already-installed-for-this-function pin first (free -- no wait if
+    // the firmware happens to already be holding it), then every other
+    // pin candidate, each tried at most once.
+    const already = pins.filter((d) => d.function === wantFunction);
+    const rest = pins.filter((d) => d.function !== wantFunction);
+    return [...already, ...rest];
+  }
+
+  useEffect(() => {
+    if (stage === "deviceCoolSweep" && deviceList === undefined && !startTest.isPending) runBrewPiDevices();
+    if (stage === "deviceHeatSweep" && deviceList === undefined && !startTest.isPending) runBrewPiDevices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, deviceList]);
+
+  useEffect(() => {
+    if (stage !== "deviceCoolSweep" && stage !== "deviceHeatSweep") return;
+    if (stage === "deviceHeatSweep" && !heatSweepStarted) return; // upfront skip/test choice hasn't been answered yet
+    if (deviceList === undefined) return;
+    if (testId !== undefined || startTest.isPending) return;
+    const fn = stage === "deviceCoolSweep" ? "cool" : "heat";
+    const candidates = buildCandidateList(fn);
+    if (sweepCandidateIndex >= candidates.length) return; // exhausted -- rendered below, no test to start
+    runSweepRelay(fn, candidates[sweepCandidateIndex]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, deviceList, sweepCandidateIndex, testId, heatSweepStarted]);
+
+  // The exhausted transition belongs here (a real effect), not inline
+  // during render.
+  useEffect(() => {
+    if (stage !== "deviceCoolSweep" && stage !== "deviceHeatSweep") return;
+    if (stage === "deviceHeatSweep" && !heatSweepStarted) return;
+    if (deviceList === undefined) return;
+    const fn = stage === "deviceCoolSweep" ? "cool" : "heat";
+    const candidates = buildCandidateList(fn);
+    if (sweepCandidateIndex < candidates.length) return; // not exhausted
+    if (fn === "cool") {
+      goTo("deviceNoCool");
+    } else {
+      setDevicePicks((p) => ({ ...p, heat: null }));
+      goTo("deviceFinalizing");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, deviceList, sweepCandidateIndex, heatSweepStarted]);
+
+  function advanceSweepCandidate() {
+    cancelCurrentTest();
+    setTestId(undefined);
+    setSweepCandidateIndex((i) => i + 1);
+  }
+
+  function retrySweepCandidateWithReversedPolarity(candidate: RawBrewPiDevice) {
+    cancelCurrentTest();
+    setTestId(undefined);
+    runSweepRelay(stage === "deviceCoolSweep" ? "cool" : "heat", { ...candidate, invert: candidate.invert ? 0 : 1 });
+  }
+
+  const heatingConfirmed = picks.heat === 0 || picks.heat === 1 || (devicePicks.heat !== undefined && devicePicks.heat !== null);
 
   async function handleFinish() {
     const merged = { ...currentDraft };
@@ -133,6 +413,18 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   }
 
   function handleCancel() {
+    // Best-effort cleanup: if the wizard is abandoned mid-sweep, a
+    // candidate pin may be left installed and energized (the deliberate
+    // no-revert design -- see device_config.py's _run_sweep_relay). A
+    // reset is the only mechanism that reliably clears that (confirmed
+    // via ActuatorPin.h's constructor forcing every reconstructed
+    // actuator to a safe "off" level) -- fire it unconditionally
+    // (fire-and-forget, doesn't block closing the dialog) whenever
+    // there's device-config state to clean up.
+    if (canConfigureDevices && (stage === "deviceCoolSweep" || stage === "deviceHeatSweep" || stage === "deviceFinalizing")) {
+      cancelCurrentTest();
+      startTest.mutate({ deviceId: device.device_id, action: "reset_brewpi", params: {} });
+    }
     resetLocal();
     onCancel();
   }
@@ -170,7 +462,9 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   let onNext: () => void = () => {};
 
   if (stage === "intro") {
-    subtitle = "Three steps: switch each outlet on to learn what it controls, then identify the probes.";
+    subtitle = canFireOutlets
+      ? "Three steps: switch each outlet on to learn what it controls, then identify the probes."
+      : "This controller manages cooling and heating internally -- we'll identify the probes, then find the cooling (and optional heating) pin.";
     body = (
       <p className={styles.body}>
         Nothing is written until you finish. Cooling and chamber temp are required; heating and beer temp are
@@ -179,7 +473,274 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     );
     showNext = true;
     nextLabel = "Start setup";
-    onNext = () => goTo("relayA");
+    onNext = () => goTo(canFireOutlets ? "relayA" : canConfigureDevices ? "deviceProbeId" : "probes");
+  } else if (stage === "deviceProbeId") {
+    subtitle = probePhase === "chamber" ? "Identifying the chamber probe." : "Identifying the beer probe, if one is wired.";
+    const result = testStatus.data?.result as IdentifyOnewireResult | null | undefined;
+    const addresses = Object.keys(result?.current_f ?? {});
+    const pinFor = (addr: string) => deviceList?.find((d) => d.address === addr)?.pin ?? 0;
+
+    if (deviceList === undefined || testId === undefined) {
+      body = <p className={styles.body}>Reading the controller's currently-wired sensors…</p>;
+    } else if (addresses.length === 0) {
+      body = <p className={styles.body}>No {probePhase} probe detected.</p>;
+      if (!testRunning) {
+        showNext = true;
+        nextLabel = "Continue";
+        onNext = () =>
+          probePhase === "chamber"
+            ? goTo("deviceNoProbe")
+            : (setDevicePicks((p) => ({ ...p, beerProbe: null })), goTo("deviceCoolSweep"));
+      }
+    } else if (addresses.length === 1) {
+      // Nothing to compare against -- same "just confirm it responds"
+      // shape as the existing single-probe identify_probes path.
+      const addr = addresses[0];
+      const reading = result?.current_f?.[addr] ?? null;
+      const readable = result?.readable?.[addr] ?? false;
+      body = (
+        <div className={styles.probeReadout}>
+          <span className={styles.probeReadoutLabel}>{probePhase === "chamber" ? "Chamber probe" : "Beer probe"}</span>
+          <span className={styles.probeReadoutValue}>
+            {readable && reading != null ? `${reading.toFixed(1)}°F` : "not currently reading"}
+          </span>
+        </div>
+      );
+      if (!testRunning) {
+        showNext = true;
+        nextLabel = "Continue";
+        onNext = () => {
+          if (probePhase === "chamber") {
+            setDevicePicks((p) => ({ ...p, chamberProbe: { address: addr, pin: pinFor(addr) } }));
+            setTestId(undefined); // let the beer-phase effect start its own fresh test
+            setProbePhase("beer");
+          } else {
+            setDevicePicks((p) => ({ ...p, beerProbe: { address: addr, pin: pinFor(addr) } }));
+            goTo("deviceCoolSweep");
+          }
+        };
+      }
+    } else {
+      body = (
+        <>
+          <p className={styles.body}>
+            {result?.identified_address
+              ? "Confirmed -- the highlighted probe moved."
+              : testRunning
+                ? `Warm the ${probePhase} probe in your hand and watch for a 3°F change…`
+                : "No movement was seen -- warm the probe and try again."}
+          </p>
+          <div className={styles.probeGrid}>
+            {addresses.map((addr) => {
+              const reading = result?.current_f?.[addr] ?? null;
+              const baseline = result?.baseline_f?.[addr] ?? null;
+              const readable = result?.readable?.[addr] ?? false;
+              const delta = reading != null && baseline != null ? reading - baseline : null;
+              const moved = result?.identified_address === addr;
+              return (
+                <div key={addr} className={`${styles.probeRow} ${moved ? styles.probeRowMoved : ""}`}>
+                  <span className={styles.probeReadoutLabel}>{addr}</span>
+                  <span className={styles.probeReadoutValue}>
+                    {readable && reading != null ? `${reading.toFixed(1)}°F` : "not currently reading"}
+                  </span>
+                  {delta != null && <span className={styles.probeDelta}>{delta >= 0 ? "+" : ""}{delta.toFixed(1)}°F</span>}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      );
+      if (result?.identified_address) {
+        showNext = true;
+        nextLabel = "Continue";
+        onNext = () => {
+          const addr = result.identified_address as string;
+          if (probePhase === "chamber") {
+            setDevicePicks((p) => ({ ...p, chamberProbe: { address: addr, pin: pinFor(addr) } }));
+            setTestId(undefined); // let the beer-phase effect start its own fresh test
+            setProbePhase("beer");
+          } else {
+            setDevicePicks((p) => ({ ...p, beerProbe: { address: addr, pin: pinFor(addr) } }));
+            goTo("deviceCoolSweep");
+          }
+        };
+      } else if (!testRunning) {
+        showNext = true;
+        nextLabel = "Try again";
+        onNext = () => runIdentifyOnewire(probePhase === "beer" && devicePicks.chamberProbe ? [devicePicks.chamberProbe.address] : []);
+      }
+    }
+    // Skip button for the beer pass only -- a chamber-only rig is valid,
+    // and a detected-but-unwanted second sensor shouldn't force a beer
+    // mapping the user doesn't want.
+    if (probePhase === "beer" && !testRunning) {
+      body = (
+        <>
+          {body}
+          <Button variant="ghost" onClick={() => { setDevicePicks((p) => ({ ...p, beerProbe: null })); goTo("deviceCoolSweep"); }}>
+            No beer probe
+          </Button>
+        </>
+      );
+    }
+  } else if (stage === "deviceNoProbe") {
+    subtitle = "No OneWire temperature sensor was detected at all.";
+    body = (
+      <p className={styles.body}>
+        A chamber probe is required -- check that a OneWire sensor is actually wired to this controller, then try
+        again.
+      </p>
+    );
+    showNext = true;
+    nextLabel = "Try again";
+    onNext = () => { setDeviceList(undefined); setProbePhase("chamber"); goTo("deviceProbeId"); };
+  } else if (stage === "deviceCoolSweep" || stage === "deviceHeatSweep") {
+    const fn: "cool" | "heat" = stage === "deviceCoolSweep" ? "cool" : "heat";
+    const candidates = buildCandidateList(fn);
+    const candidate = candidates[sweepCandidateIndex];
+    const result = testStatus.data?.result as SweepRelayResult | null | undefined;
+    const exhausted = deviceList !== undefined && sweepCandidateIndex >= candidates.length;
+
+    subtitle =
+      fn === "cool"
+        ? "Finding which pin drives cooling."
+        : "Optional -- a heater makes cold-garage ferments possible, but a cooling-only rig is valid.";
+
+    if (fn === "heat" && !heatSweepStarted) {
+      // Upfront skip, before ever starting a live test -- mirrors the
+      // retired heaterTest stage's own "yes/no/run the test" choice.
+      body = (
+        <>
+          <p className={styles.body}>
+            {device.name} always manages its own heating relay internally. The Krauken can push a real setpoint and
+            watch the pin sweep to find it -- real firmware anti-short-cycle protection means the first candidate
+            can take several minutes.
+          </p>
+          <div className={styles.choiceGrid}>
+            {choice("Test for a heater", "Sweep the remaining pins for one that engages.", () => setHeatSweepStarted(true))}
+            {choice("No heater", "Cooling-only rig -- heating stays unfilled.", () => {
+              setDevicePicks((p) => ({ ...p, heat: null }));
+              goTo("deviceFinalizing");
+            })}
+          </div>
+        </>
+      );
+    } else if (deviceList === undefined || (candidate === undefined && !exhausted)) {
+      body = <p className={styles.body}>Reading the controller's currently-wired pins…</p>;
+    } else if (exhausted) {
+      // The actual transition happens in the useEffect below (state
+      // updates belong there, not during render) -- this is just the
+      // brief frame in between.
+      body = <p className={styles.body}>No pin engaged {fn === "cool" ? "cooling" : "heating"} across every candidate.</p>;
+    } else if (testId === undefined || (result === undefined && testRunning === false && !testDone)) {
+      body = <p className={styles.body}>Starting the live test on pin {candidate.pin}…</p>;
+    } else if (result?.outcome === "waiting" || (testRunning && result === undefined)) {
+      body = (
+        <>
+          <p className={styles.body}>
+            Forced the target to {result?.forced_target_f?.toFixed(1) ?? "…"}°F (chamber was{" "}
+            {result?.baseline_f?.toFixed(1) ?? "…"}°F) on pin {candidate.pin}. Waiting for the compressor-protection
+            timer to clear -- no countdown is available, but this is normal.
+          </p>
+          <div className={styles.choiceGrid}>
+            {choice("Skip -- try the next pin", "Move on without waiting further.", advanceSweepCandidate)}
+          </div>
+        </>
+      );
+    } else if (result?.outcome === "engaged") {
+      body = (
+        <>
+          <p className={styles.body}>
+            Pin {candidate.pin}'s state just switched to {fn === "cool" ? "cooling" : "heating"}. Chamber probe:{" "}
+            {result.current_f != null ? `${result.current_f.toFixed(1)}°F` : "reading…"}. Did the fridge or the
+            heater actually turn on?
+          </p>
+          <div className={styles.choiceGrid}>
+            {choice(
+              fn === "cool" ? "Yes, the fridge came on" : "Yes, the heater came on",
+              "This pin is confirmed.",
+              () => {
+                const winner = { pin: candidate.pin as number, invert: candidate.invert ?? 0 };
+                if (fn === "cool") {
+                  setDevicePicks((p) => ({ ...p, cool: winner }));
+                  setSweepCandidateIndex(0);
+                  goTo(devicePicks.heat === undefined ? "deviceHeatSweep" : "deviceFinalizing");
+                } else {
+                  setDevicePicks((p) => ({ ...p, heat: winner }));
+                  goTo("deviceFinalizing");
+                }
+              },
+            )}
+            {choice("Nothing happened", "Try reversed polarity on this same pin.", () => retrySweepCandidateWithReversedPolarity(candidate))}
+            {choice("Try the next pin", "This wasn't it.", advanceSweepCandidate)}
+          </div>
+        </>
+      );
+    } else {
+      // timeout
+      body = (
+        <>
+          <p className={styles.body}>
+            No {fn === "cool" ? "cooling" : "heating"} was seen on pin {candidate.pin} within the test window.
+          </p>
+          <div className={styles.choiceGrid}>
+            {choice("Try the next pin", "This wasn't it.", advanceSweepCandidate)}
+            {choice("Try reversed polarity", "Retest this same pin with the opposite relay polarity.", () =>
+              retrySweepCandidateWithReversedPolarity(candidate),
+            )}
+          </div>
+        </>
+      );
+    }
+  } else if (stage === "deviceNoCool") {
+    subtitle = "Cooling is required -- no pin engaged cooling across every candidate.";
+    body = (
+      <p className={styles.body}>
+        Check that the fridge/compressor relay is actually wired to one of this controller's actuator terminals,
+        then try again.
+      </p>
+    );
+    showNext = true;
+    nextLabel = "Start over";
+    onNext = () => { setDeviceList(undefined); setSweepCandidateIndex(0); goTo("deviceCoolSweep"); };
+  } else if (stage === "deviceFinalizing") {
+    subtitle = "Pushing the final configuration.";
+    const result = testStatus.data?.result as FinalizeResult | null | undefined;
+
+    if (testId === undefined && !startTest.isPending) {
+      runFinalize({
+        chamber_probe: devicePicks.chamberProbe,
+        beer_probe: devicePicks.beerProbe,
+        cool: devicePicks.cool,
+        heat: devicePicks.heat,
+      });
+      body = <p className={styles.body}>Writing the configuration and resetting the controller…</p>;
+    } else if (testRunning || testId === undefined) {
+      body = <p className={styles.body}>Writing the configuration and resetting the controller…</p>;
+    } else if (testStatus.data?.state === "completed") {
+      body = <p className={styles.body}>Configuration pushed -- {result?.installed?.length ?? 0} devices installed.</p>;
+      showNext = true;
+      nextLabel = "Continue";
+      onNext = () => goTo("summary");
+    } else {
+      body = (
+        <>
+          <p className={styles.body}>Pushing the configuration failed: {testStatus.data?.error ?? "unknown error"}.</p>
+          <div className={styles.choiceGrid}>
+            {choice("Retry", "Try pushing the same configuration again.", () => {
+              setTestId(undefined);
+              runFinalize({
+                chamber_probe: devicePicks.chamberProbe,
+                beer_probe: devicePicks.beerProbe,
+                cool: devicePicks.cool,
+                heat: devicePicks.heat,
+              });
+            })}
+            {choice("Cancel setup", "Nothing further is written.", handleCancel)}
+          </div>
+        </>
+      );
+    }
   } else if (stage === "relayA") {
     subtitle = "Turn on the first outlet and watch what comes on.";
     if (testDone) {
@@ -387,6 +948,30 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
             </div>
           );
         })}
+        {devicePicks.chamberProbe && (
+          <div className={styles.summaryRow}>
+            <span>chamber probe</span>
+            <span>{devicePicks.chamberProbe.address}</span>
+          </div>
+        )}
+        {devicePicks.beerProbe && (
+          <div className={styles.summaryRow}>
+            <span>beer probe</span>
+            <span>{devicePicks.beerProbe.address}</span>
+          </div>
+        )}
+        {devicePicks.cool && (
+          <div className={styles.summaryRow}>
+            <span>cooling pin</span>
+            <span>pin {devicePicks.cool.pin}{devicePicks.cool.invert ? " (inverted)" : ""}</span>
+          </div>
+        )}
+        {devicePicks.heat && (
+          <div className={styles.summaryRow}>
+            <span>heating pin</span>
+            <span>pin {devicePicks.heat.pin}{devicePicks.heat.invert ? " (inverted)" : ""}</span>
+          </div>
+        )}
       </div>
     );
     showNext = true;

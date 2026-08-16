@@ -10,6 +10,8 @@ import {
   useSaveMapping,
   useScanStatus,
   useStartScan,
+  useStartTest,
+  useTestStatus,
 } from "../../api/queries";
 import type { DeviceResponse } from "../../api/types";
 import { ALL_ROLES, CHAMBER_BUNDLE, REQUIRED_ROLES, Role, resolve } from "../../hardware/resolve";
@@ -70,6 +72,20 @@ export function HardwareSetupView() {
   const [wizardDeviceId, setWizardDeviceId] = useState<string>();
   const [saveResult, setSaveResult] = useState<Awaited<ReturnType<typeof saveMapping.mutateAsync>>>();
   const [saveError, setSaveError] = useState<string>();
+
+  // Standalone post-setup diagnostic for an already-configured firmware-
+  // managed heater (BrewPi's confirm_heater) -- kept narrow and separate
+  // from the guided wizard on purpose: the wizard now discovers and
+  // installs the heat pin itself (device_config.py's sweep_relay), so
+  // confirm_heater's only remaining job is "did my already-configured
+  // heater stop responding," not configuring one. Only one can run at a
+  // time (matches the daemon's own one-test-per-device_id rule), so a
+  // single id pair is enough regardless of how many rows could show the
+  // button.
+  const [heaterTestDeviceId, setHeaterTestDeviceId] = useState<string>();
+  const [heaterTestId, setHeaterTestId] = useState<string>();
+  const startHeaterTest = useStartTest();
+  const heaterTestStatus = useTestStatus(heaterTestDeviceId, heaterTestId);
 
   const scanStartedRef = useRef(false);
   useEffect(() => {
@@ -254,7 +270,27 @@ export function HardwareSetupView() {
           {deviceList.map((d) => {
             const availableTests = (d.metadata.available_tests as string[] | undefined) ?? [];
             const roles = rolesOfDevice(d.device_id);
-            const guided = d.is_bundle && availableTests.includes("fire_outlet");
+            // fire_outlet drives the full outlet-testing flow; a firmware-
+            // managed controller like BrewPi (finalize_device_config) has
+            // its own guided flow instead -- discovering and installing
+            // probe/relay mappings itself rather than assuming they're
+            // already set up. identify_probes alone is kept as a fallback
+            // condition for robustness, though no current platform
+            // advertises it without one of the other two.
+            const guided =
+              d.is_bundle &&
+              (availableTests.includes("fire_outlet") ||
+                availableTests.includes("finalize_device_config") ||
+                availableTests.includes("identify_probes"));
+            // confirm_heater itself is deliberately NOT in any platform's
+            // available_tests (it's a fixed backend action string, not a
+            // discovered capability) -- gating the standalone "Test
+            // heater" button on canConfigureDevices instead restricts it
+            // to firmware-managed devices specifically (BrewPi), where
+            // there's no outlet-based "Reconfigure" flow to re-verify a
+            // heater through; Manual/Simulator already have that via
+            // their own guided wizard.
+            const canConfigureDevices = availableTests.includes("finalize_device_config");
             const ownsCore = roles.includes(Role.CHAMBER_TEMP) && roles.includes(Role.CHAMBER_COOLING);
             const ownsHeating = roles.includes(Role.CHAMBER_HEATING);
             const ownsBeerTemp = roles.includes(Role.BEER_TEMP);
@@ -295,13 +331,31 @@ export function HardwareSetupView() {
                   return { label: ROLE_LABELS[r], on, onClick: () => assign(r, on ? null : d.device_id) };
                 });
 
+            const canFireOutlets = availableTests.includes("fire_outlet");
             const chipHint = guided
               ? ownsCore
-                ? "Set up during guided setup -- reconfigure to re-identify probes and outlets."
-                : "Not set up yet. Guided setup identifies the probes and outlets, and you opt into roles as you go."
+                ? canFireOutlets
+                  ? "Set up during guided setup -- reconfigure to re-identify probes and outlets."
+                  : "Set up during guided setup -- reconfigure to re-discover the probe and relay pins."
+                : canFireOutlets
+                  ? "Not set up yet. Guided setup identifies the probes and outlets, and you opt into roles as you go."
+                  : "Not set up yet. Guided setup identifies the probes and finds the cooling (and optional heating) pin itself."
               : roles.length === 0
                 ? "Detected, not in use."
                 : "Each role is picked independently.";
+
+            const isHeaterTestDevice = heaterTestDeviceId === d.device_id;
+            const heaterTestRunning = isHeaterTestDevice && heaterTestStatus.data?.state === "running";
+            const heaterTestResult = isHeaterTestDevice
+              ? (heaterTestStatus.data?.result as { confirmed: boolean } | null | undefined)
+              : undefined;
+            const heaterTestLabel = heaterTestRunning
+              ? "Testing heater…"
+              : isHeaterTestDevice && heaterTestStatus.data?.state === "completed"
+                ? heaterTestResult?.confirmed
+                  ? "Heater confirmed"
+                  : "No heat seen"
+                : "Test heater";
 
             return (
               <div key={d.device_id} className={`${styles.deviceRow} ${unhealthy ? styles.deviceRowBad : ""}`}>
@@ -353,6 +407,23 @@ export function HardwareSetupView() {
                   {guided && (
                     <Button variant={roles.length > 0 ? "ghost" : "secondary"} size="sm" onClick={() => setWizardDeviceId(d.device_id)}>
                       {roles.length > 0 ? "Reconfigure" : "Set up"}
+                    </Button>
+                  )}
+                  {canConfigureDevices && ownsHeating && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={heaterTestRunning || startHeaterTest.isPending}
+                      onClick={() => {
+                        setHeaterTestDeviceId(d.device_id);
+                        setHeaterTestId(undefined);
+                        startHeaterTest.mutate(
+                          { deviceId: d.device_id, action: "confirm_heater", params: {} },
+                          { onSuccess: (r) => setHeaterTestId(r.test_id) },
+                        );
+                      }}
+                    >
+                      {heaterTestLabel}
                     </Button>
                   )}
                 </div>

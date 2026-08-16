@@ -5,7 +5,8 @@ both resolve to the same ChamberDriver shape.
 """
 from __future__ import annotations
 
-from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from krauken.contracts.models import BeerReading, ChamberReading, DeviceCandidate, GravityReading
 
@@ -66,3 +67,33 @@ class PlatformDriver(Protocol):
     display_name: str
 
     async def discover(self, ctx: Mapping[str, Any]) -> Sequence[DeviceCandidate]: ...
+
+
+@dataclass(frozen=True)
+class PlatformTestRunner:
+    """One entry in a platforms/registry.py PlatformBinding.test_runners
+    table -- a platform-owned hardware-SETUP test action that doesn't fit
+    the three role-driver Protocols above (device CONFIGURATION, not
+    device operation). Lives here rather than in registry.py itself so
+    that a platform's own test-runner module (e.g.
+    platforms/brewpi/device_config.py) can import this type without a
+    circular import: registry.py already imports device_config.py to wire
+    up PLATFORM_BINDINGS, so device_config.py importing anything back from
+    registry.py would cycle; this module (contracts/interfaces.py) is
+    beneath both.
+
+    `run` is the async job body (ctx, job, device_id, params) -> None,
+    same shape every runner already has. `requires_no_active_fermentation`
+    is a declared flag, not something daemon/tests_runtime.py inspects the
+    action name to decide -- start_test() checks it SYNCHRONOUSLY, before
+    ever creating the task, the same way confirm_heater's own inline
+    check already works (an async check buried inside the task body would
+    only ever surface as an unhandled exception in a Task, never as
+    something the caller of start_test() can catch). False by default:
+    most platform-owned actions genuinely do need this (they mutate real
+    hardware config), but a deliberate safety-net action (BrewPi's
+    reset_brewpi) must NOT be gated by it, since gating would defeat
+    exactly the case it exists for."""
+
+    run: Callable[[Any, Any, str, dict], Any]
+    requires_no_active_fermentation: bool = False

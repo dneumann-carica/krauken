@@ -1,3 +1,58 @@
+krauken (0.1.6) stable; urgency=medium
+
+  * New: Krauken now takes over BrewPi's own classic Device
+    Configuration page entirely -- a guided wizard discovers which
+    OneWire probe is chamber/beer and which pin drives cooling (and
+    optional heating), then installs that mapping itself, so a user
+    never needs BrewPi's separate web UI again. Replaces the previous
+    confirm_heater/identify_probes-based setup flow, which silently
+    assumed that mapping already existed via BrewPi's own UI -- an
+    assumption confirmed false on the actual reference rig (a cooling
+    actuator installed, no heat device installed anywhere). Everything
+    below was verified against the real Arduino (firmware 0.2.13) and
+    brewpi-remix/brewpi-firmware-rmx's actual source, not guessed.
+  * New: platforms/brewpi/connection.py gains list_installed_devices/
+    list_available_devices/list_all_devices/install_device/
+    reset_and_reconnect, backed by the Arduino's 'd'/'h'/'U'/'R'
+    commands. Installing a device requires an explicit, currently-
+    unused slot number (0-15) -- confirmed via DeviceManager.cpp's
+    source and a live write against real hardware that -1 (or omitting
+    the slot) fails silently. A real firmware quirk found this session
+    (an unrelated log message sometimes interleaves mid-array in a
+    'd'/'h' response, splitting one JSON array across physical lines)
+    is now handled explicitly rather than silently failing to parse.
+  * New: platforms/brewpi/device_config.py's guided pin-sweep pays the
+    real anti-short-cycle wait (up to 10 minutes, confirmed via
+    TempControl.h's MIN_SWITCH_TIME/MIN_COOL_OFF_TIME_FRIDGE_CONSTANT)
+    only once per session -- once any relay has genuinely engaged,
+    reassigning the tested function to a different candidate pin
+    engages the new one within one control-loop tick, since the
+    firmware's own protection timers track the logical function, not
+    which pin backs it (confirmed via DeviceManager.cpp). A positively-
+    identified relay is deliberately left energized while the sweep
+    continues for the other function -- the protection timers guard
+    against rapid cycling, not continuous running -- and the final
+    pushed configuration is followed by a real hardware reset, which
+    deterministically forces every pin to a safe level via the
+    firmware's own actuator-construction ordering.
+  * New: platforms/registry.py's PlatformBinding gains a test_runners
+    table (via the new PlatformTestRunner in contracts/interfaces.py)
+    so a platform can own hardware-configuration test actions that
+    don't fit the existing ChamberDriver/BeerTempSource/GravitySource
+    Protocols, without teaching daemon/tests_runtime.py any
+    platform-specific knowledge. confirm_heater/identify_probes/
+    fire_outlet are unchanged -- they were already fully generic.
+  * Fix: api/schemas.py's TestStartRequest.action was missing
+    "confirm_heater" entirely -- a real API call to start it was
+    rejected before ever reaching the daemon. Also adds the five new
+    device-configuration actions.
+  * Kept: confirm_heater survives as a standalone, narrower diagnostic
+    (HardwareSetupView's "Test heater" button, shown once heating is
+    already mapped) for "did my already-configured heater stop
+    responding" re-verification -- it no longer drives initial setup.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 16 Aug 2026 07:52:44 -0400
+
 krauken (0.1.5) stable; urgency=high
 
   * Fix: platforms/simulator/plant.py's gravity_at() raised

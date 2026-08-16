@@ -142,7 +142,19 @@ export interface MappingSaveResponse {
   warnings: MappingIssue[];
 }
 
-export type TestAction = "fire_outlet" | "identify_probes" | "live_read";
+export type TestAction =
+  | "fire_outlet"
+  | "identify_probes"
+  | "live_read"
+  | "confirm_heater"
+  // BrewPi's device-configuration wizard (platforms/brewpi/device_config.py) --
+  // Krauken takes over BrewPi's own classic Device Configuration page
+  // entirely, so a user never needs it.
+  | "brewpi_devices"
+  | "identify_onewire_probes"
+  | "sweep_relay"
+  | "finalize_device_config"
+  | "reset_brewpi";
 
 export interface TestResponse {
   test_id: string;

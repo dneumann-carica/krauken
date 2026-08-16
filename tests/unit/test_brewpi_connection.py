@@ -18,17 +18,22 @@ from krauken.platforms.brewpi.live import BrewPiBeerTempSource, BrewPiChamberDri
 
 
 class FakeSerial:
-    """Maps a written command's leading character to a canned response
-    line, queued for the NEXT readline() call -- mirrors real BrewPi
+    """Maps a written command's leading character to a canned response,
+    queued for the NEXT readline() call(s) -- mirrors real BrewPi
     firmware's behavior closely enough for this driver's own retry loop
     (write, then poll readline() until a matching line shows up) without
     needing to simulate real serial timing at all: every canned response
     is available immediately, so tests never actually wait out
     QUERY_RETRY_INTERVAL_S. `responses={}` (or a command with no entry)
     means "never answers" -- readline() just returns b"" forever, letting
-    a test exercise the real retry-then-give-up path."""
+    a test exercise the real retry-then-give-up path. A response value may
+    be a single `bytes` line (existing convention) or a `list[bytes]` of
+    several lines queued in order -- the latter is what lets a test
+    reproduce the real firmware's confirmed behavior of splitting a 'd'/'h'
+    device-list response across multiple physical lines when a log
+    message gets interleaved mid-array."""
 
-    def __init__(self, responses: dict[str, bytes]):
+    def __init__(self, responses: dict[str, bytes | list[bytes]]):
         self.responses = responses
         self.written: list[bytes] = []
         self._pending: list[bytes] = []
@@ -38,7 +43,11 @@ class FakeSerial:
         self.written.append(data)
         command = data.decode("ascii").strip()[:1]
         if command in self.responses:
-            self._pending.append(self.responses[command])
+            value = self.responses[command]
+            if isinstance(value, list):
+                self._pending.extend(value)
+            else:
+                self._pending.append(value)
 
     def readline(self) -> bytes:
         if self._pending:
@@ -190,3 +199,115 @@ async def test_identify_and_connect_uses_the_version_query_and_caches_it():
     async with conn._lock:
         info = await conn._query_locked("n", "N")
     assert info == {"v": "0.2.13", "n": "da7e14a9", "s": 2, "y": 0, "b": "s", "l": "3"}
+
+
+# --- Device-configuration commands (d/h/U/R) -- confirmed 2026-08-15 both
+# via reading brewpi-remix/brewpi-firmware-rmx's real firmware source and
+# against the real rig; see plans/jiggly-bubbling-popcorn.md for the full
+# session. ---
+
+REAL_D_RESPONSE = (
+    b'd:[{"i":1,"t":1,"c":1,"b":0,"f":5,"h":2,"d":0,"p":18,"v": 76.549,'
+    b'"a":"28FFCDAB94160574","j": 0.000},{"i":3,"t":3,"c":1,"b":0,"f":3,'
+    b'"h":1,"d":0,"p":5,"v":0,"x":1}]\r\n'
+)
+REAL_H_RESPONSE = (
+    b'h:[{"i":-1,"t":0,"c":1,"b":0,"f":0,"h":1,"d":0,"p":2,"x":1},'
+    b'{"i":-1,"t":0,"c":1,"b":0,"f":0,"h":1,"d":0,"p":6,"x":1},'
+    b'{"i":-1,"t":0,"c":1,"b":0,"f":0,"h":1,"d":0,"p":19,"x":1}]\r\n'
+)
+# The confirmed-real interleaved-log-message shape: a firmware warning
+# splits one logical JSON array across two physical lines.
+REAL_H_RESPONSE_WITH_INTERLEAVED_LOG = [
+    b'h:[D:{"logType":"W","logID":2,"V":[18,"28FFBA8594160473"]}\r\n',
+    b'{"i":-1,"t":0,"c":1,"b":0,"f":0,"h":2,"d":0,"p":18,"v":null,'
+    b'"a":"28FFBA8594160473","j": 0.000},{"i":-1,"t":0,"c":1,"b":0,"f":0,'
+    b'"h":1,"d":0,"p":2,"x":1}]\r\n',
+]
+
+
+async def test_list_installed_devices_parses_the_real_captured_response():
+    conn = _connected({"d": REAL_D_RESPONSE})
+    devices = await conn.list_installed_devices()
+    assert [d.slot for d in devices] == [1, 3]
+    assert devices[0].address == "28FFCDAB94160574"
+    assert devices[0].function == 5  # DEVICE_FUNCTION_CHAMBER_TEMP
+    assert devices[0].value == 76.549
+    assert devices[1].pin == 5
+    assert devices[1].invert == 1
+
+
+async def test_list_available_devices_parses_the_real_captured_response():
+    conn = _connected({"h": REAL_H_RESPONSE})
+    devices = await conn.list_available_devices()
+    assert [d.slot for d in devices] == [-1, -1, -1]
+    assert [d.pin for d in devices] == [2, 6, 19]
+
+
+async def test_list_available_devices_survives_an_interleaved_log_message():
+    # This is the real, confirmed firmware behavior this session found --
+    # not a hypothetical: a log message split a device-list response
+    # across two physical lines. Without _query_device_list_locked's
+    # log-stripping/accumulation, this would fail to parse entirely.
+    conn = _connected({"h": REAL_H_RESPONSE_WITH_INTERLEAVED_LOG})
+    devices = await conn.list_available_devices()
+    assert len(devices) == 2
+    assert devices[0].address == "28FFBA8594160473"
+    assert devices[0].value is None  # the confirmed-flaky probe reads null
+    assert devices[1].pin == 2
+
+
+async def test_list_all_devices_merges_installed_and_available():
+    conn = _connected({"d": REAL_D_RESPONSE, "h": REAL_H_RESPONSE})
+    devices = await conn.list_all_devices()
+    assert len(devices) == 5
+    assert [d.slot for d in devices] == [1, 3, -1, -1, -1]
+
+
+async def test_list_installed_devices_returns_empty_when_disconnected():
+    conn = BrewPiConnection(clock=SimulatorClock())
+    assert await conn.list_installed_devices() == []
+
+
+async def test_install_device_sends_the_confirmed_write_shape():
+    from krauken.platforms.brewpi.device_config import BrewPiDevice
+
+    conn = _connected({})
+    device = BrewPiDevice(slot=0, chamber=1, beer=0, function=1, hardware=1, pin=2, invert=0)
+    await conn.install_device(device)
+    written = conn._serial.written[-1].decode("ascii")
+    assert written.startswith("U")
+    import json
+
+    assert json.loads(written[1:].strip()) == {"i": 0, "c": 1, "b": 0, "f": 1, "h": 1, "d": 0, "p": 2, "x": 0}
+
+
+async def test_install_device_omits_t_and_v_fields():
+    # Confirmed via DeviceManager.cpp's DeviceDefinition struct: "t" isn't
+    # part of it at all (read-side only), and "v" is live telemetry, never
+    # echoed back on a write.
+    from krauken.platforms.brewpi.device_config import BrewPiDevice
+
+    conn = _connected({})
+    device = BrewPiDevice(slot=0, category=3, function=1, hardware=1, pin=2, value=42.0)
+    await conn.install_device(device)
+    import json
+
+    written = conn._serial.written[-1].decode("ascii")
+    body = json.loads(written[1:].strip())
+    assert "t" not in body
+    assert "v" not in body
+
+
+async def test_reset_and_reconnect_sends_r_then_reidentifies():
+    conn = _connected({"n": REAL_N_RESPONSE})
+    result = await conn.reset_and_reconnect()
+    assert conn._serial.written[0] == b"R\n"
+    assert result is True
+    assert conn.version_info == {"v": "0.2.13", "n": "da7e14a9", "s": 2, "y": 0, "b": "s", "l": "3"}
+
+
+async def test_reset_and_reconnect_is_a_safe_no_op_when_disconnected():
+    conn = BrewPiConnection(clock=SimulatorClock())
+    result = await conn.reset_and_reconnect()
+    assert result is False

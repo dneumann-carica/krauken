@@ -49,13 +49,21 @@ async def test_discover_adds_beer_temp_capability_when_a_second_probe_is_wired()
     assert Role.BEER_TEMP in candidates[0].capabilities
 
 
-async def test_discover_offers_identify_probes_with_just_the_fridge_probe_on_a_chamber_only_rig():
+async def test_discover_offers_the_device_config_wizard_actions_with_just_the_fridge_probe_on_a_chamber_only_rig():
+    # identify_probes/confirm_heater are superseded as SETUP mechanisms by
+    # the device-configuration wizard (platforms/brewpi/device_config.py) --
+    # both assumed a probe/pin role mapping already existed via BrewPi's
+    # own classic web UI, which this session confirmed is often untrue.
     from krauken.platforms.brewpi.live import FRIDGE_PROBE_ADDRESS
 
     platform = BrewPiPlatform(_already_identified_connection())
     candidates = await platform.discover({})
     c = candidates[0]
-    assert "identify_probes" in c.available_tests
+    assert "identify_probes" not in c.available_tests
+    assert "confirm_heater" not in c.available_tests
+    assert "fire_outlet" not in c.available_tests
+    for action in ("brewpi_devices", "identify_onewire_probes", "sweep_relay", "finalize_device_config", "reset_brewpi"):
+        assert action in c.available_tests
     assert c.identity["probe_addresses"] == [FRIDGE_PROBE_ADDRESS]
 
 

@@ -21,11 +21,34 @@ a relaxed/unquoted-key JS-object-literal body, not strict JSON --
 BrewPi Remix's own brewpi.py sends in production against this same
 firmware, copied rather than guessed.
 
+Device-configuration commands (verified 2026-08-15 against the same real
+rig, plus reading brewpi-remix/brewpi-firmware-rmx's actual firmware
+source -- see plans/jiggly-bubbling-popcorn.md for the full session):
+`d{}` -> installed devices only (each has a real "i" slot index); `d{r:1}`
+-> same, plus a live "v" value per entry; `h{u:-1}` -> available/
+uninstalled devices only ("i":-1) -- a bare 'h' with no argument returns a
+different, undocumented mixed list, never use it; `h{u:-1,v:1}` -> same,
+with live "v" (null if currently unreadable -- confirmed real on this rig,
+not a timing fluke). `U<json>` installs/updates a device -- confirmed via
+DeviceManager.cpp's parseDeviceDefinition() that "i" must be an explicit,
+currently-unused slot number (0-15, MAX_DEVICE_SLOT=16); -1 or omitting
+"i" both fail its very first range check identically and SILENTLY (no
+response at all), which is exactly what two live attempts using those
+shapes produced before this was traced to source. A successful install
+does echo a `U:{...}` response line; this driver still re-queries
+list_installed_devices() to confirm rather than depending on parsing it.
+`R` triggers a real AVR watchdog hardware reset (confirmed via main.cpp's
+handleReset(): `wdt_enable(WDTO_60MS)` then spin) -- EEPROM (installed
+devices) survives, RAM does not. See platforms/brewpi/device_config.py
+for the device model and the actual configuration workflow built on top
+of these four methods.
+
 One asyncio.Lock serializes command/response pairs on the shared serial
 line -- without it, a control-tick read_chamber() racing a discover()
 identify call (or a future concurrent set_target()) could send two
 commands before either response arrives, with no way to tell which
-response belongs to which request.
+response belongs to which request. The four new methods below share this
+same lock/query pattern.
 """
 from __future__ import annotations
 
@@ -34,6 +57,7 @@ import contextlib
 import glob
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +65,7 @@ from typing import Any
 from krauken.contracts.clock import Clock
 from krauken.contracts.errors import PlatformUnavailable
 from krauken.platforms.base import requires_optional
+from krauken.platforms.brewpi.device_config import BrewPiDevice
 
 log = logging.getLogger("krauken.platforms.brewpi")
 
@@ -58,6 +83,16 @@ BOOT_DELAY_S = 4.0
 # on BrewPi alone.
 QUERY_RETRIES = 4
 QUERY_RETRY_INTERVAL_S = 0.5
+
+# Confirmed real on the actual rig, not a parsing bug in this driver: the
+# firmware sometimes interleaves an unrelated log message (a bare
+# `D:{...}` fragment) into the MIDDLE of a 'd'/'h' device-list response,
+# splitting one logical JSON array across physical lines, e.g.
+# `d:[D:{"logType":"E","logID":10,"V":[10]}` followed by a second line
+# continuing the array. Stripped out before parsing by
+# _query_device_list_locked(); log payloads observed so far are flat
+# (no nested braces), so a non-greedy single-level match is sufficient.
+_LOG_FRAGMENT_RE = re.compile(r"D:\{[^{}]*\}")
 
 # State codes from the classic BrewPi Arduino firmware (brewpi-firmware's
 # TemperatureControl.h) -- only naming what read_chamber()'s ChamberMode
@@ -189,6 +224,76 @@ class BrewPiConnection:
             except Exception:  # noqa: BLE001 -- best-effort; next read_temps() surfaces UNREACHABLE
                 log.warning("failed to write set_fridge_target(%r) to BrewPi", temp_f)
 
+    async def list_installed_devices(self, *, with_values: bool = True) -> list[BrewPiDevice]:
+        """`d{r:1}` (or `d{}` if with_values=False) -- installed devices
+        only (each has a real "i" slot index)."""
+        command = "d{r:1}" if with_values else "d{}"
+        async with self._lock:
+            data = await self._query_device_list_locked(command, "d")
+        return [BrewPiDevice.from_json(raw) for raw in (data or [])]
+
+    async def list_available_devices(self, *, with_values: bool = True) -> list[BrewPiDevice]:
+        """ALWAYS the explicit `h{u:-1,v:1}` / `h{u:-1}` form -- never a
+        bare 'h' (confirmed to return a different, undocumented mixed
+        list -- see module docstring)."""
+        command = "h{u:-1,v:1}" if with_values else "h{u:-1}"
+        async with self._lock:
+            data = await self._query_device_list_locked(command, "h")
+        return [BrewPiDevice.from_json(raw) for raw in (data or [])]
+
+    async def list_all_devices(self, *, with_values: bool = True) -> list[BrewPiDevice]:
+        """installed + available, concatenated. The ONLY method any caller
+        above this layer should use to build a candidate list -- using
+        either list alone is exactly the bug found this session (an
+        already-installed device becomes invisible to anything that only
+        asks 'h' or only asks 'd')."""
+        installed = await self.list_installed_devices(with_values=with_values)
+        available = await self.list_available_devices(with_values=with_values)
+        return installed + available
+
+    async def install_device(self, device: BrewPiDevice) -> None:
+        """`U<json>` -- fire-and-forget write, same convention as
+        set_fridge_target: brewpi.py's own handler proxies this straight
+        through with zero validation, and a rejected write produces no
+        response at all (confirmed via source -- see module docstring), so
+        there's nothing useful to await here. Caller re-queries
+        list_installed_devices() to confirm the install actually took."""
+        body = "U" + json.dumps(device.to_wire_json())
+        async with self._lock:
+            if self._serial is None:
+                return
+            try:
+                await asyncio.to_thread(self._serial.write, f"{body}\n".encode("ascii"))
+            except Exception:  # noqa: BLE001 -- best-effort; caller's re-query surfaces the real outcome
+                log.warning("failed to write install_device(%r) to BrewPi", device)
+
+    async def reset_and_reconnect(self) -> bool:
+        """`R` -- a real AVR watchdog hardware reset (confirmed via
+        main.cpp's handleReset()), not a soft idle. EEPROM (installed
+        devices) survives; RAM does not. Writes 'R\\n', waits
+        BOOT_DELAY_S the same as a fresh connection would, then re-runs
+        identify_and_connect() against the same port -- a watchdog reset
+        doesn't re-enumerate the USB device the way a real unplug/replug
+        would, so the existing port path is still correct. Returns
+        whatever identify_and_connect() returns.
+
+        Uses self.clock.sleep(), not a raw asyncio.sleep -- unlike
+        identify_and_connect()'s own boot delay (deliberately real-time
+        always, since a fresh connection can happen before any platform
+        selection is settled), this method only ever runs against an
+        already-selected BrewPi connection, whose clock is already
+        whatever the daemon chose for the whole session (ProductionClock
+        for any real hardware mapping, SimulatorClock only in tests) --
+        so this is free to respect it, keeping unit tests fast."""
+        async with self._lock:
+            if self._serial is not None:
+                try:
+                    await asyncio.to_thread(self._serial.write, b"R\n")
+                except Exception:  # noqa: BLE001 -- best-effort; identify_and_connect() below re-verifies
+                    log.warning("failed to write reset command to BrewPi")
+        await self.clock.sleep(BOOT_DELAY_S)
+        return await self.identify_and_connect()
+
     async def start(self) -> None:
         """Backgrounds identify_and_connect() -- it can take several real
         seconds (the Arduino's DTR-triggered boot delay, times however many
@@ -234,11 +339,15 @@ class BrewPiConnection:
         self._serial = None
         self.port = None
 
-    async def _query_locked(self, command: str, expect_prefix: str) -> dict | None:
+    async def _query_locked(self, command: str, expect_prefix: str) -> Any | None:
         """Caller must hold self._lock. Sends one command, retrying
         QUERY_RETRIES times, until a line starting with `expect_prefix +
         ':'` arrives; returns its JSON payload, or None if nothing
-        matched within the retry budget or the connection isn't open."""
+        matched within the retry budget or the connection isn't open.
+        Fine for 't'/'n'/'s'/'c' -- confirmed those always arrive as one
+        complete, self-contained line. NOT used for 'd'/'h' (see
+        _query_device_list_locked): those can arrive split across
+        multiple physical lines with a log message interleaved mid-array."""
         if self._serial is None:
             return None
         for _ in range(QUERY_RETRIES):
@@ -261,4 +370,44 @@ class BrewPiConnection:
                     except json.JSONDecodeError:
                         log.warning("unparseable BrewPi response: %r", text)
                         return None
+        return None
+
+    async def _query_device_list_locked(self, command: str, expect_prefix: str) -> list[Any] | None:
+        """Caller must hold self._lock. Like _query_locked, but for 'd'/'h'
+        responses specifically: accumulates lines starting from the one
+        with the matching prefix (stripping any embedded log fragments --
+        see _LOG_FRAGMENT_RE) until the accumulated text parses as a JSON
+        array, or the retry budget is exhausted."""
+        if self._serial is None:
+            return None
+        for _ in range(QUERY_RETRIES):
+            try:
+                await asyncio.to_thread(self._serial.write, f"{command}\n".encode("ascii"))
+            except Exception:  # noqa: BLE001 -- a write failure means the port is gone
+                return None
+            deadline = time.monotonic() + QUERY_RETRY_INTERVAL_S
+            accumulated = ""
+            collecting = False
+            while time.monotonic() < deadline:
+                try:
+                    line = await asyncio.to_thread(self._serial.readline)
+                except Exception:  # noqa: BLE001
+                    return None
+                if not line:
+                    continue
+                text = line.decode("ascii", errors="replace").strip()
+                if not collecting:
+                    if not text.startswith(f"{expect_prefix}:"):
+                        continue
+                    text = text[len(expect_prefix) + 1 :]
+                    collecting = True
+                accumulated += _LOG_FRAGMENT_RE.sub("", text)
+                try:
+                    parsed = json.loads(accumulated)
+                except json.JSONDecodeError:
+                    continue  # incomplete so far (or a stray log fragment) -- keep reading
+                if isinstance(parsed, list):
+                    return parsed
+                log.warning("unexpected non-list BrewPi device-list response: %r", accumulated)
+                return None
         return None
