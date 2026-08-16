@@ -127,85 +127,117 @@ def _patch_active_fermentation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tests_runtime.queries, "active_fermentation", lambda conn: {"id": 1})
 
 
-# --- sweep_relay ---
+@pytest.fixture(autouse=True)
+def _isolated_baseline_path(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Every test in this file runs against a tmp_path-based baseline
+    snapshot file, never the real /var/lib/krauken path -- begin_device_config/
+    reset_brewpi/finalize_device_config all read or write it."""
+    monkeypatch.setattr(device_config, "BASELINE_SNAPSHOT_PATH", tmp_path / "brewpi-wizard-baseline.json")
 
 
-async def test_sweep_relay_reports_engaged_once_state_enters_the_engaged_set(monkeypatch: pytest.MonkeyPatch):
+# --- identify_relay_pin ---
+
+
+async def test_identify_relay_pin_reports_engaged_once_state_enters_the_engaged_set(monkeypatch: pytest.MonkeyPatch):
     _patch_no_active_fermentation(monkeypatch)
-    conn = _FakeBrewPiConnection(state_sequence=[0, 0, 4])  # idle, idle, COOLING
+    conn = _FakeBrewPiConnection(state_sequence=[0, 0, 3])  # idle, idle, HEATING
     ctx = _FakeCtx(conn)
 
-    result = tests_runtime.start_test(ctx, DEVICE_ID, "sweep_relay", {"function": "cool", "candidate": {"pin": 6, "invert": 1}, "window_s": 30.0})
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 6, "invert": 1}, "window_s": 30.0})
     job = ctx.jobs[result["test_id"]]
     await job._task
 
     assert job.state == "completed"
     assert job.result["outcome"] == "engaged"
-    # Installed exactly once, on the requested pin with the requested invert.
+    # Installed exactly once, on the requested pin with the requested
+    # invert, always as CHAMBER_HEAT -- no "function" param exists anymore
+    # (see REVISED DESIGN): the human observer, not this action, decides
+    # whether the pin turns out to be the heater or the fridge.
     assert len(conn.install_calls) == 1
     assert conn.install_calls[0].pin == 6
     assert conn.install_calls[0].invert == 1
-    assert conn.install_calls[0].function == device_config.DEVICE_FUNCTION_CHAMBER_COOL
-    # A real setpoint was forced -- below baseline, for a cool test.
-    assert conn.set_target_calls[-1] < conn.fridge_temp_f
-    # Deliberately no revert -- the candidate stays installed/energized.
+    assert conn.install_calls[0].function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT
+    # ALWAYS forced above baseline -- this action must never command a
+    # target below the current chamber temp (a cooling demand).
+    assert conn.set_target_calls[-1] > conn.fridge_temp_f
+    # Deliberately no revert at the end of a successful run -- the NEXT
+    # call (same pin reversed, or the next candidate) uninstalls it as
+    # its own first step instead.
     assert conn.reset_calls == 0
 
 
-async def test_sweep_relay_reports_waiting_before_engaging(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_relay_pin_reports_waiting_before_engaging(monkeypatch: pytest.MonkeyPatch):
     _patch_no_active_fermentation(monkeypatch)
     conn = _FakeBrewPiConnection(state_sequence=[6, 6, 3])  # WAITING_TO_HEAT, WAITING_TO_HEAT, HEATING
     ctx = _FakeCtx(conn)
 
-    result = tests_runtime.start_test(ctx, DEVICE_ID, "sweep_relay", {"function": "heat", "candidate": {"pin": 19}, "window_s": 30.0})
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 19}, "window_s": 30.0})
     job = ctx.jobs[result["test_id"]]
     await job._task
 
     assert job.state == "completed"
     assert job.result["outcome"] == "engaged"
-    assert conn.set_target_calls[-1] > conn.fridge_temp_f  # forced above baseline, for a heat test
+    assert conn.set_target_calls[-1] > conn.fridge_temp_f
 
 
-async def test_sweep_relay_times_out_cleanly_when_never_engaged(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_relay_pin_times_out_cleanly_when_never_engaged(monkeypatch: pytest.MonkeyPatch):
     _patch_no_active_fermentation(monkeypatch)
     conn = _FakeBrewPiConnection(state_sequence=[0])  # never anything but idle
     ctx = _FakeCtx(conn)
 
-    result = tests_runtime.start_test(ctx, DEVICE_ID, "sweep_relay", {"function": "cool", "candidate": {"pin": 2}, "window_s": 6.0})
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 2}, "window_s": 6.0})
     job = ctx.jobs[result["test_id"]]
     await job._task
 
     assert job.state == "completed"
     assert job.result["outcome"] == "timeout"
-    # Still installed and left as-is -- no revert on timeout either.
+    # Still installed and left as-is -- the invariant is enforced on the
+    # NEXT call, not by reverting this one.
     assert len(conn.install_calls) == 1
     assert conn.reset_calls == 0
 
 
-async def test_sweep_relay_reuses_the_existing_slot_for_the_same_pin_and_function(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_relay_pin_never_leaves_two_simultaneous_chamber_heat_devices(monkeypatch: pytest.MonkeyPatch):
+    # The key invariant from the redesign: at most one device is ever
+    # installed with the CHAMBER_HEAT function at a time. Confirmed live
+    # this session that leaving several same-function candidates installed
+    # at once (the OLD sweep_relay's design) gets them all driven
+    # together, not just the intended one -- BrewPi does not enforce
+    # one-actuator-per-function on its own.
     _patch_no_active_fermentation(monkeypatch)
-    conn = _FakeBrewPiConnection(
-        installed=[BrewPiDevice(slot=3, function=device_config.DEVICE_FUNCTION_CHAMBER_COOL, hardware=1, pin=5, invert=1)],
-        state_sequence=[4],
-    )
+    conn = _FakeBrewPiConnection(state_sequence=[0])  # never engages -- times out on window_s=2.0's single iteration
     ctx = _FakeCtx(conn)
 
-    # Retry with reversed polarity on the SAME pin -- should land on the
-    # same slot (3), not consume a new one.
-    result = tests_runtime.start_test(ctx, DEVICE_ID, "sweep_relay", {"function": "cool", "candidate": {"pin": 5, "invert": 0}, "window_s": 30.0})
+    result1 = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 2, "invert": 0}, "window_s": 2.0})
+    await ctx.jobs[result1["test_id"]]._task
+
+    conn._state_idx = 0  # reset so the second call also sees the same never-engages sequence
+    result2 = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 6, "invert": 0}, "window_s": 2.0})
+    await ctx.jobs[result2["test_id"]]._task
+
+    heat_devices = [d for d in conn.installed if d.function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT]
+    assert len(heat_devices) == 1
+    assert heat_devices[0].pin == 6
+
+
+async def test_identify_relay_pin_reuses_the_reserved_scratch_slot(monkeypatch: pytest.MonkeyPatch):
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(state_sequence=[3])
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 5, "invert": 0}, "window_s": 30.0})
     job = ctx.jobs[result["test_id"]]
     await job._task
 
-    assert conn.install_calls[0].slot == 3
-    assert conn.install_calls[0].invert == 0  # the flipped polarity took effect
+    assert conn.install_calls[0].slot == device_config.RELAY_IDENTIFY_SLOT
 
 
-async def test_sweep_relay_fails_cleanly_when_the_chamber_probe_isnt_reading(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_relay_pin_fails_cleanly_when_the_chamber_probe_isnt_reading(monkeypatch: pytest.MonkeyPatch):
     _patch_no_active_fermentation(monkeypatch)
     conn = _FakeBrewPiConnection(fridge_temp_f=None)
     ctx = _FakeCtx(conn)
 
-    result = tests_runtime.start_test(ctx, DEVICE_ID, "sweep_relay", {"function": "cool", "candidate": {"pin": 2}, "window_s": 6.0})
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 2}, "window_s": 6.0})
     job = ctx.jobs[result["test_id"]]
     await job._task
 
@@ -213,14 +245,106 @@ async def test_sweep_relay_fails_cleanly_when_the_chamber_probe_isnt_reading(mon
     assert "chamber probe" in job.error
 
 
-async def test_sweep_relay_is_blocked_while_a_fermentation_is_active(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_relay_pin_is_blocked_while_a_fermentation_is_active(monkeypatch: pytest.MonkeyPatch):
     _patch_active_fermentation(monkeypatch)
     conn = _FakeBrewPiConnection()
     ctx = _FakeCtx(conn)
 
     with pytest.raises(FermentationAlreadyActive):
-        tests_runtime.start_test(ctx, DEVICE_ID, "sweep_relay", {"function": "cool", "candidate": {"pin": 2}})
+        tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 2}})
     assert conn.install_calls == []
+
+
+# --- install_probe ---
+
+
+async def test_install_probe_installs_the_requested_role(monkeypatch: pytest.MonkeyPatch):
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection()
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "install_probe", {"role": "chamber", "address": "AAA", "pin": 18})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    assert len(conn.install_calls) == 1
+    assert conn.install_calls[0].function == device_config.DEVICE_FUNCTION_CHAMBER_TEMP
+    assert conn.install_calls[0].address == "AAA"
+
+
+async def test_install_probe_reuses_the_existing_slot_for_the_same_function(monkeypatch: pytest.MonkeyPatch):
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(
+        installed=[BrewPiDevice(slot=4, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP, hardware=2, pin=18, address="OLD")],
+    )
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "install_probe", {"role": "chamber", "address": "NEW", "pin": 18})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert conn.install_calls[0].slot == 4
+    assert conn.install_calls[0].address == "NEW"
+
+
+async def test_install_probe_is_blocked_while_a_fermentation_is_active(monkeypatch: pytest.MonkeyPatch):
+    _patch_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection()
+    ctx = _FakeCtx(conn)
+
+    with pytest.raises(FermentationAlreadyActive):
+        tests_runtime.start_test(ctx, DEVICE_ID, "install_probe", {"role": "chamber", "address": "AAA"})
+    assert conn.install_calls == []
+
+
+# --- begin_device_config ---
+
+
+async def test_begin_device_config_snapshots_and_wipes_when_no_prior_baseline(monkeypatch: pytest.MonkeyPatch):
+    conn = _FakeBrewPiConnection(
+        installed=[
+            BrewPiDevice(slot=0, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP, hardware=2, pin=18, address="AAA"),
+            BrewPiDevice(slot=1, function=device_config.DEVICE_FUNCTION_CHAMBER_COOL, hardware=1, pin=5, invert=1),
+        ],
+    )
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "begin_device_config", {})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    assert sorted(job.result["wiped"]) == [0, 1]
+    assert all(d.function == device_config.DEVICE_FUNCTION_NONE for d in conn.installed if d.slot in (0, 1))
+    saved = device_config._read_baseline()
+    assert saved is not None
+    assert {d.slot for d in saved} == {0, 1}
+
+
+async def test_begin_device_config_self_heals_a_prior_incomplete_session_first(monkeypatch: pytest.MonkeyPatch):
+    # Simulate an abandoned prior session: a leftover baseline snapshot
+    # naming a device that isn't currently installed at all (the previous
+    # wizard run wiped it and never reached finalize or cancel).
+    leftover = [BrewPiDevice(slot=0, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP, hardware=2, pin=18, address="AAA")]
+    device_config._write_baseline(leftover)
+    conn = _FakeBrewPiConnection(installed=[])
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "begin_device_config", {})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    # The leftover device was reinstalled (self-heal) before the fresh
+    # snapshot/wipe -- confirmed via the reset that follows a restore.
+    assert conn.reset_calls == 1
+    reinstalls = [c for c in conn.install_calls if c.slot == 0 and c.function == device_config.DEVICE_FUNCTION_CHAMBER_TEMP]
+    assert len(reinstalls) == 1
+    # The new snapshot reflects the just-restored (then wiped) state.
+    final_snapshot = device_config._read_baseline()
+    assert final_snapshot is not None
+    assert {d.slot for d in final_snapshot} == {0}
 
 
 # --- finalize_device_config ---
@@ -296,6 +420,43 @@ async def test_finalize_device_config_is_blocked_while_a_fermentation_is_active(
     assert conn.reset_calls == 0
 
 
+async def test_finalize_device_config_clears_the_baseline_snapshot_on_success(monkeypatch: pytest.MonkeyPatch):
+    device_config._write_baseline(
+        [BrewPiDevice(slot=0, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP, hardware=2, pin=18, address="AAA")],
+    )
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection()
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "finalize_device_config", {"config": _FULL_CONFIG})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    # The wizard's new configuration is the new reality -- nothing left to
+    # revert to.
+    assert device_config._read_baseline() is None
+
+
+async def test_finalize_device_config_keeps_the_baseline_snapshot_when_an_install_fails(monkeypatch: pytest.MonkeyPatch):
+    device_config._write_baseline(
+        [BrewPiDevice(slot=0, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP, hardware=2, pin=18, address="AAA")],
+    )
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(raise_on_install_call=2)
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "finalize_device_config", {"config": _FULL_CONFIG})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "failed"
+    # A failed finalize must still be recoverable via reset_brewpi or the
+    # next begin_device_config self-heal -- never silently lose the
+    # pre-wizard state on top of failing.
+    assert device_config._read_baseline() is not None
+
+
 # --- reset_brewpi ---
 
 
@@ -310,6 +471,7 @@ async def test_reset_brewpi_completes_and_calls_reset(monkeypatch: pytest.Monkey
     assert job.state == "completed"
     assert job.result["reset"] is True
     assert conn.reset_calls == 1
+    assert conn.install_calls == []  # no baseline to restore -- plain reset
 
 
 async def test_reset_brewpi_is_not_gated_by_active_fermentation(monkeypatch: pytest.MonkeyPatch):
@@ -326,6 +488,25 @@ async def test_reset_brewpi_is_not_gated_by_active_fermentation(monkeypatch: pyt
 
     assert job.state == "completed"
     assert conn.reset_calls == 1
+
+
+async def test_reset_brewpi_restores_baseline_and_clears_the_file_when_one_exists(monkeypatch: pytest.MonkeyPatch):
+    device_config._write_baseline(
+        [BrewPiDevice(slot=1, function=device_config.DEVICE_FUNCTION_CHAMBER_COOL, hardware=1, pin=5, invert=1)],
+    )
+    conn = _FakeBrewPiConnection()
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "reset_brewpi", {})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    assert len(conn.install_calls) == 1
+    assert conn.install_calls[0].slot == 1
+    assert conn.reset_calls == 1
+    # A real "revert to the beginning state" -- not just a bare reset.
+    assert device_config._read_baseline() is None
 
 
 # --- identify_onewire_probes ---

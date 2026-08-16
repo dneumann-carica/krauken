@@ -22,25 +22,29 @@ type Stage =
   // web UI already did it (confirmed this session that assumption is often
   // false -- the real reference rig has cooling installed and no heat
   // device installed anywhere).
+  | "deviceBootstrap"
   | "deviceProbeId"
   | "deviceNoProbe"
-  | "deviceCoolSweep"
+  // Unified relay pin-identification sweep -- replaces the old two-pass
+  // deviceCoolSweep/deviceHeatSweep split. Always forces a heat demand and
+  // lets the human observer say what physically turned on (fridge/heater/
+  // nothing); confirmed live this session that testing cool and heat as
+  // separate passes left stray same-function candidates installed, which
+  // BrewPi drives together rather than enforcing one-actuator-per-function.
+  | "devicePinSweep"
   | "deviceNoCool"
-  | "deviceHeatSweep"
   | "deviceFinalizing";
 
 // Matches daemon/tests_runtime.py's FIRE_OUTLET_DURATION_S -- the real,
 // settled default, not a shortened dev-testing value.
 const FIRE_DURATION_S = 10;
 
-// DeviceFunction/DeviceHardware codes -- platforms/brewpi/device_config.py's
-// exact values, confirmed against the real firmware source this session.
-// Only the pin-hardware/actuator codes are needed here: identify_onewire_probes'
-// job result already only ever contains OneWire addresses (the backend does
-// its own hardware-type filtering), so this view never needs to filter by
-// hardware type itself for probes.
-const DEVICE_FUNCTION_CHAMBER_COOL = 3;
-const DEVICE_FUNCTION_CHAMBER_HEAT = 2;
+// DeviceHardware code -- platforms/brewpi/device_config.py's exact value,
+// confirmed against the real firmware source this session. identify_relay_pin
+// always assigns a candidate to CHAMBER_HEAT regardless of its eventual
+// role (see the REVISED DESIGN plan section), so no DeviceFunction
+// constant is needed here at all -- this view only ever needs to filter
+// candidates down to raw hardware pins.
 const DEVICE_HARDWARE_PIN = 1;
 
 const STEP_LABELS: Record<Stage, string> = {
@@ -52,11 +56,11 @@ const STEP_LABELS: Record<Stage, string> = {
   nocool: "Step 2b · no cooling",
   probes: "Step 3 of 3",
   summary: "Summary",
+  deviceBootstrap: "Preparing",
   deviceProbeId: "Step 1 of 3",
   deviceNoProbe: "Step 1 of 3 · no probe",
-  deviceCoolSweep: "Step 2 of 3",
+  devicePinSweep: "Step 2 of 3",
   deviceNoCool: "Step 2 of 3 · no cooling",
-  deviceHeatSweep: "Step 2 of 3",
   deviceFinalizing: "Finishing up",
 };
 
@@ -94,10 +98,16 @@ interface IdentifyOnewireResult {
   readable: Record<string, boolean>;
 }
 
-type SweepOutcome = "waiting" | "engaged" | "timeout";
+// begin_device_config's {"wiped": [...]} and install_probe's
+// {"installed": {...}} results are never read by this view -- both stages
+// only care whether the job reached "completed", not its payload -- so no
+// dedicated result interface exists for either (would be unused, same as
+// every other job.result shape that's genuinely only a completion signal).
 
-interface SweepRelayResult {
-  outcome: SweepOutcome;
+type RelayOutcome = "waiting" | "engaged" | "timeout";
+
+interface IdentifyRelayPinResult {
+  outcome: RelayOutcome;
   baseline_f: number;
   forced_target_f: number;
   current_f: number | null;
@@ -151,14 +161,30 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   // confirmed via real captured data) for the probe-identification
   // stage's config payload.
   const [deviceList, setDeviceList] = useState<RawBrewPiDevice[]>();
-  const [probePhase, setProbePhase] = useState<"chamber" | "beer">("chamber");
-  const [sweepCandidateIndex, setSweepCandidateIndex] = useState(0);
-  // Distinguishes "haven't decided to test for a heater yet" (show the
-  // upfront skip/test choice, never auto-start) from "decided, now
-  // testing candidate 0" -- sweepCandidateIndex alone can't carry this,
-  // since clicking "Test for a heater" doesn't necessarily change it away
-  // from its already-0 default.
-  const [heatSweepStarted, setHeatSweepStarted] = useState(false);
+  // "installingChamberProbe" is a brief, automatic sub-phase between
+  // confirming the chamber probe and starting the beer-probe identify --
+  // installs the chamber probe as CHAMBER_TEMP immediately (see
+  // runInstallProbe), rather than deferring every install to
+  // finalize_device_config. Fixes a real sequencing bug found this
+  // session: identify_relay_pin needs a live FridgeTemp reading to
+  // compute a baseline, and nothing was ever installed with that function
+  // until the very last wizard step, which runs after the relay sweep --
+  // so every sweep attempt failed regardless of what was actually wired.
+  const [probePhase, setProbePhase] = useState<"chamber" | "installingChamberProbe" | "beer">("chamber");
+  // devicePinSweep's per-candidate state: testedPins have had both
+  // polarities tried with nothing identified (excluded from the
+  // candidate list going forward, alongside whichever pins devicePicks
+  // already confirmed); polarityPhase tracks which polarity the *current*
+  // (first untested) candidate is on.
+  const [testedPins, setTestedPins] = useState<number[]>([]);
+  const [polarityPhase, setPolarityPhase] = useState<"normal" | "reversed">("normal");
+  // Once cooling is confirmed, heat is optional -- these two track the
+  // user's answer to "keep looking for a heater, or stop here?" (asked
+  // once, right after cooling's found) rather than auto-continuing to
+  // burn through every remaining candidate's real anti-short-cycle wait
+  // on hardware nobody has.
+  const [heatSweepConfirmed, setHeatSweepConfirmed] = useState(false);
+  const [heatDeclined, setHeatDeclined] = useState(false);
 
   const startTest = useStartTest();
   const cancelTest = useCancelTest();
@@ -225,8 +251,10 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     setTestId(undefined);
     setDeviceList(undefined);
     setProbePhase("chamber");
-    setSweepCandidateIndex(0);
-    setHeatSweepStarted(false);
+    setTestedPins([]);
+    setPolarityPhase("normal");
+    setHeatSweepConfirmed(false);
+    setHeatDeclined(false);
   }
 
   function goTo(next: Stage, nextPicks?: Picks) {
@@ -253,6 +281,13 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
 
   // --- BrewPi device-configuration helpers ---
 
+  function runBeginDeviceConfig() {
+    startTest.mutate(
+      { deviceId: device.device_id, action: "begin_device_config", params: {} },
+      { onSuccess: (r) => setTestId(r.test_id) },
+    );
+  }
+
   function runBrewPiDevices() {
     startTest.mutate(
       { deviceId: device.device_id, action: "brewpi_devices", params: {} },
@@ -268,14 +303,24 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     );
   }
 
-  function runSweepRelay(fn: "cool" | "heat", candidate: RawBrewPiDevice) {
+  function runInstallProbe(role: "chamber" | "beer", probe: ProbeIdentity) {
     setTestId(undefined);
     startTest.mutate(
-      {
-        deviceId: device.device_id,
-        action: "sweep_relay",
-        params: { function: fn, candidate: { pin: candidate.pin, invert: candidate.invert ?? 0 } },
-      },
+      { deviceId: device.device_id, action: "install_probe", params: { role, address: probe.address, pin: probe.pin } },
+      { onSuccess: (r) => setTestId(r.test_id) },
+    );
+  }
+
+  // One (pin, polarity) combination per call -- no "function" param.
+  // Forcing "heat" is the sole trigger used regardless of which physical
+  // role this pin turns out to have; the frontend asks the human what
+  // turned on. invert is passed explicitly by the caller (normal vs.
+  // reversed polarity are two separate calls, never a retry the backend
+  // decides on its own).
+  function runIdentifyRelayPin(candidate: RawBrewPiDevice, invert: number) {
+    setTestId(undefined);
+    startTest.mutate(
+      { deviceId: device.device_id, action: "identify_relay_pin", params: { candidate: { pin: candidate.pin, invert } } },
       { onSuccess: (r) => { localStartRef.current = Date.now(); setTestId(r.test_id); } },
     );
   }
@@ -308,10 +353,11 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   }
 
   // brewpi_devices completing populates deviceList and clears testId --
-  // the stage-specific effects below (identify_onewire_probes/sweep_relay)
-  // only start their own real test once deviceList is set, so clearing
-  // testId here is what lets them proceed with a fresh test_id rather than
-  // being blocked by this now-finished lookup still occupying it.
+  // the stage-specific effects below (identify_onewire_probes/
+  // identify_relay_pin) only start their own real test once deviceList is
+  // set, so clearing testId here is what lets them proceed with a fresh
+  // test_id rather than being blocked by this now-finished lookup still
+  // occupying it.
   useEffect(() => {
     if (testStatus.data?.kind === "brewpi_devices" && testStatus.data.state === "completed") {
       const result = testStatus.data.result as BrewPiDevicesResult | null;
@@ -319,6 +365,26 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       setTestId(undefined);
     }
   }, [testStatus.data]);
+
+  // deviceBootstrap: the wizard's very first device-config action --
+  // self-heals a prior incomplete session's baseline, snapshots the
+  // current clean state, and wipes every device to unassigned (see
+  // begin_device_config's own docstring). Auto-starts on entry, then
+  // auto-advances to deviceProbeId once complete.
+  useEffect(() => {
+    if (stage === "deviceBootstrap" && testId === undefined && !startTest.isPending) {
+      runBeginDeviceConfig();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, testId]);
+
+  useEffect(() => {
+    if (stage === "deviceBootstrap" && testStatus.data?.kind === "begin_device_config" && testStatus.data.state === "completed") {
+      setTestId(undefined);
+      goTo("deviceProbeId");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, testStatus.data]);
 
   // Auto-starts each device-config test the instant its stage is ready for
   // it -- matches the plan's "runs on entry" design (the user is expected
@@ -333,69 +399,114 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
 
   useEffect(() => {
     if (stage !== "deviceProbeId" || deviceList === undefined) return;
+    if (probePhase === "installingChamberProbe") return; // handled by its own effect below
     if (testId !== undefined || startTest.isPending) return;
     const exclude = probePhase === "beer" && devicePicks.chamberProbe ? [devicePicks.chamberProbe.address] : [];
     runIdentifyOnewire(exclude);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, deviceList, probePhase]);
 
-  function buildCandidateList(fn: "cool" | "heat"): RawBrewPiDevice[] {
-    const wantFunction = fn === "cool" ? DEVICE_FUNCTION_CHAMBER_COOL : DEVICE_FUNCTION_CHAMBER_HEAT;
-    const pins = (deviceList ?? []).filter((d) => d.hardware === DEVICE_HARDWARE_PIN);
-    // Already-installed-for-this-function pin first (free -- no wait if
-    // the firmware happens to already be holding it), then every other
-    // pin candidate, each tried at most once.
-    const already = pins.filter((d) => d.function === wantFunction);
-    const rest = pins.filter((d) => d.function !== wantFunction);
-    return [...already, ...rest];
+  // Installs the chamber probe as CHAMBER_TEMP the instant it's confirmed
+  // -- not deferred to finalize_device_config (see runInstallProbe's own
+  // comment; fixes a real sequencing bug found this session). Auto-starts,
+  // then auto-advances to the beer-probe identify once complete.
+  useEffect(() => {
+    if (stage !== "deviceProbeId" || probePhase !== "installingChamberProbe") return;
+    if (testId !== undefined || startTest.isPending) return;
+    if (!devicePicks.chamberProbe) return;
+    runInstallProbe("chamber", devicePicks.chamberProbe);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, probePhase, testId, devicePicks.chamberProbe]);
+
+  useEffect(() => {
+    if (probePhase !== "installingChamberProbe") return;
+    if (testStatus.data?.kind === "install_probe" && testStatus.data.state === "completed") {
+      setTestId(undefined);
+      setProbePhase("beer");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [probePhase, testStatus.data]);
+
+  // Candidates still worth testing: every raw hardware pin not yet
+  // conclusively identified as cool or heat, and not yet exhausted (both
+  // polarities tried, nothing found). Always the FIRST entry is "the
+  // current candidate" -- there is no separate index to keep in sync with
+  // a shrinking/reordering list.
+  function buildRelayCandidates(): RawBrewPiDevice[] {
+    const excluded = new Set(
+      [devicePicks.cool?.pin, devicePicks.heat?.pin, ...testedPins].filter((p): p is number => p != null),
+    );
+    return (deviceList ?? []).filter((d) => d.hardware === DEVICE_HARDWARE_PIN && d.pin != null && !excluded.has(d.pin));
   }
 
   useEffect(() => {
-    if (stage === "deviceCoolSweep" && deviceList === undefined && !startTest.isPending) runBrewPiDevices();
-    if (stage === "deviceHeatSweep" && deviceList === undefined && !startTest.isPending) runBrewPiDevices();
+    if (stage === "devicePinSweep" && deviceList === undefined && !startTest.isPending) runBrewPiDevices();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, deviceList]);
 
+  // Cooling is required, so keep testing for it unconditionally. Heat is
+  // optional -- once cooling's known, only keep testing remaining
+  // candidates for it if the user explicitly said so (the
+  // heatSweepConfirmed interstitial, rendered below); otherwise this
+  // effect intentionally does nothing further, and the exit-condition
+  // effect below moves on to finalize/deviceNoCool.
   useEffect(() => {
-    if (stage !== "deviceCoolSweep" && stage !== "deviceHeatSweep") return;
-    if (stage === "deviceHeatSweep" && !heatSweepStarted) return; // upfront skip/test choice hasn't been answered yet
-    if (deviceList === undefined) return;
+    if (stage !== "devicePinSweep" || deviceList === undefined) return;
     if (testId !== undefined || startTest.isPending) return;
-    const fn = stage === "deviceCoolSweep" ? "cool" : "heat";
-    const candidates = buildCandidateList(fn);
-    if (sweepCandidateIndex >= candidates.length) return; // exhausted -- rendered below, no test to start
-    runSweepRelay(fn, candidates[sweepCandidateIndex]);
+    const needCool = devicePicks.cool === undefined;
+    const needHeat = devicePicks.heat === undefined && !heatDeclined && heatSweepConfirmed;
+    if (!needCool && !needHeat) return;
+    const candidates = buildRelayCandidates();
+    const candidate = candidates[0];
+    if (candidate === undefined) return; // exhausted -- exit-condition effect handles this
+    const invert = polarityPhase === "reversed" ? (candidate.invert ? 0 : 1) : (candidate.invert ?? 0);
+    runIdentifyRelayPin(candidate, invert);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, deviceList, sweepCandidateIndex, testId, heatSweepStarted]);
+  }, [stage, deviceList, testId, polarityPhase, testedPins, devicePicks.cool, devicePicks.heat, heatDeclined, heatSweepConfirmed]);
 
-  // The exhausted transition belongs here (a real effect), not inline
-  // during render.
+  // A real 600s timeout with nothing identified auto-advances -- never a
+  // user-facing choice (the user isn't asked to try reversed polarity;
+  // see advancePolarityOrCandidate).
   useEffect(() => {
-    if (stage !== "deviceCoolSweep" && stage !== "deviceHeatSweep") return;
-    if (stage === "deviceHeatSweep" && !heatSweepStarted) return;
-    if (deviceList === undefined) return;
-    const fn = stage === "deviceCoolSweep" ? "cool" : "heat";
-    const candidates = buildCandidateList(fn);
-    if (sweepCandidateIndex < candidates.length) return; // not exhausted
-    if (fn === "cool") {
-      goTo("deviceNoCool");
-    } else {
-      setDevicePicks((p) => ({ ...p, heat: null }));
+    if (stage !== "devicePinSweep") return;
+    if (testStatus.data?.kind !== "identify_relay_pin" || testStatus.data.state !== "completed") return;
+    const result = testStatus.data.result as IdentifyRelayPinResult | null;
+    if (result?.outcome !== "timeout") return;
+    const candidate = buildRelayCandidates()[0];
+    if (candidate) advancePolarityOrCandidate(candidate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, testStatus.data]);
+
+  // The exit transitions belong here (real effects), not inline during
+  // render.
+  useEffect(() => {
+    if (stage !== "devicePinSweep" || deviceList === undefined) return;
+    const candidates = buildRelayCandidates();
+    const coolKnown = devicePicks.cool !== undefined;
+    const heatSettled = devicePicks.heat !== undefined || heatDeclined || candidates.length === 0;
+    if (coolKnown && heatSettled) {
       goTo("deviceFinalizing");
+    } else if (!coolKnown && candidates.length === 0) {
+      goTo("deviceNoCool");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, deviceList, sweepCandidateIndex, heatSweepStarted]);
+  }, [stage, deviceList, devicePicks.cool, devicePicks.heat, heatDeclined, testedPins]);
 
-  function advanceSweepCandidate() {
+  // Shared by the automatic timeout-advance effect and the "Nothing
+  // happened" button: on the pin's first (normal) polarity, automatically
+  // move to reversed polarity on the SAME pin -- never a user choice (the
+  // user isn't asked whether to try reversed polarity, they wouldn't know
+  // how to answer). Only after both polarities have found nothing does
+  // this pin get excluded and the sweep move to the next candidate.
+  function advancePolarityOrCandidate(candidate: RawBrewPiDevice) {
     cancelCurrentTest();
     setTestId(undefined);
-    setSweepCandidateIndex((i) => i + 1);
-  }
-
-  function retrySweepCandidateWithReversedPolarity(candidate: RawBrewPiDevice) {
-    cancelCurrentTest();
-    setTestId(undefined);
-    runSweepRelay(stage === "deviceCoolSweep" ? "cool" : "heat", { ...candidate, invert: candidate.invert ? 0 : 1 });
+    if (polarityPhase === "normal") {
+      setPolarityPhase("reversed");
+    } else {
+      setPolarityPhase("normal");
+      setTestedPins((prev) => [...prev, candidate.pin as number]);
+    }
   }
 
   const heatingConfirmed = picks.heat === 0 || picks.heat === 1 || (devicePicks.heat !== undefined && devicePicks.heat !== null);
@@ -413,15 +524,13 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   }
 
   function handleCancel() {
-    // Best-effort cleanup: if the wizard is abandoned mid-sweep, a
-    // candidate pin may be left installed and energized (the deliberate
-    // no-revert design -- see device_config.py's _run_sweep_relay). A
-    // reset is the only mechanism that reliably clears that (confirmed
-    // via ActuatorPin.h's constructor forcing every reconstructed
-    // actuator to a safe "off" level) -- fire it unconditionally
-    // (fire-and-forget, doesn't block closing the dialog) whenever
-    // there's device-config state to clean up.
-    if (canConfigureDevices && (stage === "deviceCoolSweep" || stage === "deviceHeatSweep" || stage === "deviceFinalizing")) {
+    // Best-effort cleanup on any device* stage: reset_brewpi now restores
+    // the baseline snapshot begin_device_config captured at the start of
+    // this session (if one exists) and clears the file -- a real "revert
+    // to the beginning state," not just a bare reset. Fire it
+    // unconditionally (fire-and-forget, doesn't block closing the dialog)
+    // whenever there's device-config state that might need reverting.
+    if (canConfigureDevices && stage.startsWith("device")) {
       cancelCurrentTest();
       startTest.mutate({ deviceId: device.device_id, action: "reset_brewpi", params: {} });
     }
@@ -473,14 +582,29 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     );
     showNext = true;
     nextLabel = "Start setup";
-    onNext = () => goTo(canFireOutlets ? "relayA" : canConfigureDevices ? "deviceProbeId" : "probes");
+    onNext = () => goTo(canFireOutlets ? "relayA" : canConfigureDevices ? "deviceBootstrap" : "probes");
   } else if (stage === "deviceProbeId") {
-    subtitle = probePhase === "chamber" ? "Identifying the chamber probe." : "Identifying the beer probe, if one is wired.";
+    subtitle =
+      probePhase === "beer"
+        ? "Identifying the beer probe, if one is wired."
+        : probePhase === "installingChamberProbe"
+          ? "Saving the chamber probe."
+          : "Identifying the chamber probe.";
     const result = testStatus.data?.result as IdentifyOnewireResult | null | undefined;
     const addresses = Object.keys(result?.current_f ?? {});
     const pinFor = (addr: string) => deviceList?.find((d) => d.address === addr)?.pin ?? 0;
 
-    if (deviceList === undefined || testId === undefined) {
+    if (probePhase === "installingChamberProbe") {
+      body = <p className={styles.body}>Installing the chamber probe…</p>;
+    } else if (deviceList === undefined || testId === undefined || testStatus.data === undefined) {
+      // testStatus.data can briefly be undefined even once testId is set
+      // (TanStack Query resets `data` to undefined the instant the query
+      // key -- which includes testId -- changes, before the new job's
+      // first poll response arrives). Without this check, that one-render
+      // gap fell through to the `addresses.length === 0` branch below and
+      // rendered a false "no probe detected" -- reproduced live this
+      // session on every job-to-job transition in this stage, not just
+      // the first one.
       body = <p className={styles.body}>Reading the controller's currently-wired sensors…</p>;
     } else if (addresses.length === 0) {
       body = <p className={styles.body}>No {probePhase} probe detected.</p>;
@@ -490,7 +614,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
         onNext = () =>
           probePhase === "chamber"
             ? goTo("deviceNoProbe")
-            : (setDevicePicks((p) => ({ ...p, beerProbe: null })), goTo("deviceCoolSweep"));
+            : (setDevicePicks((p) => ({ ...p, beerProbe: null })), goTo("devicePinSweep"));
       }
     } else if (addresses.length === 1) {
       // Nothing to compare against -- same "just confirm it responds"
@@ -512,11 +636,11 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
         onNext = () => {
           if (probePhase === "chamber") {
             setDevicePicks((p) => ({ ...p, chamberProbe: { address: addr, pin: pinFor(addr) } }));
-            setTestId(undefined); // let the beer-phase effect start its own fresh test
-            setProbePhase("beer");
+            setTestId(undefined); // let the install-probe effect start its own fresh test
+            setProbePhase("installingChamberProbe");
           } else {
             setDevicePicks((p) => ({ ...p, beerProbe: { address: addr, pin: pinFor(addr) } }));
-            goTo("deviceCoolSweep");
+            goTo("devicePinSweep");
           }
         };
       }
@@ -528,7 +652,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
               ? "Confirmed -- the highlighted probe moved."
               : testRunning
                 ? `Warm the ${probePhase} probe in your hand and watch for a 3°F change…`
-                : "No movement was seen -- warm the probe and try again."}
+                : "No temperature change detected yet -- warm the probe and try again."}
           </p>
           <div className={styles.probeGrid}>
             {addresses.map((addr) => {
@@ -557,11 +681,11 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
           const addr = result.identified_address as string;
           if (probePhase === "chamber") {
             setDevicePicks((p) => ({ ...p, chamberProbe: { address: addr, pin: pinFor(addr) } }));
-            setTestId(undefined); // let the beer-phase effect start its own fresh test
-            setProbePhase("beer");
+            setTestId(undefined); // let the install-probe effect start its own fresh test
+            setProbePhase("installingChamberProbe");
           } else {
             setDevicePicks((p) => ({ ...p, beerProbe: { address: addr, pin: pinFor(addr) } }));
-            goTo("deviceCoolSweep");
+            goTo("devicePinSweep");
           }
         };
       } else if (!testRunning) {
@@ -577,11 +701,26 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       body = (
         <>
           {body}
-          <Button variant="ghost" onClick={() => { setDevicePicks((p) => ({ ...p, beerProbe: null })); goTo("deviceCoolSweep"); }}>
+          <Button variant="ghost" onClick={() => { setDevicePicks((p) => ({ ...p, beerProbe: null })); goTo("devicePinSweep"); }}>
             No beer probe
           </Button>
         </>
       );
+    }
+  } else if (stage === "deviceBootstrap") {
+    subtitle = "Preparing device configuration.";
+    if (testStatus.data?.state === "failed") {
+      body = (
+        <>
+          <p className={styles.body}>Preparing device configuration failed: {testStatus.data?.error ?? "unknown error"}.</p>
+          <div className={styles.choiceGrid}>
+            {choice("Retry", "Try again.", () => setTestId(undefined))}
+            {choice("Cancel setup", "Nothing further is written.", handleCancel)}
+          </div>
+        </>
+      );
+    } else {
+      body = <p className={styles.body}>Checking the controller's current configuration…</p>;
     }
   } else if (stage === "deviceNoProbe") {
     subtitle = "No OneWire temperature sensor was detected at all.";
@@ -594,44 +733,55 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     showNext = true;
     nextLabel = "Try again";
     onNext = () => { setDeviceList(undefined); setProbePhase("chamber"); goTo("deviceProbeId"); };
-  } else if (stage === "deviceCoolSweep" || stage === "deviceHeatSweep") {
-    const fn: "cool" | "heat" = stage === "deviceCoolSweep" ? "cool" : "heat";
-    const candidates = buildCandidateList(fn);
-    const candidate = candidates[sweepCandidateIndex];
-    const result = testStatus.data?.result as SweepRelayResult | null | undefined;
-    const exhausted = deviceList !== undefined && sweepCandidateIndex >= candidates.length;
+  } else if (stage === "devicePinSweep") {
+    const candidates = buildRelayCandidates();
+    const candidate = candidates[0];
+    const result = testStatus.data?.result as IdentifyRelayPinResult | null | undefined;
+    const coolKnown = devicePicks.cool !== undefined;
 
-    subtitle =
-      fn === "cool"
-        ? "Finding which pin drives cooling."
-        : "Optional -- a heater makes cold-garage ferments possible, but a cooling-only rig is valid.";
+    subtitle = coolKnown
+      ? "Optional -- a heater makes cold-garage ferments possible, but a cooling-only rig is valid."
+      : "Finding which pin drives cooling (checking for a heater along the way).";
 
-    if (fn === "heat" && !heatSweepStarted) {
-      // Upfront skip, before ever starting a live test -- mirrors the
-      // retired heaterTest stage's own "yes/no/run the test" choice.
+    if (coolKnown && devicePicks.heat === undefined && !heatDeclined && !heatSweepConfirmed) {
+      // One-time interstitial, asked once cooling is known and there are
+      // still untested candidates -- heat is optional, so continuing to
+      // burn through every remaining candidate's real anti-short-cycle
+      // wait needs an explicit yes, not an automatic continuation.
       body = (
         <>
           <p className={styles.body}>
-            {device.name} always manages its own heating relay internally. The Krauken can push a real setpoint and
-            watch the pin sweep to find it -- real firmware anti-short-cycle protection means the first candidate
-            can take several minutes.
+            Cooling confirmed on pin {devicePicks.cool?.pin}. Want to also look for a heater?
           </p>
           <div className={styles.choiceGrid}>
-            {choice("Test for a heater", "Sweep the remaining pins for one that engages.", () => setHeatSweepStarted(true))}
-            {choice("No heater", "Cooling-only rig -- heating stays unfilled.", () => {
-              setDevicePicks((p) => ({ ...p, heat: null }));
-              goTo("deviceFinalizing");
-            })}
+            {choice("Test for a heater", "Sweep the remaining pins for one that engages.", () => setHeatSweepConfirmed(true))}
+            {choice("No heater", "Cooling-only rig -- heating stays unfilled.", () => setHeatDeclined(true))}
           </div>
         </>
       );
-    } else if (deviceList === undefined || (candidate === undefined && !exhausted)) {
+    } else if (deviceList === undefined) {
       body = <p className={styles.body}>Reading the controller's currently-wired pins…</p>;
-    } else if (exhausted) {
-      // The actual transition happens in the useEffect below (state
-      // updates belong there, not during render) -- this is just the
-      // brief frame in between.
-      body = <p className={styles.body}>No pin engaged {fn === "cool" ? "cooling" : "heating"} across every candidate.</p>;
+    } else if (candidate === undefined) {
+      // Exhausted -- the exit-condition effect handles the real
+      // transition (to deviceFinalizing or deviceNoCool); this is just
+      // the brief frame in between.
+      body = <p className={styles.body}>Checking results…</p>;
+    } else if (testStatus.data?.state === "failed") {
+      // A failed job (e.g. the chamber probe isn't reading) is a systemic
+      // precondition failure, not "this pin wasn't it" -- surfacing it as
+      // an ordinary timeout would silently hide the real error and invite
+      // cycling through every remaining candidate against the identical
+      // failure. Offer Retry (same pin/polarity) instead of "try the next
+      // pin."
+      body = (
+        <>
+          <p className={styles.body}>Something went wrong: {testStatus.data.error ?? "unknown error"}.</p>
+          <div className={styles.choiceGrid}>
+            {choice("Retry", "Try this test again.", () => setTestId(undefined))}
+            {choice("Cancel setup", "Nothing further is written.", handleCancel)}
+          </div>
+        </>
+      );
     } else if (testId === undefined || (result === undefined && testRunning === false && !testDone)) {
       body = <p className={styles.body}>Starting the live test on pin {candidate.pin}…</p>;
     } else if (result?.outcome === "waiting" || (testRunning && result === undefined)) {
@@ -643,7 +793,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
             timer to clear -- no countdown is available, but this is normal.
           </p>
           <div className={styles.choiceGrid}>
-            {choice("Skip -- try the next pin", "Move on without waiting further.", advanceSweepCandidate)}
+            {choice("Skip -- try the next test", "Move on without waiting further.", () => advancePolarityOrCandidate(candidate))}
           </div>
         </>
       );
@@ -651,46 +801,28 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       body = (
         <>
           <p className={styles.body}>
-            Pin {candidate.pin}'s state just switched to {fn === "cool" ? "cooling" : "heating"}. Chamber probe:{" "}
-            {result.current_f != null ? `${result.current_f.toFixed(1)}°F` : "reading…"}. Did the fridge or the
-            heater actually turn on?
+            Pin {candidate.pin}'s state just switched to a heating demand. Chamber probe:{" "}
+            {result.current_f != null ? `${result.current_f.toFixed(1)}°F` : "reading…"}. Did anything turn on?
           </p>
           <div className={styles.choiceGrid}>
-            {choice(
-              fn === "cool" ? "Yes, the fridge came on" : "Yes, the heater came on",
-              "This pin is confirmed.",
-              () => {
-                const winner = { pin: candidate.pin as number, invert: candidate.invert ?? 0 };
-                if (fn === "cool") {
-                  setDevicePicks((p) => ({ ...p, cool: winner }));
-                  setSweepCandidateIndex(0);
-                  goTo(devicePicks.heat === undefined ? "deviceHeatSweep" : "deviceFinalizing");
-                } else {
-                  setDevicePicks((p) => ({ ...p, heat: winner }));
-                  goTo("deviceFinalizing");
-                }
-              },
-            )}
-            {choice("Nothing happened", "Try reversed polarity on this same pin.", () => retrySweepCandidateWithReversedPolarity(candidate))}
-            {choice("Try the next pin", "This wasn't it.", advanceSweepCandidate)}
+            {choice("The heater came on", "This pin is confirmed as heating.", () => {
+              const invert = polarityPhase === "reversed" ? (candidate.invert ? 0 : 1) : (candidate.invert ?? 0);
+              setDevicePicks((p) => ({ ...p, heat: { pin: candidate.pin as number, invert } }));
+              setPolarityPhase("normal");
+            })}
+            {choice("The fridge came on", "This pin is confirmed as cooling.", () => {
+              const invert = polarityPhase === "reversed" ? (candidate.invert ? 0 : 1) : (candidate.invert ?? 0);
+              setDevicePicks((p) => ({ ...p, cool: { pin: candidate.pin as number, invert } }));
+              setPolarityPhase("normal");
+            })}
+            {choice("Nothing happened", "Check the next test.", () => advancePolarityOrCandidate(candidate))}
           </div>
         </>
       );
     } else {
-      // timeout
-      body = (
-        <>
-          <p className={styles.body}>
-            No {fn === "cool" ? "cooling" : "heating"} was seen on pin {candidate.pin} within the test window.
-          </p>
-          <div className={styles.choiceGrid}>
-            {choice("Try the next pin", "This wasn't it.", advanceSweepCandidate)}
-            {choice("Try reversed polarity", "Retest this same pin with the opposite relay polarity.", () =>
-              retrySweepCandidateWithReversedPolarity(candidate),
-            )}
-          </div>
-        </>
-      );
+      // A brief transitional frame -- outcome === "timeout" auto-advances
+      // via its own effect with no user interaction required.
+      body = <p className={styles.body}>Nothing detected on pin {candidate.pin} -- checking the next test…</p>;
     }
   } else if (stage === "deviceNoCool") {
     subtitle = "Cooling is required -- no pin engaged cooling across every candidate.";
@@ -702,7 +834,14 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     );
     showNext = true;
     nextLabel = "Start over";
-    onNext = () => { setDeviceList(undefined); setSweepCandidateIndex(0); goTo("deviceCoolSweep"); };
+    onNext = () => {
+      setDeviceList(undefined);
+      setTestedPins([]);
+      setPolarityPhase("normal");
+      setHeatSweepConfirmed(false);
+      setHeatDeclined(false);
+      goTo("devicePinSweep");
+    };
   } else if (stage === "deviceFinalizing") {
     subtitle = "Pushing the final configuration.";
     const result = testStatus.data?.result as FinalizeResult | null | undefined;

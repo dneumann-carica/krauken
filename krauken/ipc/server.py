@@ -41,6 +41,22 @@ class IPCServer:
         self.ctx = ctx
         self.state_lock = asyncio.Lock()
         self._server: asyncio.AbstractServer | None = None
+        # Tracked explicitly (not relying on asyncio.Server's own
+        # close_clients()/abort_clients(), Python 3.13+-only, while this
+        # project supports 3.11+) -- confirmed via Python's own docs:
+        # Server.close() only stops the LISTENING socket; existing client
+        # connections are left open. Since Python 3.12, Server.wait_closed()
+        # ALSO waits for those to finish -- a real behavior change from
+        # pre-3.12, where it returned as soon as the listener closed. A
+        # long-lived client (e.g. the daemon's own persistent
+        # IpcPlatformConnection to this exact service, sitting idle
+        # between polls) never gets told to close on its own, so
+        # wait_closed() would otherwise hang until systemd's
+        # TimeoutStopSec gives up and SIGKILLs the process -- measured on
+        # real hardware: exactly 90s, on both krauken-manual and
+        # krauken-simulator, every single restart (nearly half of one
+        # real install's total time).
+        self._connections: set[asyncio.StreamWriter] = set()
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,18 +68,31 @@ class IPCServer:
 
     async def stop(self) -> None:
         if self._server is not None:
-            self._server.close()
+            self._server.close()  # stop accepting new connections first, avoiding a race with one arriving mid-shutdown
+        # Abort every currently-open connection -- deliberately not a
+        # graceful close (no waiting for in-flight ops to finish): a
+        # dropped connection mid-request is already a case every IPC
+        # client here handles (framing.read_lines raising, or the
+        # daemon's own "one bad tick must never kill control"
+        # resilience retrying next tick), so there's nothing to gain by
+        # waiting, and everything to lose (this exact hang).
+        for writer in list(self._connections):
+            with contextlib.suppress(Exception):
+                writer.close()
+        if self._server is not None:
             await self._server.wait_closed()
         with contextlib.suppress(FileNotFoundError):
             self.socket_path.unlink()
 
     async def _handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self._connections.add(writer)
         try:
             async for raw in framing.read_lines(reader):
                 await self._dispatch(raw, writer)
         except (ConnectionResetError, BrokenPipeError):
             pass
         finally:
+            self._connections.discard(writer)
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()

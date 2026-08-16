@@ -76,8 +76,8 @@ export function HardwareSetupView() {
   // Standalone post-setup diagnostic for an already-configured firmware-
   // managed heater (BrewPi's confirm_heater) -- kept narrow and separate
   // from the guided wizard on purpose: the wizard now discovers and
-  // installs the heat pin itself (device_config.py's sweep_relay), so
-  // confirm_heater's only remaining job is "did my already-configured
+  // installs the heat pin itself (device_config.py's identify_relay_pin),
+  // so confirm_heater's only remaining job is "did my already-configured
   // heater stop responding," not configuring one. Only one can run at a
   // time (matches the daemon's own one-test-per-device_id rule), so a
   // single id pair is enough regardless of how many rows could show the

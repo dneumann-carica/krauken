@@ -88,20 +88,31 @@ class BrewPiPlatform:
                 # "Test heater" button), not exposed through the guided
                 # wizard's available_tests here.
                 #
-                # The five actions below (platforms/brewpi/device_config.py,
+                # The actions below (platforms/brewpi/device_config.py,
                 # dispatched via PLATFORM_BINDINGS["brewpi"].test_runners --
                 # see daemon/tests_runtime.py's start_test()) are what let
                 # Krauken discover and install probe/relay mappings itself,
                 # so a user never needs BrewPi's own Device Configuration
-                # page: brewpi_devices (full device list with live values),
-                # identify_onewire_probes (chamber/beer probe ID from raw
-                # OneWire addresses), sweep_relay (cool/heat pin sweep),
-                # finalize_device_config (push final config + reset).
+                # page: begin_device_config (self-heals/snapshots/wipes at
+                # wizard start), brewpi_devices (full device list with live
+                # values), identify_onewire_probes (chamber/beer probe ID
+                # from raw OneWire addresses), install_probe (installs an
+                # identified probe immediately, not deferred to finalize),
+                # identify_relay_pin (unified relay pin-identification
+                # sweep -- always forces a heat demand and lets the human
+                # observer say what physically turned on; replaced the
+                # old two-pass cool/heat sweep_relay, which left multiple
+                # stray same-function actuators installed and driven
+                # together -- confirmed live this session BrewPi does not
+                # enforce one-actuator-per-function), finalize_device_config
+                # (push final config + reset).
                 available_tests=(
                     "live_read",
+                    "begin_device_config",
                     "brewpi_devices",
                     "identify_onewire_probes",
-                    "sweep_relay",
+                    "install_probe",
+                    "identify_relay_pin",
                     "finalize_device_config",
                     "reset_brewpi",
                 ),

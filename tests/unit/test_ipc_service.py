@@ -150,6 +150,48 @@ async def test_clock_sync_drives_the_remote_engines_own_timeline():
         shutil.rmtree(socket_dir, ignore_errors=True)
 
 
+async def test_stop_does_not_hang_on_a_still_open_client_connection():
+    # The exact real-world scenario every existing test above sidesteps:
+    # their own teardown always closes the CLIENT first (client.stop()
+    # before server.stop()), so the server never has to deal with a
+    # connection nobody told it to close -- exactly what happens in
+    # production when krauken-manual/krauken-simulator receive SIGTERM
+    # while the daemon's own persistent IpcPlatformConnection is still
+    # open (the daemon isn't shutting down at the same time). Confirmed
+    # on real hardware: Server.close() only stops the listening socket
+    # (a client connection is left open per Python's own docs), and
+    # since Python 3.12, Server.wait_closed() also waits for that
+    # connection to finish -- which it never will on its own if nothing
+    # is sent and nothing closes it, hanging until systemd's
+    # TimeoutStopSec (90s) gives up and SIGKILLs the process. This test
+    # opens a raw connection and deliberately never closes it or sends
+    # anything, then asserts stop() still returns promptly.
+    socket_dir = Path(tempfile.mkdtemp(prefix="kr-ipc-"))
+    engine = SimPlantEngine(SimulatorClock())
+    ctx = ServiceContext(
+        platform=SimulatorPlatform(engine),
+        chamber=SimChamberDriver(engine),
+        beer_temp=SimBeerTempSource(engine),
+        gravity=SimGravitySource(engine),
+        clock=engine.clock,
+    )
+    server = IPCServer(socket_dir / "sim.sock", ctx=ctx)
+    await server.start()
+
+    _reader, writer = await asyncio.open_unix_connection(path=str(server.socket_path))
+    # Give the server's own connection-handler task an actual scheduling
+    # turn before calling stop() -- without this, the task may not have
+    # started (reached its blocking read) yet, and there'd be nothing
+    # for the bug to hang on regardless of whether the fix is present,
+    # making the test pass for the wrong reason either way.
+    await asyncio.sleep(0.1)
+    try:
+        await asyncio.wait_for(server.stop(), timeout=2.0)
+    finally:
+        writer.close()
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
 async def test_reads_degrade_to_unreachable_when_disconnected():
     # No server at all -- this is the "process is down" case reads should
     # survive without throwing, per ipc_driver.py's own module docstring.

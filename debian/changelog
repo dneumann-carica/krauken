@@ -1,3 +1,70 @@
+krauken (0.1.7) stable; urgency=medium
+
+  * Fix: platforms/brewpi/device_config.py's pin-sweep (v0.1.6's
+    sweep_relay) is redesigned entirely -- found live, against the real
+    rig, that testing cooling and heating as two separate passes (each
+    forcing its own target direction) left stray same-function candidates
+    installed between passes, and BrewPi does *not* enforce
+    one-actuator-per-function on its own: commanding "cooling" energized
+    three separate installed CHAMBER_COOL devices at once, not just the
+    intended one. Renamed to identify_relay_pin and rebuilt around a
+    single invariant -- at most one device is ever installed with the
+    CHAMBER_HEAT function at a time, uninstalling whatever currently
+    holds it before installing the next candidate -- and a single
+    mechanism: only ever force a target *above* the current chamber temp
+    (never a cooling demand), and let the human observer say what
+    physically responded (heater, fridge, or nothing), since the
+    firmware's function label doesn't need to match physical reality for
+    the test to work. Normal and reversed polarity are now two automatic
+    sub-tests per candidate, never a user-facing choice.
+  * Fix: the pin-sweep could never succeed at all as previously
+    sequenced -- it needs a live chamber-temperature reading to compute a
+    baseline, but nothing was ever installed with the CHAMBER_TEMP
+    function until the very last wizard step (finalize), which runs
+    *after* the sweep. New install_probe action installs the identified
+    chamber (and beer) probe immediately once confirmed in the wizard,
+    not deferred to finalize.
+  * Fix: identify_onewire_probes gave up after a fixed 90s and forced a
+    manual "Try again" click, even though there's no hardware reason
+    (unlike the relay sweep's real anti-short-cycle window) for this step
+    to be time-boxed. It now polls until identified or the user cancels
+    setup, with only a 3600s backstop against a truly orphaned task.
+  * New: begin_device_config -- the wizard's first action -- snapshots
+    the current installed-device state before wiping every device to
+    unassigned, so a candidate pin is always tested from a genuinely
+    blank slate. If a previous wizard session was abandoned mid-sweep
+    (tab closed, no cancel), the *next* session self-heals by restoring
+    that leftover snapshot first. reset_brewpi's cancel path now restores
+    the same snapshot rather than just resetting -- a real "revert to the
+    beginning state."
+  * Fix: HardwareWizard.tsx's device-config stages could flash a false
+    "no probe detected" for one render on every job-to-job transition
+    (TanStack Query resets `data` to undefined the instant the polled
+    test_id changes, before the new job's first response arrives) --
+    confirmed live, reproduced on both the initial probe-identification
+    entry and the chamber-to-beer phase transition. A genuinely failed
+    sweep job (e.g. the chamber probe isn't reading) was also silently
+    rendered as an ordinary "no cooling/heating seen" timeout, hiding the
+    real error and inviting repeated identical failures across every
+    remaining candidate -- now surfaced explicitly with the real error
+    and a Retry action.
+  * Fix: krauken/ipc/server.py's stop() hung for a full 90s
+    (systemd's TimeoutStopSec) and got SIGKILLed on every
+    krauken-manual/krauken-simulator restart, confirmed via real
+    install timing -- Python 3.12 changed Server.wait_closed() to also
+    wait for already-open client connections (e.g. the daemon's own
+    persistent connection to these services), which never close on
+    their own once idle. IPCServer now tracks and aborts open
+    connections itself before waiting, restoring the pre-3.12 shutdown
+    behavior.
+  * Improved: krauken.postinst now echoes progress through each real
+    step (venv creation, dependency install/skip, demo-seed trigger,
+    eeptools build, service restart) -- the slow dependency-install step
+    in particular had zero visible progress from apt/dpkg's own display,
+    which looked identical to a hung install on a real Pi Zero W.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 16 Aug 2026 13:12:52 -0400
+
 krauken (0.1.6) stable; urgency=medium
 
   * New: Krauken now takes over BrewPi's own classic Device

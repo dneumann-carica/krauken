@@ -149,10 +149,17 @@ export type TestAction =
   | "confirm_heater"
   // BrewPi's device-configuration wizard (platforms/brewpi/device_config.py) --
   // Krauken takes over BrewPi's own classic Device Configuration page
-  // entirely, so a user never needs it.
+  // entirely, so a user never needs it. identify_relay_pin replaced the
+  // old two-pass sweep_relay (cool sweep + heat sweep) -- always forces a
+  // heat demand and lets the human observer say what physically turned
+  // on, since leaving multiple same-function candidates installed between
+  // passes got them all driven together (BrewPi doesn't enforce
+  // one-actuator-per-function).
+  | "begin_device_config"
   | "brewpi_devices"
   | "identify_onewire_probes"
-  | "sweep_relay"
+  | "install_probe"
+  | "identify_relay_pin"
   | "finalize_device_config"
   | "reset_brewpi";
 

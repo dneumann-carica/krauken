@@ -97,17 +97,26 @@ class DeviceResponse(BaseModel):
 class TestStartRequest(BaseModel):
     # confirm_heater was previously missing here entirely -- a real API call
     # to start it was rejected by pydantic before ever reaching
-    # tests_runtime.py. The five identify_onewire_probes/brewpi_devices/
-    # sweep_relay/finalize_device_config/reset_brewpi actions are BrewPi's
-    # own device-configuration wizard (platforms/brewpi/device_config.py).
+    # tests_runtime.py. begin_device_config/identify_onewire_probes/
+    # brewpi_devices/install_probe/identify_relay_pin/finalize_device_config/
+    # reset_brewpi are BrewPi's own device-configuration wizard
+    # (platforms/brewpi/device_config.py). identify_relay_pin replaced the
+    # old two-pass sweep_relay (cool sweep + heat sweep) -- confirmed live
+    # this session that leaving multiple same-function candidates installed
+    # between passes gets them all driven together (BrewPi does not
+    # enforce one-actuator-per-function), so the corrected design only
+    # ever forces a heat demand and lets the human observer say what
+    # turned on (fridge vs. heater vs. nothing).
     action: Literal[
         "fire_outlet",
         "identify_probes",
         "live_read",
         "confirm_heater",
+        "begin_device_config",
         "identify_onewire_probes",
         "brewpi_devices",
-        "sweep_relay",
+        "install_probe",
+        "identify_relay_pin",
         "finalize_device_config",
         "reset_brewpi",
     ]

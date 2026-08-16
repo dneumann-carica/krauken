@@ -62,7 +62,15 @@ async def test_discover_offers_the_device_config_wizard_actions_with_just_the_fr
     assert "identify_probes" not in c.available_tests
     assert "confirm_heater" not in c.available_tests
     assert "fire_outlet" not in c.available_tests
-    for action in ("brewpi_devices", "identify_onewire_probes", "sweep_relay", "finalize_device_config", "reset_brewpi"):
+    for action in (
+        "begin_device_config",
+        "brewpi_devices",
+        "identify_onewire_probes",
+        "install_probe",
+        "identify_relay_pin",
+        "finalize_device_config",
+        "reset_brewpi",
+    ):
         assert action in c.available_tests
     assert c.identity["probe_addresses"] == [FRIDGE_PROBE_ADDRESS]
 

@@ -29,6 +29,7 @@ EEPTOOLS_SRC=/opt/krauken/eeptools-src
 
 case "$1" in
   configure)
+    echo "krauken: running post-install configuration..."
     # 1. System user/group. Idempotent -- getent-guarded rather than
     # relying on adduser's own "already exists" behavior being a clean
     # no-op across every Debian/Ubuntu version this might run on.
@@ -67,8 +68,18 @@ case "$1" in
     # dependency set that's real, needless minutes on every upgrade.
     # piwheels' per-architecture wheels (this whole design's reason for
     # existing) still resolve in full whenever a real change DOES need it.
+    # Real, visible progress here matters: this whole step is the one
+    # apt/dpkg have zero insight into internally -- their own progress
+    # display just sits at whatever percentage corresponds to "running
+    # krauken's postinst" for however long this takes, with no
+    # indication anything is happening (confirmed live: this looked
+    # identical to a hung install from the terminal, when it was
+    # actually a real, slow, but progressing pip resolve). Echoing here
+    # doesn't speed anything up, but it's the difference between "this
+    # is clearly still working" and "did this hang?"
     fresh_venv=false
     if [ ! -x "$VENV/bin/python3" ]; then
+        echo "krauken: creating the Python virtualenv..."
         python3 -m venv "$VENV"
         fresh_venv=true
     fi
@@ -76,9 +87,13 @@ case "$1" in
     new_hash="$(sha256sum "${SRC}/pyproject.toml" | cut -d' ' -f1)"
     old_hash="$(cat "$hash_file" 2>/dev/null || true)"
     if [ "$fresh_venv" = true ] || [ "$new_hash" != "$old_hash" ]; then
+        echo "krauken: dependencies changed (or this is a fresh install) -- installing/upgrading the [pi] extra now. On a Pi Zero W this can genuinely take a few minutes even with piwheels prebuilt wheels; this is expected, not a hang."
         "$VENV/bin/pip" install --quiet --upgrade pip
         "$VENV/bin/pip" install --quiet -e "${SRC}[pi]"
         echo "$new_hash" > "$hash_file"
+        echo "krauken: dependencies installed."
+    else
+        echo "krauken: dependencies unchanged since the last install -- skipping pip (this is the fast path)."
     fi
 
     # 3b. Demo fermentation data -- fresh installs only, never on
@@ -98,6 +113,7 @@ case "$1" in
         db_path="${KRAUKEN_DB_PATH:-$db_path}"
     fi
     if [ ! -e "$db_path" ]; then
+        echo "krauken: fresh install -- seeding demo fermentation data in the background (krauken-seed-demo.service; doesn't block this install)."
         systemctl daemon-reload
         systemctl start --no-block krauken-seed-demo.service || true
     fi
@@ -112,6 +128,7 @@ case "$1" in
     RET=""
     db_get krauken/has-krauken-hardware || true
     if [ "$RET" = "true" ] && ! command -v eepmake >/dev/null 2>&1; then
+        echo "krauken: building eeptools from source (Krauken PCB hardware support)..."
         build_dir="$(mktemp -d)"
         cp -r "${EEPTOOLS_SRC}/." "$build_dir/"
         cmake -S "$build_dir" -B "$build_dir/build" >/dev/null
@@ -134,6 +151,18 @@ case "$1" in
     ;;
 esac
 
+# Bracketing echoes only, gated the same way as the case above -- the
+# generated block below runs (and no-ops appropriately) on other $1
+# values too (abort-upgrade, etc.), which shouldn't be narrated as
+# "restarting services"/"complete" the way a real configure run is.
+if [ "$1" = "configure" ]; then
+    echo "krauken: restarting services..."
+fi
+
 #DEBHELPER#
+
+if [ "$1" = "configure" ]; then
+    echo "krauken: post-install configuration complete."
+fi
 
 exit 0

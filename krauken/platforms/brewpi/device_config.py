@@ -31,15 +31,24 @@ source, not guessed:
   DeviceDefinition struct at all -- purely informational on reads, never
   sent on writes.
 - Once a relay's actuator is installed, the firmware's own state machine
-  (not this module) enforces anti-short-cycle protection; this module
-  deliberately does NOT revert/uninstall a candidate mid-sweep (see
-  _run_sweep_relay) -- a real, agreed design decision, not an oversight.
+  (not this module) enforces anti-short-cycle protection.
+- BrewPi does **not** enforce one-actuator-per-function on its own --
+  confirmed live this session: leaving several same-function candidates
+  installed at once (from an earlier design that deliberately never
+  reverted a tested candidate) got them all driven together the instant
+  that function was commanded, not just the intended one. The corrected
+  invariant, load-bearing throughout `_run_identify_relay_pin` below: at
+  most one device is ever installed with the `CHAMBER_HEAT` function at a
+  time -- uninstall whatever currently holds it before installing the
+  next candidate.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 from krauken.contracts.errors import ValidationError
@@ -67,33 +76,49 @@ _ONEWIRE_HARDWARE = frozenset({DEVICE_HARDWARE_ONEWIRE_TEMP, DEVICE_HARDWARE_ONE
 # -- valid slots are 0-15 inclusive.
 MAX_DEVICE_SLOT = 16
 
-IDENTIFY_ONEWIRE_WINDOW_S = 90.0
 IDENTIFY_ONEWIRE_POLL_S = 1.0
 IDENTIFY_ONEWIRE_DELTA_F = 3.0
+# No user-facing timeout here -- probe identification should stay up until
+# the user warms a probe or explicitly cancels setup, not give up on a
+# fixed clock (there's no hardware reason it needs one, unlike the relay
+# sweep's real anti-short-cycle window below). This backstop exists only
+# against a truly orphaned server-side task if a session is abandoned
+# mid-poll without ever calling cancel -- never expected to be hit in
+# normal use, and never surfaced to the user as a "try again" wall.
+IDENTIFY_ONEWIRE_BACKSTOP_S = 3600.0
 
-# Same shape as daemon/tests_runtime.py's CONFIRM_HEATER_FORCE_DELTA_F/
-# CONFIRM_HEATER_WINDOW_S -- a real functional test, not a synthetic
-# countdown. 600s matches MIN_SWITCH_TIME/MIN_COOL_OFF_TIME_FRIDGE_CONSTANT
-# (both confirmed 600s in the real firmware's TempControl.h) -- the
-# worst-case wait before EITHER relay may first engage in a fresh
-# connection, since Krauken always uses fridge-constant mode.
-SWEEP_FORCE_DELTA_F = 15.0
-SWEEP_WINDOW_S = 600.0
-SWEEP_POLL_S = 2.0
+# Reserved scratch slot for relay pin-identification tests only -- reused
+# across every candidate rather than picking a fresh free slot each time,
+# so a long sweep doesn't churn through slots. Falls back to a freshly
+# picked free slot in the (very unlikely) case something unrelated already
+# occupies it.
+RELAY_IDENTIFY_SLOT = 15
+# Matches MIN_SWITCH_TIME/MIN_COOL_OFF_TIME_FRIDGE_CONSTANT (both confirmed
+# 600s in the real firmware's TempControl.h) -- the worst-case wait before
+# a relay may first engage in a fresh connection, since Krauken always
+# uses fridge-constant mode.
+RELAY_IDENTIFY_WINDOW_S = 600.0
+RELAY_IDENTIFY_POLL_S = 2.0
+# ALWAYS added to the baseline chamber temp, never subtracted -- this
+# module must never command a target below the current chamber temp (a
+# cooling demand). Forcing "heat" is the sole, universal trigger used to
+# energize a candidate pin during discovery; whatever is actually wired
+# there responds (a real heater, or the fridge if that's what's on this
+# pin), and the human observer -- not the firmware -- says which.
+RELAY_IDENTIFY_FORCE_DELTA_F = 15.0
 
-# Raw firmware State codes (TempControl.h's `enum states`) that mean "this
-# relay is actually driven right now" for each function -- includes the
-# MIN_TIME-held codes (8/9), not just the freshly-engaged ones (3/4),
-# since both mean the relay is physically on. Deliberately narrower than
-# connection.py's own STATES_HEATING/STATES_COOLING (which reference
-# codes 13/14 not present in the confirmed firmware enum -- see the plan's
+# Raw firmware State codes (TempControl.h's `enum states`) that mean "the
+# heat function is actually driven right now" -- includes the
+# MIN_TIME-held code (9), not just the freshly-engaged one (3), since both
+# mean the relay is physically on. There is no cool-side equivalent here:
+# this module never commands a cooling demand at all (see
+# RELAY_IDENTIFY_FORCE_DELTA_F above). Deliberately narrower than
+# connection.py's own STATES_HEATING/STATES_COOLING (which reference codes
+# 13/14 not present in the confirmed firmware enum -- see the plan's
 # "residual risks" section) -- this module uses only the directly-verified
 # codes.
-ENGAGED_STATES: Mapping[str, frozenset[int]] = {
-    "cool": frozenset({4, 8}),
-    "heat": frozenset({3, 9}),
-}
-WAITING_STATES = frozenset({5, 6})  # WAITING_TO_COOL, WAITING_TO_HEAT
+HEAT_ENGAGED_STATES = frozenset({3, 9})
+HEAT_WAITING_STATES = frozenset({6})  # WAITING_TO_HEAT
 
 
 @dataclass
@@ -191,8 +216,91 @@ def _pick_free_slot(installed: list[BrewPiDevice]) -> int:
     raise ValidationError("no free BrewPi device slots left (0-15 all in use)")
 
 
+async def _uninstall(conn: Any, slot: int) -> None:
+    """`U{"i":<slot>,"f":0,...}` -- confirmed live this session as the
+    working uninstall shape. Used everywhere this module needs to clear a
+    slot: the relay pin-identification invariant (at most one CHAMBER_HEAT
+    device live at a time), and begin_device_config's wipe-to-unassigned."""
+    await conn.install_device(BrewPiDevice(slot=slot, function=DEVICE_FUNCTION_NONE))
+
+
+# --- Baseline snapshot: capture-at-start, restore-on-cancel-or-self-heal ---
+#
+# Persisted to disk (survives a daemon restart, matching db_path's own
+# convention in krauken.conf) so an abandoned wizard session -- tab closed,
+# network dropped, no explicit cancel -- can be healed automatically the
+# *next* time anyone opens the wizard, without any timeout/watchdog
+# machinery: begin_device_config's first action is always "restore a
+# leftover snapshot if one exists" before capturing its own fresh one.
+BASELINE_SNAPSHOT_PATH = Path("/var/lib/krauken/brewpi-wizard-baseline.json")
+
+
+def _read_baseline() -> list[BrewPiDevice] | None:
+    try:
+        raw = json.loads(BASELINE_SNAPSHOT_PATH.read_text())
+    except FileNotFoundError:
+        return None
+    return [BrewPiDevice.from_json(d) for d in raw]
+
+
+def _write_baseline(devices: list[BrewPiDevice]) -> None:
+    BASELINE_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BASELINE_SNAPSHOT_PATH.write_text(json.dumps([d.to_wire_json() for d in devices]))
+
+
+def _clear_baseline() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        BASELINE_SNAPSHOT_PATH.unlink()
+
+
+async def _restore_baseline(conn: Any) -> None:
+    """Reinstall every device from the snapshot file (if any), then reset --
+    a reset (not a soft idle) is the right unconditional follow-up here,
+    same reasoning as finalize_device_config's own: a freshly-pushed
+    config must never be interpreted by stale in-RAM actuator objects.
+    Used by both begin_device_config's self-heal step and reset_brewpi's
+    cancel-path restore -- same operation, two callers. No-op if there's
+    no snapshot to restore."""
+    baseline = _read_baseline()
+    if baseline is None:
+        return
+    for device in baseline:
+        await conn.install_device(device)
+    await conn.reset_and_reconnect()
+
+
 def _brewpi_connection(ctx: Any) -> Any | None:
     return ctx.registry.state_for("brewpi")
+
+
+async def _run_begin_device_config(ctx: Any, job: Any, device_id: str, params: dict[str, Any]) -> None:
+    """The wizard's very first action. Three steps, in order: (1) self-heal
+    -- if a baseline snapshot file already exists (a previous wizard
+    session never reached finalize or cancel), restore it first, so an
+    abandoned session's mess is cleaned up automatically before this new
+    one starts, without any timeout/watchdog machinery. (2) Snapshot the
+    now-guaranteed-clean installed-device state as the new baseline. (3)
+    Uninstall every device in that snapshot, so every pin and probe the
+    wizard subsequently touches starts genuinely unassigned -- this is
+    what removes any ambiguity about which physical pin a given sweep
+    step just turned on. Does NOT gate on fermentation state -- like
+    reset_brewpi, this is session bootstrap, not a hardware test."""
+    conn = _brewpi_connection(ctx)
+    if conn is None:
+        job.state = "failed"
+        job.error = "BrewPi is not the current platform"
+        return
+    try:
+        await _restore_baseline(conn)
+        snapshot = await conn.list_installed_devices(with_values=False)
+        _write_baseline(snapshot)
+        for device in snapshot:
+            await _uninstall(conn, device.slot)
+        job.state = "completed"
+        job.result = {"wiped": [d.slot for d in snapshot]}
+    except asyncio.CancelledError:
+        job.state = "cancelled"
+        raise
 
 
 async def _run_brewpi_devices(ctx: Any, job: Any, device_id: str, params: dict[str, Any]) -> None:
@@ -232,7 +340,8 @@ async def _run_identify_onewire_probes(ctx: Any, job: Any, device_id: str, param
       exclude_addresses: list[str] -- already-identified addresses to
         leave out (the second call, identifying beer, excludes whatever
         the first call identified as chamber).
-      window_s: float, optional.
+      window_s: float, optional -- defaults to IDENTIFY_ONEWIRE_BACKSTOP_S,
+        a very long orphaned-task backstop, never a user-facing timeout.
     """
     conn = _brewpi_connection(ctx)
     if conn is None:
@@ -241,7 +350,7 @@ async def _run_identify_onewire_probes(ctx: Any, job: Any, device_id: str, param
         return
 
     exclude = set(params.get("exclude_addresses") or [])
-    window_s = float(params.get("window_s", IDENTIFY_ONEWIRE_WINDOW_S))
+    window_s = float(params.get("window_s", IDENTIFY_ONEWIRE_BACKSTOP_S))
 
     try:
         baseline = await _read_onewire_values(conn, exclude)
@@ -299,24 +408,20 @@ async def _run_identify_onewire_probes(ctx: Any, job: Any, device_id: str, param
         raise
 
 
-async def _run_sweep_relay(ctx: Any, job: Any, device_id: str, params: dict[str, Any]) -> None:
-    """Installs `candidate` as the cool/heat function (reusing its slot if
-    it's already installed for that same pin+function, else picking a
-    free one), forces a real setpoint, and polls the firmware's own raw
-    State for the function's engaged codes -- confirmed the moment the
-    firmware itself reports it, never assumed. Also reports the
-    WAITING_TO_x codes explicitly (qualitative only -- the firmware never
-    exposes a numeric remaining-wait-seconds value on the wire, confirmed
-    via exhaustive search of PiLink.cpp) so the wizard can show "waiting on
-    the compressor-protection timer" rather than a blank screen.
+async def _run_install_probe(ctx: Any, job: Any, device_id: str, params: dict[str, Any]) -> None:
+    """Installs a single already-identified OneWire probe as CHAMBER_TEMP
+    or BEER_TEMP immediately -- called from deviceProbeId's chamber/beer
+    confirmation steps, not deferred to finalize_device_config. Fixes a
+    real sequencing bug found this session: identify_relay_pin needs a
+    live FridgeTemp reading to compute a baseline, but nothing was ever
+    installed with the CHAMBER_TEMP function until finalize -- the very
+    last wizard step, which runs *after* the relay sweep -- so every sweep
+    attempt failed immediately regardless of what was actually wired. No
+    reset here -- installing a temp sensor takes effect immediately,
+    unlike a relay pin reassignment (which the wizard reasons about via
+    RELAY_IDENTIFY_SLOT reuse, not a chip reboot).
 
-    Deliberately no finally-revert: leaving a candidate installed and
-    possibly energized between sweep steps is the agreed design (the
-    anti-short-cycle timers protect against RAPID CYCLING, not continuous
-    running) -- do not add a release here.
-
-    params: function: "cool"|"heat", candidate: raw device dict (pin,
-    invert), window_s: float, optional.
+    params: role: "chamber"|"beer", address: str, pin: int, optional.
     """
     conn = _brewpi_connection(ctx)
     if conn is None:
@@ -324,33 +429,98 @@ async def _run_sweep_relay(ctx: Any, job: Any, device_id: str, params: dict[str,
         job.error = "BrewPi is not the current platform"
         return
 
-    function = params.get("function")
-    if function not in ENGAGED_STATES:
+    role = params.get("role")
+    address = params.get("address")
+    if role not in ("chamber", "beer") or not address:
         job.state = "failed"
-        job.error = f"invalid sweep function {function!r}"
+        job.error = "install_probe requires role ('chamber'|'beer') and address"
         return
-    candidate = params.get("candidate") or {}
-    pin = candidate.get("pin")
-    if pin is None:
-        job.state = "failed"
-        job.error = "sweep_relay requires a candidate with a pin"
-        return
-    window_s = float(params.get("window_s", SWEEP_WINDOW_S))
-    device_function = DEVICE_FUNCTION_CHAMBER_COOL if function == "cool" else DEVICE_FUNCTION_CHAMBER_HEAT
+    function = DEVICE_FUNCTION_CHAMBER_TEMP if role == "chamber" else DEVICE_FUNCTION_BEER_TEMP
 
     installed = await conn.list_all_devices(with_values=False)
-    existing = next((d for d in installed if d.pin == pin and d.function == device_function), None)
+    existing = next((d for d in installed if d.function == function), None)
     slot = existing.slot if existing is not None else _pick_free_slot(installed)
 
     device = BrewPiDevice(
         slot=slot,
         chamber=1,
+        beer=1 if role == "beer" else 0,
+        function=function,
+        hardware=DEVICE_HARDWARE_ONEWIRE_TEMP,
+        pin=params.get("pin"),
+        address=address,
+    )
+    await conn.install_device(device)
+    job.state = "completed"
+    job.result = {"installed": device.to_dict()}
+
+
+async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: dict[str, Any]) -> None:
+    """Tests exactly one (pin, polarity) combination by forcing a heat
+    demand and watching the firmware's own raw State -- never which
+    physical thing responds. That's for the human observer to say: forcing
+    "heat" and assigning `candidate` to CHAMBER_HEAT just tells the
+    firmware "turn this pin on"; if what's actually wired there is the
+    fridge relay, the fridge is what turns on. `outcome == "engaged"` means
+    only "the firmware just switched this pin on" -- the frontend asks the
+    human what physically happened next.
+
+    Invariant, load-bearing (see module docstring): before installing the
+    requested candidate, always uninstalls whatever currently holds the
+    CHAMBER_HEAT function, so at most one device ever shares that function
+    at a time. This is what replaced the old sweep_relay's "leave a
+    candidate energized between steps" design -- confirmed live this
+    session that BrewPi does not enforce one-actuator-per-function, so
+    several stray same-function candidates left installed get driven
+    together the instant that function is commanded, not just the intended
+    one. Also reports the WAITING_TO_HEAT code explicitly (qualitative
+    only -- the firmware never exposes a numeric remaining-wait-seconds
+    value on the wire, confirmed via exhaustive search of PiLink.cpp) so
+    the wizard can show "waiting on the compressor-protection timer"
+    rather than a blank screen.
+
+    Never forces a target below the current chamber temp -- this action
+    must never command a cooling demand. Normal and reversed polarity are
+    two separate calls to this same action (the caller passes `invert`
+    explicitly); there is no "function" param and no per-call polarity
+    retry mechanism here -- the frontend drives that sequencing.
+
+    params: candidate: {"pin": int, "invert": 0|1}, window_s: float,
+    optional.
+    """
+    conn = _brewpi_connection(ctx)
+    if conn is None:
+        job.state = "failed"
+        job.error = "BrewPi is not the current platform"
+        return
+
+    candidate = params.get("candidate") or {}
+    pin = candidate.get("pin")
+    if pin is None:
+        job.state = "failed"
+        job.error = "identify_relay_pin requires a candidate with a pin"
+        return
+    invert = int(candidate.get("invert", 0))
+    window_s = float(params.get("window_s", RELAY_IDENTIFY_WINDOW_S))
+
+    installed = await conn.list_all_devices(with_values=False)
+    existing_heat = next((d for d in installed if d.function == DEVICE_FUNCTION_CHAMBER_HEAT), None)
+    if existing_heat is not None:
+        await _uninstall(conn, existing_heat.slot)
+        installed = [d for d in installed if d.slot != existing_heat.slot]
+
+    reserved_taken = next((d for d in installed if d.slot == RELAY_IDENTIFY_SLOT), None)
+    slot = RELAY_IDENTIFY_SLOT if reserved_taken is None else _pick_free_slot(installed)
+
+    device = BrewPiDevice(
+        slot=slot,
+        chamber=1,
         beer=0,
-        function=device_function,
+        function=DEVICE_FUNCTION_CHAMBER_HEAT,
         hardware=DEVICE_HARDWARE_PIN,
         deactivated=0,
         pin=pin,
-        invert=int(candidate.get("invert", 0)),
+        invert=invert,
     )
     await conn.install_device(device)
 
@@ -360,7 +530,8 @@ async def _run_sweep_relay(ctx: Any, job: Any, device_id: str, params: dict[str,
         job.error = "chamber probe isn't reading -- can't run a live relay test"
         return
     baseline_f = reading.fridge_temp_f
-    forced_target = baseline_f + SWEEP_FORCE_DELTA_F if function == "heat" else baseline_f - SWEEP_FORCE_DELTA_F
+    # ALWAYS added, never subtracted -- see RELAY_IDENTIFY_FORCE_DELTA_F.
+    forced_target = baseline_f + RELAY_IDENTIFY_FORCE_DELTA_F
     await conn.set_fridge_target(forced_target)
 
     try:
@@ -369,14 +540,14 @@ async def _run_sweep_relay(ctx: Any, job: Any, device_id: str, params: dict[str,
         job.result = {"outcome": outcome, "baseline_f": baseline_f, "forced_target_f": forced_target, "current_f": current_f, "slot": slot}
         elapsed_s = 0.0
         while elapsed_s < window_s:
-            await ctx.clock.sleep(SWEEP_POLL_S)
-            elapsed_s += SWEEP_POLL_S
+            await ctx.clock.sleep(RELAY_IDENTIFY_POLL_S)
+            elapsed_s += RELAY_IDENTIFY_POLL_S
             reading = await conn.read_temps()
             if reading is not None:
                 current_f = reading.fridge_temp_f
-                if reading.state in ENGAGED_STATES[function]:
+                if reading.state in HEAT_ENGAGED_STATES:
                     outcome = "engaged"
-                elif reading.state in WAITING_STATES:
+                elif reading.state in HEAT_WAITING_STATES:
                     outcome = "waiting"
             job.result = {"outcome": outcome, "baseline_f": baseline_f, "forced_target_f": forced_target, "current_f": current_f, "slot": slot}
             if outcome == "engaged":
@@ -398,10 +569,16 @@ async def _run_finalize_device_config(ctx: Any, job: Any, device_id: str, params
     because DigitalPinActuator's constructor (confirmed via ActuatorPin.h)
     forces every reconstructed-from-EEPROM actuator to its correct "off"
     level before pinMode(OUTPUT), so this is the only mechanism that
-    reliably clears any candidate pins orphaned energized during the
-    cool/heat sweeps. The `finally` fires a second, safety-net reset ONLY
-    if the deliberate one was never reached (an install raised, or the job
-    was cancelled mid-loop) -- never both, never neither.
+    reliably clears whatever candidate the relay pin-identification sweep
+    last left installed. The `finally` fires a second, safety-net reset
+    ONLY if the deliberate one was never reached (an install raised, or the
+    job was cancelled mid-loop) -- never both, never neither. On success,
+    clears the baseline snapshot file (see begin_device_config) -- the
+    wizard's new configuration is the new reality; there's nothing left to
+    revert to. Deliberately does NOT clear it on the failure path -- a
+    failed finalize should still be recoverable via reset_brewpi or the
+    next begin_device_config self-heal, not silently lose the pre-wizard
+    state on top of failing.
 
     params: config: {"chamber_probe": {"address","pin"},
     "beer_probe": {...}|None, "cool": {"pin","invert"},
@@ -475,6 +652,7 @@ async def _run_finalize_device_config(ctx: Any, job: Any, device_id: str, params
 
         await conn.reset_and_reconnect()
         reset_done = True
+        _clear_baseline()
 
         final_installed = await conn.list_installed_devices(with_values=False)
         job.state = "completed"
@@ -495,14 +673,21 @@ async def _run_reset_brewpi(ctx: Any, job: Any, device_id: str, params: dict[str
     """Best-effort, always completes -- registered below with
     requires_no_active_fermentation=False, since this is the unconditional
     safety-net action the wizard's cancel path fires for an abandoned
-    sweep; gating it would defeat exactly the case it exists for."""
+    sweep; gating it would defeat exactly the case it exists for. If a
+    baseline snapshot exists (the wizard started but never reached
+    finalize), restores it and clears the file -- a real "revert to the
+    beginning state," not just a bare reset. Otherwise just resets."""
     conn = _brewpi_connection(ctx)
     if conn is None:
         job.state = "failed"
         job.error = "BrewPi is not the current platform"
         return
     try:
-        await conn.reset_and_reconnect()
+        if _read_baseline() is not None:
+            await _restore_baseline(conn)
+            _clear_baseline()
+        else:
+            await conn.reset_and_reconnect()
         job.state = "completed"
         job.result = {"reset": True}
     except asyncio.CancelledError:
@@ -514,14 +699,18 @@ async def _run_reset_brewpi(ctx: Any, job: Any, device_id: str, params: dict[str
 
 
 TEST_RUNNERS: Mapping[str, PlatformTestRunner] = {
+    # Session bootstrap, not a hardware test -- deliberately NOT gated,
+    # same reasoning as reset_brewpi below.
+    "begin_device_config": PlatformTestRunner(run=_run_begin_device_config),
     # Read-only listing -- no hardware mutation, so no fermentation gate.
     "brewpi_devices": PlatformTestRunner(run=_run_brewpi_devices),
-    # These three reconfigure real hardware (or force a real setpoint) --
+    # These four reconfigure real hardware (or force a real setpoint) --
     # blocked while a fermentation is active, checked synchronously by
     # daemon/tests_runtime.py's start_test() before the task is created
     # (see PlatformTestRunner's own docstring for why it can't live here).
     "identify_onewire_probes": PlatformTestRunner(run=_run_identify_onewire_probes, requires_no_active_fermentation=True),
-    "sweep_relay": PlatformTestRunner(run=_run_sweep_relay, requires_no_active_fermentation=True),
+    "install_probe": PlatformTestRunner(run=_run_install_probe, requires_no_active_fermentation=True),
+    "identify_relay_pin": PlatformTestRunner(run=_run_identify_relay_pin, requires_no_active_fermentation=True),
     "finalize_device_config": PlatformTestRunner(run=_run_finalize_device_config, requires_no_active_fermentation=True),
     # The unconditional safety-net action -- deliberately NOT gated (see
     # _run_reset_brewpi's own docstring).
