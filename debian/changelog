@@ -1,3 +1,22 @@
+krauken (0.1.10) stable; urgency=medium
+
+  * Fix: connection.py's BOOT_DELAY_S (the wait after opening a fresh
+    serial connection, before querying the Arduino to identify it) was
+    4.0s, based on an earlier, incorrect measurement. Confirmed live,
+    extensively and repeatedly this session, that the real post-DTR-reset
+    boot time on this hardware is ~15-20s -- dominated by the display
+    driver's I2C address scan running with no display physically present
+    to ACK. The old value meant every identify_and_connect() attempt
+    queried the Arduino before it had actually finished booting, got no
+    response at all, closed the connection, and logged "BrewPi not found
+    at startup" -- a real, reproducible daemon bug, not a one-off,
+    confirmed via the daemon's own journal on the actual rig. Now 22.0s
+    (real margin over the observed worst case). Only paid on a genuine
+    cold-connect (first time, or after a lost connection) -- an
+    already-connected BrewPi pays nothing extra on a later rescan.
+
+ -- The Krauken Project <dneumann@arpio.io>  Tue, 18 Aug 2026 07:01:03 -0400
+
 krauken (0.1.9) stable; urgency=medium
 
   * Fix: _safe_uninstall_heat (added in 0.1.8) was running on every

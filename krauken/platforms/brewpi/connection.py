@@ -70,17 +70,35 @@ from krauken.platforms.brewpi.device_config import BrewPiDevice
 log = logging.getLogger("krauken.platforms.brewpi")
 
 BAUD_RATE = 57600
-# Measured boot time after the DTR-triggered reset was 2-3s; padded for
-# margin. Paid once per connection (persistent thereafter), not per
-# command, so a couple of extra seconds of headroom costs nothing.
-BOOT_DELAY_S = 4.0
-# Applied AFTER the boot delay above, so this only covers "the Arduino is
-# booted but a reply is momentarily late" -- not "still booting". Kept
-# short (not the reference script's own 10s/10-retry budget for
-# getVersionFromSerial) specifically so probing several unrelated serial
-# devices during discover()'s auto-scan can't burn through
-# discovery.py's DEFAULT_SCAN_BUDGET_S (10s total, across every platform)
-# on BrewPi alone.
+# Confirmed live 2026-08-18 (extensively, repeatedly, not a one-off): the
+# real post-DTR-reset boot delay on this hardware is ~15-20s, not the
+# 2-3s this constant originally assumed -- dominated by the display
+# driver's I2C address scan (scan_address() in IIClcd::init_priv(),
+# sweeping addresses 8-119 with no display physically present to ACK).
+# The old, too-short value caused a real, reproducible daemon bug: every
+# identify_and_connect() attempt queried the freshly-opened port before
+# the Arduino had actually finished booting, got no response at all,
+# closed the connection, and logged "BrewPi not found at startup" --
+# confirmed via the daemon's own journal. Paid once per connection
+# (persistent thereafter), not per command, so generous headroom here
+# costs nothing in steady-state operation.
+BOOT_DELAY_S = 22.0
+# Real cost of this increase, checked directly rather than assumed:
+# identify_and_connect() only pays this delay when actually opening a
+# fresh connection (a new port, or self._serial is None) -- an
+# already-connected BrewPi costs nothing extra on a later discover()
+# rescan, matching this constant's own original "paid once per
+# connection, persistent thereafter" reasoning above. For a genuine
+# cold-connect (first time, or after a lost connection), a Hardware
+# Setup scan that includes BrewPi will now take ~22s longer than before
+# to report a result -- confirmed there's no actual enforced budget this
+# blows through: discovery.py's DEFAULT_SCAN_BUDGET_S is defined but
+# never read/enforced anywhere in discovery.py's own _run_scan() (which
+# just awaits every platform concurrently via asyncio.gather with no
+# timeout at all) -- so this trades a slower cold-connect scan for a
+# connection that actually succeeds, not a slower scan that also still
+# fails, which is what the old, too-short value produced in practice.
+#
 # A single flat wait, no resend -- confirmed live 2026-08-18 via this
 # session's own strace captures that re-sending the command on every
 # retry (the old QUERY_RETRIES/QUERY_RETRY_INTERVAL_S shape) creates two
