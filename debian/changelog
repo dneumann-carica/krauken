@@ -1,3 +1,35 @@
+krauken (0.1.8) stable; urgency=medium
+
+  * Fix: identify_relay_pin's bare uninstall of whatever currently held
+    CHAMBER_HEAT never turned the pin off -- confirmed live against the
+    real rig: DeviceManager.cpp's uninstallDevice() only deletes the C++
+    actuator object, it never calls setActive(false) first, so a pin
+    that had genuinely engaged (e.g. the identified cooling relay) stayed
+    electrically on indefinitely after being abandoned for the next
+    candidate. New _safe_uninstall_heat helper checks whether the current
+    holder is genuinely engaged right now; if so, it reinstalls the same
+    pin with inverted polarity first (the still-active heat demand
+    re-engages it near-instantly under the flip, driving the pin to the
+    correct physical off level for its real wiring), confirms that
+    re-engagement, then uninstalls for real. A candidate that was only
+    ever waiting or timed out with no engagement still gets a bare
+    uninstall, unchanged.
+  * Fix: HardwareWizard.tsx's devicePinSweep offered a "Skip -- try the
+    next test" button any time a candidate was waiting on the
+    compressor-protection timer, with no regard for whether this sweep
+    had ever actually engaged before -- confirmed live: skipping before
+    the sweep's first genuine engagement doesn't save time, it discards
+    the only real ~600s wait BrewPi's anti-short-cycle timer requires and
+    forces the next candidate to pay it again from scratch, silently.
+    New everEngaged state latches the first time any candidate reaches a
+    real engagement; until then, no Skip button is offered at all, just
+    an explanation that this first wait only happens once. Confirmed live
+    this session: every subsequent candidate swap after the first real
+    engagement (~2m15s) went to HEATING near-instantly, five times in a
+    row, across two relays and both polarities.
+
+ -- The Krauken Project <dneumann@arpio.io>  Mon, 17 Aug 2026 20:40:57 -0400
+
 krauken (0.1.7) stable; urgency=medium
 
   * Fix: platforms/brewpi/device_config.py's pin-sweep (v0.1.6's

@@ -185,6 +185,19 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   // on hardware nobody has.
   const [heatSweepConfirmed, setHeatSweepConfirmed] = useState(false);
   const [heatDeclined, setHeatDeclined] = useState(false);
+  // Tracks whether this sweep has EVER reached a genuine engagement
+  // (outcome === "engaged") -- confirmed live 2026-08-16: the very first
+  // candidate's wait is a real, unavoidable BrewPi anti-short-cycle timer
+  // (observed ~2m15s), but every subsequent candidate swap is near-instant
+  // once that first engagement has happened (the bypass mechanism --
+  // reassigning CHAMBER_HEAT to a different pin without ever idling in
+  // between leaves the firmware's timers satisfied). Before that first
+  // engagement, offering a "skip" while waiting silently discards it and
+  // forces the NEXT candidate to pay the same real wait from scratch, with
+  // no indication anything was lost. Reset to false only on a genuine
+  // restart-from-scratch (deviceNoCool's "Start over", or a fresh
+  // begin_device_config), never merely on a candidate/polarity swap.
+  const [everEngaged, setEverEngaged] = useState(false);
 
   const startTest = useStartTest();
   const cancelTest = useCancelTest();
@@ -255,6 +268,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     setPolarityPhase("normal");
     setHeatSweepConfirmed(false);
     setHeatDeclined(false);
+    setEverEngaged(false);
   }
 
   function goTo(next: Stage, nextPicks?: Picks) {
@@ -476,6 +490,17 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     if (candidate) advancePolarityOrCandidate(candidate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, testStatus.data]);
+
+  // Latches the first genuine engagement this sweep -- see everEngaged's
+  // own declaration for why this matters (the Skip button is only safe to
+  // offer once this has happened at least once).
+  useEffect(() => {
+    if (stage !== "devicePinSweep" || everEngaged) return;
+    if (testStatus.data?.kind !== "identify_relay_pin") return;
+    const result = testStatus.data.result as IdentifyRelayPinResult | null;
+    if (result?.outcome === "engaged") setEverEngaged(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, testStatus.data, everEngaged]);
 
   // The exit transitions belong here (real effects), not inline during
   // render.
@@ -792,9 +817,21 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
             {result?.baseline_f?.toFixed(1) ?? "…"}°F) on pin {candidate.pin}. Waiting for the compressor-protection
             timer to clear -- no countdown is available, but this is normal.
           </p>
-          <div className={styles.choiceGrid}>
-            {choice("Skip -- try the next test", "Move on without waiting further.", () => advancePolarityOrCandidate(candidate))}
-          </div>
+          {everEngaged ? (
+            <div className={styles.choiceGrid}>
+              {choice("Skip -- try the next test", "Move on without waiting further.", () => advancePolarityOrCandidate(candidate))}
+            </div>
+          ) : (
+            // No skip before this sweep's first genuine engagement --
+            // confirmed live 2026-08-16: skipping here doesn't save time,
+            // it discards the one real wait BrewPi's anti-short-cycle
+            // timer requires and forces the next candidate to pay it
+            // again from scratch, with no indication anything was lost.
+            <p className={styles.body}>
+              This first test can take up to 10 minutes -- BrewPi's compressor-protection timer has to clear once
+              before anything can switch on for the first time. This only happens once.
+            </p>
+          )}
         </>
       );
     } else if (result?.outcome === "engaged") {
@@ -840,6 +877,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       setPolarityPhase("normal");
       setHeatSweepConfirmed(false);
       setHeatDeclined(false);
+      setEverEngaged(false);
       goTo("devicePinSweep");
     };
   } else if (stage === "deviceFinalizing") {

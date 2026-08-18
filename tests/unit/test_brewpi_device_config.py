@@ -255,6 +255,98 @@ async def test_identify_relay_pin_is_blocked_while_a_fermentation_is_active(monk
     assert conn.install_calls == []
 
 
+async def test_identify_relay_pin_safely_turns_off_a_previously_engaged_candidate_before_swapping(monkeypatch: pytest.MonkeyPatch):
+    # Confirmed live 2026-08-16: bare-uninstalling a genuinely engaged
+    # actuator leaves its pin electrically stuck on forever. Swapping away
+    # from a candidate that's currently, genuinely engaged must go through
+    # the safe-off flip-then-uninstall dance, not a bare uninstall.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(state_sequence=[3])  # pin 5 engages immediately
+    ctx = _FakeCtx(conn)
+    result1 = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 5, "invert": 1}, "window_s": 30.0})
+    await ctx.jobs[result1["test_id"]]._task
+    assert ctx.jobs[result1["test_id"]].result["outcome"] == "engaged"
+
+    # Second call swaps to pin 6 while pin 5's actuator is still genuinely
+    # engaged right now.
+    conn._state_idx = 0
+    conn.state_sequence = [3, 3, 3]  # engaged throughout: the safe-off check, the flip's re-confirm, and pin 6's own engagement
+    result2 = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 6, "invert": 0}, "window_s": 30.0})
+    await ctx.jobs[result2["test_id"]]._task
+
+    calls = conn.install_calls
+    assert len(calls) == 4
+    original, flip, uninstall, new_candidate = calls
+    assert original.pin == 5 and original.invert == 1 and original.function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT
+    # The flip: same slot/pin, invert reversed, still CHAMBER_HEAT.
+    assert flip.slot == original.slot
+    assert flip.pin == 5
+    assert flip.invert == 0
+    assert flip.function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT
+    # Then a real uninstall, only after the flip.
+    assert uninstall.slot == original.slot
+    assert uninstall.function == device_config.DEVICE_FUNCTION_NONE
+    # Then, and only then, the new candidate.
+    assert new_candidate.pin == 6
+    assert new_candidate.function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT
+
+
+# --- _safe_uninstall_heat ---
+
+
+async def test_safe_uninstall_heat_flips_polarity_before_uninstalling_when_currently_engaged():
+    conn = _FakeBrewPiConnection(state_sequence=[3, 3])  # engaged now, and again once the flip re-confirms
+    ctx = _FakeCtx(conn)
+    device = BrewPiDevice(
+        slot=15, chamber=1, beer=0, function=device_config.DEVICE_FUNCTION_CHAMBER_HEAT,
+        hardware=device_config.DEVICE_HARDWARE_PIN, pin=5, invert=1,
+    )
+
+    await device_config._safe_uninstall_heat(ctx, conn, device)
+
+    assert len(conn.install_calls) == 2
+    flip_call, uninstall_call = conn.install_calls
+    assert flip_call.slot == 15
+    assert flip_call.pin == 5
+    assert flip_call.invert == 0  # flipped from 1
+    assert flip_call.function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT
+    assert uninstall_call.slot == 15
+    assert uninstall_call.function == device_config.DEVICE_FUNCTION_NONE
+
+
+async def test_safe_uninstall_heat_bare_uninstalls_when_never_engaged():
+    # Only ever WAITING, never actually engaged -- nothing was ever driven
+    # "on" in the first place, so there's nothing to turn off.
+    conn = _FakeBrewPiConnection(state_sequence=[6])
+    ctx = _FakeCtx(conn)
+    device = BrewPiDevice(
+        slot=15, chamber=1, beer=0, function=device_config.DEVICE_FUNCTION_CHAMBER_HEAT,
+        hardware=device_config.DEVICE_HARDWARE_PIN, pin=2, invert=0,
+    )
+
+    await device_config._safe_uninstall_heat(ctx, conn, device)
+
+    assert len(conn.install_calls) == 1
+    assert conn.install_calls[0].function == device_config.DEVICE_FUNCTION_NONE
+
+
+async def test_safe_uninstall_heat_still_uninstalls_if_the_flip_never_reconfirms_engaged():
+    # Engaged right now (triggers the flip), but the flip's own
+    # re-engagement never shows up within the confirm window -- must not
+    # hang, must still uninstall at the end (best-effort).
+    conn = _FakeBrewPiConnection(state_sequence=[3] + [0] * 20)
+    ctx = _FakeCtx(conn)
+    device = BrewPiDevice(
+        slot=15, chamber=1, beer=0, function=device_config.DEVICE_FUNCTION_CHAMBER_HEAT,
+        hardware=device_config.DEVICE_HARDWARE_PIN, pin=6, invert=1,
+    )
+
+    await device_config._safe_uninstall_heat(ctx, conn, device)
+
+    assert len(conn.install_calls) == 2
+    assert conn.install_calls[-1].function == device_config.DEVICE_FUNCTION_NONE
+
+
 # --- install_probe ---
 
 

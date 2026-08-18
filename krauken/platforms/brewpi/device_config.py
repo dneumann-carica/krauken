@@ -120,6 +120,15 @@ RELAY_IDENTIFY_FORCE_DELTA_F = 15.0
 HEAT_ENGAGED_STATES = frozenset({3, 9})
 HEAT_WAITING_STATES = frozenset({6})  # WAITING_TO_HEAT
 
+# Safe-off dance (see _safe_uninstall_heat below): confirmed live 2026-08-16
+# that a flipped-polarity re-engagement is always near-instant (same bypass
+# mechanism as any other mid-sweep swap, since timers are already satisfied
+# -- it was JUST engaged). This window is a generous multiple of every
+# observed real-world timing (sub-second in every manual test), not a real
+# anti-short-cycle wait like RELAY_IDENTIFY_WINDOW_S.
+SAFE_OFF_CONFIRM_WINDOW_S = 15.0
+SAFE_OFF_POLL_S = 1.0
+
 
 @dataclass
 class BrewPiDevice:
@@ -222,6 +231,55 @@ async def _uninstall(conn: Any, slot: int) -> None:
     slot: the relay pin-identification invariant (at most one CHAMBER_HEAT
     device live at a time), and begin_device_config's wipe-to-unassigned."""
     await conn.install_device(BrewPiDevice(slot=slot, function=DEVICE_FUNCTION_NONE))
+
+
+async def _safe_uninstall_heat(ctx: Any, conn: Any, device: BrewPiDevice) -> None:
+    """Abandon a CHAMBER_HEAT candidate without leaving it electrically
+    stuck on. Confirmed live 2026-08-16: DeviceManager.cpp's
+    uninstallDevice() never calls setActive(false) -- it only deletes the
+    C++ actuator object, so a pin that was genuinely driven "on" stays at
+    that level indefinitely once its device is bare-uninstalled (reproduced
+    live: a light standing in for the fridge stayed on after its actuator
+    was uninstalled to free the CHAMBER_HEAT function for the next
+    candidate). Only matters if `device` is genuinely engaged RIGHT NOW --
+    a candidate that was only ever waiting, or timed out with no
+    engagement, was never driven to an "on" level in the first place, so a
+    bare uninstall is correct and sufficient for that case, unchanged.
+
+    Fix: reinstall the SAME pin as CHAMBER_HEAT with invert flipped. Demand
+    and anti-short-cycle timers are already satisfied (it was JUST
+    engaged), so the flipped actuator re-engages near-instantly -- same
+    bypass mechanism as any other mid-sweep swap -- driving the pin to the
+    OPPOSITE physical level, which is the correct real off level for this
+    pin's actual wiring. Confirm that re-engagement actually happened
+    (bounded, short window -- this is NOT a real anti-short-cycle wait,
+    just confirmation the flip took), then uninstall for real."""
+    reading = await conn.read_temps()
+    if reading is None or reading.state not in HEAT_ENGAGED_STATES:
+        await _uninstall(conn, device.slot)
+        return
+    flipped = BrewPiDevice(
+        slot=device.slot,
+        chamber=1,
+        beer=0,
+        function=DEVICE_FUNCTION_CHAMBER_HEAT,
+        hardware=DEVICE_HARDWARE_PIN,
+        pin=device.pin,
+        invert=1 - int(device.invert or 0),
+    )
+    await conn.install_device(flipped)
+    elapsed_s = 0.0
+    while elapsed_s < SAFE_OFF_CONFIRM_WINDOW_S:
+        await ctx.clock.sleep(SAFE_OFF_POLL_S)
+        elapsed_s += SAFE_OFF_POLL_S
+        reading = await conn.read_temps()
+        if reading is not None and reading.state in HEAT_ENGAGED_STATES:
+            break
+    # Best-effort even if the confirm window times out (never observed in
+    # real testing -- every flip re-engaged in well under a second) --
+    # uninstalling is still the right final step either way, and must not
+    # hang the sweep indefinitely on a safety cleanup step.
+    await _uninstall(conn, device.slot)
 
 
 # --- Baseline snapshot: capture-at-start, restore-on-cancel-or-self-heal ---
@@ -466,14 +524,17 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
     human what physically happened next.
 
     Invariant, load-bearing (see module docstring): before installing the
-    requested candidate, always uninstalls whatever currently holds the
-    CHAMBER_HEAT function, so at most one device ever shares that function
-    at a time. This is what replaced the old sweep_relay's "leave a
-    candidate energized between steps" design -- confirmed live this
-    session that BrewPi does not enforce one-actuator-per-function, so
-    several stray same-function candidates left installed get driven
-    together the instant that function is commanded, not just the intended
-    one. Also reports the WAITING_TO_HEAT code explicitly (qualitative
+    requested candidate, always abandons whatever currently holds the
+    CHAMBER_HEAT function via `_safe_uninstall_heat` (not a bare uninstall
+    -- see that helper's docstring: uninstalling a still-energized actuator
+    leaves its pin electrically stuck on forever, confirmed live 2026-08-16),
+    so at most one device ever shares that function at a time. This is what
+    replaced the old sweep_relay's "leave a candidate energized between
+    steps" design -- confirmed live this session that BrewPi does not
+    enforce one-actuator-per-function, so several stray same-function
+    candidates left installed get driven together the instant that function
+    is commanded, not just the intended one. Also reports the WAITING_TO_HEAT
+    code explicitly (qualitative
     only -- the firmware never exposes a numeric remaining-wait-seconds
     value on the wire, confirmed via exhaustive search of PiLink.cpp) so
     the wizard can show "waiting on the compressor-protection timer"
@@ -506,7 +567,7 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
     installed = await conn.list_all_devices(with_values=False)
     existing_heat = next((d for d in installed if d.function == DEVICE_FUNCTION_CHAMBER_HEAT), None)
     if existing_heat is not None:
-        await _uninstall(conn, existing_heat.slot)
+        await _safe_uninstall_heat(ctx, conn, existing_heat)
         installed = [d for d in installed if d.slot != existing_heat.slot]
 
     reserved_taken = next((d for d in installed if d.slot == RELAY_IDENTIFY_SLOT), None)
