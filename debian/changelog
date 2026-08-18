@@ -1,3 +1,41 @@
+krauken (0.1.9) stable; urgency=medium
+
+  * Fix: _safe_uninstall_heat (added in 0.1.8) was running on every
+    candidate abandonment, but confirmed live against the real rig that
+    it should only run when the pin being abandoned was actually
+    confirmed as the heater or the fridge -- a pin where every polarity
+    came back "nothing happened" has no confirmed off level to aim for,
+    so the flip dance was just guessing. identify_relay_pin now takes an
+    identified_pins param (the wizard's own confirmed heat/cool pins);
+    only those get the safe-off treatment, everything else gets the
+    plain bare uninstall it always got before 0.1.8.
+  * Fix: reset_brewpi/_restore_baseline reinstalled the baseline's own
+    devices before resetting, and only ever reinstalled what was in the
+    snapshot -- never uninstalled anything else. Confirmed live: a
+    currently-engaged stray device (e.g. the sweep's own scratch-slot
+    candidate) stayed energized through the whole reinstall step, and
+    survived a restore untouched if it wasn't part of the snapshot,
+    leaving two conflicting device definitions on the same physical pin.
+    The reset now happens first, and the restore reconciles against the
+    current installed-device list -- uninstalling anything not in the
+    snapshot -- before installing what the snapshot says should be there.
+  * Fix: identify_relay_pin hard-failed the whole candidate test on a
+    single missed chamber-temp read, even though the probe was confirmed
+    reading fine both immediately before and after. It now retries that
+    one baseline read a few times before giving up.
+  * Fix: connection.py's serial query loops (_query_locked,
+    _query_device_list_locked) re-sent the command on every retry
+    iteration (every 0.5s, up to 4 times) instead of just waiting longer
+    for a response that was simply running behind an interleaved async
+    log line. Confirmed live via strace: 44 occurrences this session of
+    the identical command being written twice within under a second of
+    itself, and at least one case of a stale install-echo reappearing
+    several minutes late and out of place -- both are the two-outstanding-
+    requests problem a resend creates. The command is now written exactly
+    once, with a single flat 15s wait and no resend of any kind.
+
+ -- The Krauken Project <dneumann@arpio.io>  Tue, 18 Aug 2026 00:14:34 -0400
+
 krauken (0.1.8) stable; urgency=medium
 
   * Fix: identify_relay_pin's bare uninstall of whatever currently held

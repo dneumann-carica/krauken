@@ -36,7 +36,10 @@ class _FakeBrewPiConnection:
     reset_calls: int = 0
     set_target_calls: list[float | None] = field(default_factory=list)
     raise_on_install_call: int | None = None  # 1-indexed -- which install_device() call raises
+    fail_first_n_reads: int = 0  # read_temps() returns None for this many calls before behaving normally
+    call_order: list[str] = field(default_factory=list)  # e.g. "reset", "install:5", "uninstall:5" -- for ordering assertions
     _state_idx: int = 0
+    _read_calls: int = 0
 
     async def list_installed_devices(self, *, with_values: bool = True) -> list[BrewPiDevice]:
         return list(self.installed)
@@ -54,6 +57,8 @@ class _FakeBrewPiConnection:
         # "cancelled mid-loop" untestable).
         await asyncio.sleep(0)
         self.install_calls.append(device)
+        tag = "uninstall" if device.function == device_config.DEVICE_FUNCTION_NONE else "install"
+        self.call_order.append(f"{tag}:{device.slot}")
         if self.raise_on_install_call is not None and len(self.install_calls) == self.raise_on_install_call:
             raise RuntimeError("simulated install failure")
         self.installed = [d for d in self.installed if d.slot != device.slot] + [device]
@@ -61,9 +66,13 @@ class _FakeBrewPiConnection:
 
     async def reset_and_reconnect(self) -> bool:
         self.reset_calls += 1
+        self.call_order.append("reset")
         return True
 
     async def read_temps(self) -> BrewPiReading | None:
+        self._read_calls += 1
+        if self._read_calls <= self.fail_first_n_reads:
+            return None  # simulates the confirmed-live transient missed read (gap 4)
         if self.fridge_temp_f is None:
             return None
         state = self.state_sequence[min(self._state_idx, len(self.state_sequence) - 1)]
@@ -245,6 +254,37 @@ async def test_identify_relay_pin_fails_cleanly_when_the_chamber_probe_isnt_read
     assert "chamber probe" in job.error
 
 
+async def test_identify_relay_pin_survives_a_single_transient_missed_baseline_read(monkeypatch: pytest.MonkeyPatch):
+    # Gap 4, confirmed live 2026-08-18: a single missed read_temps() call
+    # shouldn't hard-fail the whole test -- a real, demonstrated
+    # connection-layer timing issue, not a persistent probe problem.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(fail_first_n_reads=2, state_sequence=[3])
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 2}, "window_s": 30.0})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    assert job.result["outcome"] == "engaged"
+
+
+async def test_identify_relay_pin_still_fails_cleanly_when_every_retry_misses(monkeypatch: pytest.MonkeyPatch):
+    # The retry is bounded, not infinite -- a genuinely, persistently
+    # unreadable probe must still fail cleanly, not hang.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(fail_first_n_reads=999)
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 2}, "window_s": 6.0})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "failed"
+    assert "chamber probe" in job.error
+
+
 async def test_identify_relay_pin_is_blocked_while_a_fermentation_is_active(monkeypatch: pytest.MonkeyPatch):
     _patch_active_fermentation(monkeypatch)
     conn = _FakeBrewPiConnection()
@@ -255,11 +295,14 @@ async def test_identify_relay_pin_is_blocked_while_a_fermentation_is_active(monk
     assert conn.install_calls == []
 
 
-async def test_identify_relay_pin_safely_turns_off_a_previously_engaged_candidate_before_swapping(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_relay_pin_safely_turns_off_an_identified_candidate_before_swapping(monkeypatch: pytest.MonkeyPatch):
     # Confirmed live 2026-08-16: bare-uninstalling a genuinely engaged
     # actuator leaves its pin electrically stuck on forever. Swapping away
-    # from a candidate that's currently, genuinely engaged must go through
-    # the safe-off flip-then-uninstall dance, not a bare uninstall.
+    # from a candidate that's currently engaged AND was positively
+    # identified (confirmed live 2026-08-18 -- see the correction below)
+    # must go through the safe-off flip-then-uninstall dance, not a bare
+    # uninstall. `identified_pins` is how the wizard tells this action
+    # which pin that was.
     _patch_no_active_fermentation(monkeypatch)
     conn = _FakeBrewPiConnection(state_sequence=[3])  # pin 5 engages immediately
     ctx = _FakeCtx(conn)
@@ -268,10 +311,13 @@ async def test_identify_relay_pin_safely_turns_off_a_previously_engaged_candidat
     assert ctx.jobs[result1["test_id"]].result["outcome"] == "engaged"
 
     # Second call swaps to pin 6 while pin 5's actuator is still genuinely
-    # engaged right now.
+    # engaged right now, AND pin 5 has been confirmed (e.g. as the fridge)
+    # -- so the safe-off dance must run.
     conn._state_idx = 0
     conn.state_sequence = [3, 3, 3]  # engaged throughout: the safe-off check, the flip's re-confirm, and pin 6's own engagement
-    result2 = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 6, "invert": 0}, "window_s": 30.0})
+    result2 = tests_runtime.start_test(
+        ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 6, "invert": 0}, "window_s": 30.0, "identified_pins": [5]},
+    )
     await ctx.jobs[result2["test_id"]]._task
 
     calls = conn.install_calls
@@ -289,6 +335,35 @@ async def test_identify_relay_pin_safely_turns_off_a_previously_engaged_candidat
     # Then, and only then, the new candidate.
     assert new_candidate.pin == 6
     assert new_candidate.function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT
+
+
+async def test_identify_relay_pin_bare_uninstalls_an_unidentified_candidate_even_if_engaged(monkeypatch: pytest.MonkeyPatch):
+    # The correction, confirmed live 2026-08-18: a candidate that reached
+    # "engaged" but was answered "nothing happened" (never added to
+    # identified_pins) doesn't get the safe-off treatment, even though the
+    # firmware genuinely drove it "on" -- there's no confirmed off polarity
+    # for a pin nothing is known to be wired to, so the flip dance would
+    # just be guessing. A bare uninstall is correct here.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(state_sequence=[3])  # pin 5 engages immediately
+    ctx = _FakeCtx(conn)
+    result1 = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 5, "invert": 1}, "window_s": 30.0})
+    await ctx.jobs[result1["test_id"]]._task
+    assert ctx.jobs[result1["test_id"]].result["outcome"] == "engaged"
+
+    # Swap to pin 6 -- pin 5 is still engaged, but was never identified
+    # (no identified_pins passed), so no flip-install should occur.
+    conn._state_idx = 0
+    conn.state_sequence = [3]
+    result2 = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 6, "invert": 0}, "window_s": 30.0})
+    await ctx.jobs[result2["test_id"]]._task
+
+    calls = conn.install_calls
+    assert len(calls) == 3  # original pin5, bare uninstall, new candidate pin6 -- no flip-install
+    original, uninstall, new_candidate = calls
+    assert original.pin == 5
+    assert uninstall.function == device_config.DEVICE_FUNCTION_NONE
+    assert new_candidate.pin == 6
 
 
 # --- _safe_uninstall_heat ---
@@ -437,6 +512,42 @@ async def test_begin_device_config_self_heals_a_prior_incomplete_session_first(m
     final_snapshot = device_config._read_baseline()
     assert final_snapshot is not None
     assert {d.slot for d in final_snapshot} == {0}
+
+
+async def test_restore_baseline_resets_before_reinstalling_not_after(monkeypatch: pytest.MonkeyPatch):
+    # Gap 3, confirmed live 2026-08-18: the original install-then-reset
+    # order leaves any currently-engaged stray device energized throughout
+    # the whole reinstall step. The reset must come first.
+    leftover = [BrewPiDevice(slot=0, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP, hardware=2, pin=18, address="AAA")]
+    device_config._write_baseline(leftover)
+    conn = _FakeBrewPiConnection(installed=[])
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "begin_device_config", {})
+    await ctx.jobs[result["test_id"]]._task
+
+    assert "reset" in conn.call_order
+    assert "install:0" in conn.call_order
+    assert conn.call_order.index("reset") < conn.call_order.index("install:0")
+
+
+async def test_restore_baseline_uninstalls_a_stray_device_not_in_the_snapshot(monkeypatch: pytest.MonkeyPatch):
+    # Gap 3, confirmed live 2026-08-18: reinstalling only the snapshot's
+    # own devices was never enough -- a stray device left installed
+    # outside the snapshot (e.g. the sweep's own scratch-slot candidate)
+    # survived a restore completely untouched, leaving two conflicting
+    # device definitions possibly bound to the same physical pin.
+    leftover_snapshot = [BrewPiDevice(slot=0, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP, hardware=2, pin=18, address="AAA")]
+    device_config._write_baseline(leftover_snapshot)
+    stray = BrewPiDevice(slot=15, function=device_config.DEVICE_FUNCTION_CHAMBER_HEAT, hardware=1, pin=6, invert=1)
+    conn = _FakeBrewPiConnection(installed=[stray])
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "begin_device_config", {})
+    await ctx.jobs[result["test_id"]]._task
+
+    assert "uninstall:15" in conn.call_order  # the stray device got uninstalled during the restore/reconcile step
+    assert "install:0" in conn.call_order  # the baseline's own device still got (re)installed
 
 
 # --- finalize_device_config ---

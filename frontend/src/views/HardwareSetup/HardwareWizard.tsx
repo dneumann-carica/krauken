@@ -333,8 +333,20 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   // decides on its own).
   function runIdentifyRelayPin(candidate: RawBrewPiDevice, invert: number) {
     setTestId(undefined);
+    // identified_pins tells the backend which currently-installed
+    // CHAMBER_HEAT device (if any) has actually been confirmed as the
+    // heater or the fridge -- it only gets the safe-off flip-and-confirm
+    // treatment if its pin is in this list. A pin where every polarity
+    // came back "nothing happened" has no confirmed off level to aim
+    // for, so it gets a bare uninstall instead (see device_config.py's
+    // own docstring for the full reasoning).
+    const identifiedPins = [devicePicks.cool?.pin, devicePicks.heat?.pin].filter((p): p is number => p != null);
     startTest.mutate(
-      { deviceId: device.device_id, action: "identify_relay_pin", params: { candidate: { pin: candidate.pin, invert } } },
+      {
+        deviceId: device.device_id,
+        action: "identify_relay_pin",
+        params: { candidate: { pin: candidate.pin, invert }, identified_pins: identifiedPins },
+      },
       { onSuccess: (r) => { localStartRef.current = Date.now(); setTestId(r.test_id); } },
     );
   }

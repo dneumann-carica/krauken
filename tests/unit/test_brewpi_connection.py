@@ -16,17 +16,24 @@ from krauken.contracts.models import ChamberMode, Health
 from krauken.platforms.brewpi.connection import BrewPiConnection
 from krauken.platforms.brewpi.live import BrewPiBeerTempSource, BrewPiChamberDriver
 
+# The QUERY_TIMEOUT_S-shrinking autouse fixture lives in tests/unit/conftest.py
+# now, not here -- it needs to apply to every test file that can exercise a
+# "never answers" BrewPiConnection path, not just this one (confirmed live:
+# test_brewpi_identify.py has its own such case).
+
 
 class FakeSerial:
     """Maps a written command's leading character to a canned response,
     queued for the NEXT readline() call(s) -- mirrors real BrewPi
-    firmware's behavior closely enough for this driver's own retry loop
-    (write, then poll readline() until a matching line shows up) without
-    needing to simulate real serial timing at all: every canned response
-    is available immediately, so tests never actually wait out
-    QUERY_RETRY_INTERVAL_S. `responses={}` (or a command with no entry)
-    means "never answers" -- readline() just returns b"" forever, letting
-    a test exercise the real retry-then-give-up path. A response value may
+    firmware's behavior closely enough for this driver's own query loop
+    (write once, then poll readline() until a matching line shows up)
+    without needing to simulate real serial timing at all: every canned
+    response is available immediately, so tests never actually wait out
+    QUERY_TIMEOUT_S (further sped up by this file's `_fast_query_timeout`
+    autouse fixture, which shrinks it well below its real 15s value).
+    `responses={}` (or a command with no entry) means "never answers" --
+    readline() just returns b"" forever, letting a test exercise the
+    real wait-then-give-up path. A response value may
     be a single `bytes` line (existing convention) or a `list[bytes]` of
     several lines queued in order -- the latter is what lets a test
     reproduce the real firmware's confirmed behavior of splitting a 'd'/'h'
@@ -311,3 +318,45 @@ async def test_reset_and_reconnect_is_a_safe_no_op_when_disconnected():
     conn = BrewPiConnection(clock=SimulatorClock())
     result = await conn.reset_and_reconnect()
     assert result is False
+
+
+# --- Gap 5: no resend on retry -- confirmed live 2026-08-18 that the old
+# shape (resend the command on every retry iteration) let two outstanding
+# requests for the same thing race, producing interleaved/stale responses.
+# The fix: write exactly once, then just keep reading until the deadline. ---
+
+
+async def test_query_locked_never_resends_while_waiting_for_a_late_response():
+    # A non-matching line (an async log fragment) arrives first, then the
+    # real match -- the fix must keep reading rather than giving up and
+    # resending after some fixed sub-interval.
+    conn = _connected(
+        {"t": [b'D:{"logType":"I","logID":12,"V":["mode","f"]}\r\n', REAL_T_RESPONSE]},
+    )
+    async with conn._lock:
+        data = await conn._query_locked("t", "T")
+    assert data is not None
+    assert data["FridgeTemp"] == 76.55
+    assert len(conn._serial.written) == 1  # exactly one write -- no resend
+
+
+async def test_query_locked_writes_exactly_once_when_the_arduino_never_answers():
+    conn = _connected({})  # no 't' entry -- readline() always returns b""
+    async with conn._lock:
+        data = await conn._query_locked("t", "T")
+    assert data is None
+    assert len(conn._serial.written) == 1  # gave up after ONE write, not several
+
+
+async def test_query_device_list_locked_never_resends_while_waiting_for_a_late_response():
+    conn = _connected({"h": REAL_H_RESPONSE_WITH_INTERLEAVED_LOG})
+    devices = await conn.list_available_devices()
+    assert len(devices) == 2
+    assert len(conn._serial.written) == 1  # exactly one write -- no resend
+
+
+async def test_query_device_list_locked_writes_exactly_once_when_the_arduino_never_answers():
+    conn = _connected({})  # no 'h' entry -- readline() always returns b""
+    devices = await conn.list_available_devices()
+    assert devices == []
+    assert len(conn._serial.written) == 1  # gave up after ONE write, not several

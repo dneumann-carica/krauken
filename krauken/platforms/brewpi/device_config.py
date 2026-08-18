@@ -129,6 +129,13 @@ HEAT_WAITING_STATES = frozenset({6})  # WAITING_TO_HEAT
 SAFE_OFF_CONFIRM_WINDOW_S = 15.0
 SAFE_OFF_POLL_S = 1.0
 
+# A single missed baseline chamber-temp read shouldn't hard-fail the whole
+# candidate test -- confirmed live 2026-08-18 as a real, occasional
+# connection-layer timing issue, not a persistent probe problem. Bounded
+# and short; not a real anti-short-cycle wait.
+BASELINE_READ_RETRIES = 3
+BASELINE_READ_RETRY_S = 1.0
+
 
 @dataclass
 class BrewPiDevice:
@@ -312,19 +319,38 @@ def _clear_baseline() -> None:
 
 
 async def _restore_baseline(conn: Any) -> None:
-    """Reinstall every device from the snapshot file (if any), then reset --
-    a reset (not a soft idle) is the right unconditional follow-up here,
-    same reasoning as finalize_device_config's own: a freshly-pushed
-    config must never be interpreted by stale in-RAM actuator objects.
+    """Reset first, then reconcile the device table to match the snapshot
+    (if any) -- confirmed live 2026-08-18 that the original install-then-
+    reset order leaves any currently-engaged stray device (e.g. the
+    sweep's own scratch-slot CHAMBER_HEAT candidate) energized throughout
+    the whole reinstall step, since installing unrelated devices does
+    nothing to de-energize it. A real reset forces every actuator to
+    reconstruct from EEPROM and be driven to a defined level immediately
+    -- that's the safety mechanism, so it must happen first, not last.
+
+    Also reconciles rather than just installs: confirmed live that
+    reinstalling only the snapshot's own devices was never enough on its
+    own -- a stray device NOT in the snapshot survives a restore
+    completely untouched, since installing the snapshot's devices doesn't
+    remove anything else, leaving two conflicting device definitions
+    possibly bound to the same physical pin. So: reset first, then
+    uninstall whatever's currently installed that ISN'T part of the
+    snapshot being restored, then install every device the snapshot says
+    should be there. No-op if there's no snapshot to restore.
+
     Used by both begin_device_config's self-heal step and reset_brewpi's
-    cancel-path restore -- same operation, two callers. No-op if there's
-    no snapshot to restore."""
+    cancel-path restore -- same operation, two callers."""
     baseline = _read_baseline()
     if baseline is None:
         return
+    await conn.reset_and_reconnect()
+    baseline_slots = {d.slot for d in baseline}
+    current = await conn.list_installed_devices(with_values=False)
+    for device in current:
+        if device.slot not in baseline_slots:
+            await _uninstall(conn, device.slot)
     for device in baseline:
         await conn.install_device(device)
-    await conn.reset_and_reconnect()
 
 
 def _brewpi_connection(ctx: Any) -> Any | None:
@@ -525,20 +551,32 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
 
     Invariant, load-bearing (see module docstring): before installing the
     requested candidate, always abandons whatever currently holds the
-    CHAMBER_HEAT function via `_safe_uninstall_heat` (not a bare uninstall
-    -- see that helper's docstring: uninstalling a still-energized actuator
-    leaves its pin electrically stuck on forever, confirmed live 2026-08-16),
-    so at most one device ever shares that function at a time. This is what
-    replaced the old sweep_relay's "leave a candidate energized between
-    steps" design -- confirmed live this session that BrewPi does not
-    enforce one-actuator-per-function, so several stray same-function
-    candidates left installed get driven together the instant that function
-    is commanded, not just the intended one. Also reports the WAITING_TO_HEAT
-    code explicitly (qualitative
+    CHAMBER_HEAT function, so at most one device ever shares that function
+    at a time. This is what replaced the old sweep_relay's "leave a
+    candidate energized between steps" design -- confirmed live this
+    session that BrewPi does not enforce one-actuator-per-function, so
+    several stray same-function candidates left installed get driven
+    together the instant that function is commanded, not just the intended
+    one. Also reports the WAITING_TO_HEAT code explicitly (qualitative
     only -- the firmware never exposes a numeric remaining-wait-seconds
     value on the wire, confirmed via exhaustive search of PiLink.cpp) so
     the wizard can show "waiting on the compressor-protection timer"
     rather than a blank screen.
+
+    How that existing device gets abandoned depends on whether it was ever
+    positively identified (confirmed live 2026-08-18): `_safe_uninstall_heat`
+    (flip polarity, confirm re-engagement at the real off level, then
+    uninstall) is only correct when we actually know which polarity is
+    "off" for that pin -- which is only true once a human has confirmed it
+    as the heater or the fridge. For a pin where every polarity tried came
+    back "nothing happened," there's no confirmed off level to aim for
+    (and no real device there to protect anyway), so a bare uninstall is
+    both correct and sufficient -- running the flip dance in that case
+    would arbitrarily pick a polarity that's just as likely to be "on" as
+    "off" for whatever, if anything, is actually wired there. The caller
+    (the wizard) tells this action which pins have been confirmed via
+    `identified_pins`; the currently-installed CHAMBER_HEAT device only
+    gets the safe-off treatment if its pin is in that list.
 
     Never forces a target below the current chamber temp -- this action
     must never command a cooling demand. Normal and reversed polarity are
@@ -547,7 +585,8 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
     retry mechanism here -- the frontend drives that sequencing.
 
     params: candidate: {"pin": int, "invert": 0|1}, window_s: float,
-    optional.
+    identified_pins: list[int] (pins already confirmed as heat or fridge
+    this sweep -- see above), both optional.
     """
     conn = _brewpi_connection(ctx)
     if conn is None:
@@ -563,11 +602,15 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
         return
     invert = int(candidate.get("invert", 0))
     window_s = float(params.get("window_s", RELAY_IDENTIFY_WINDOW_S))
+    identified_pins = set(params.get("identified_pins") or [])
 
     installed = await conn.list_all_devices(with_values=False)
     existing_heat = next((d for d in installed if d.function == DEVICE_FUNCTION_CHAMBER_HEAT), None)
     if existing_heat is not None:
-        await _safe_uninstall_heat(ctx, conn, existing_heat)
+        if existing_heat.pin in identified_pins:
+            await _safe_uninstall_heat(ctx, conn, existing_heat)
+        else:
+            await _uninstall(conn, existing_heat.slot)
         installed = [d for d in installed if d.slot != existing_heat.slot]
 
     reserved_taken = next((d for d in installed if d.slot == RELAY_IDENTIFY_SLOT), None)
@@ -585,7 +628,19 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
     )
     await conn.install_device(device)
 
-    reading = await conn.read_temps()
+    # A single missed read here shouldn't hard-fail the whole test --
+    # confirmed live 2026-08-18 that the chamber probe can occasionally
+    # miss one read_temps() call (a real, demonstrated connection-layer
+    # timing issue, not a persistent probe problem: a `brewpi_devices`
+    # check immediately after a failure like this showed the probe
+    # reading fine). A short, bounded retry here is just tolerance for
+    # one missed line, not a real anti-short-cycle wait.
+    reading = None
+    for _ in range(BASELINE_READ_RETRIES):
+        reading = await conn.read_temps()
+        if reading is not None and reading.fridge_temp_f is not None:
+            break
+        await ctx.clock.sleep(BASELINE_READ_RETRY_S)
     if reading is None or reading.fridge_temp_f is None:
         job.state = "failed"
         job.error = "chamber probe isn't reading -- can't run a live relay test"

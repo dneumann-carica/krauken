@@ -81,8 +81,20 @@ BOOT_DELAY_S = 4.0
 # devices during discover()'s auto-scan can't burn through
 # discovery.py's DEFAULT_SCAN_BUDGET_S (10s total, across every platform)
 # on BrewPi alone.
-QUERY_RETRIES = 4
-QUERY_RETRY_INTERVAL_S = 0.5
+# A single flat wait, no resend -- confirmed live 2026-08-18 via this
+# session's own strace captures that re-sending the command on every
+# retry (the old QUERY_RETRIES/QUERY_RETRY_INTERVAL_S shape) creates two
+# outstanding requests for the same thing whenever the genuine response
+# is just running a little behind (e.g. an async D:{...} log line
+# interleaving), and their replies can arrive interleaved or out of order
+# relative to what the client expects next -- confirmed 44 occurrences of
+# the identical command being written twice within under a second of
+# itself across one real session. Real write->matching-response latency
+# measured directly from that session's own log (continuous-activity
+# delays only, excluding idle gaps): median 0.58s, p90 2.5s, p99 5.9s,
+# max 9.35s. 15s is a backstop with real margin over every observed case,
+# not a number expected to be hit often.
+QUERY_TIMEOUT_S = 15.0
 
 # Confirmed real on the actual rig, not a parsing bug in this driver: the
 # firmware sometimes interleaves an unrelated log message (a bare
@@ -340,74 +352,77 @@ class BrewPiConnection:
         self.port = None
 
     async def _query_locked(self, command: str, expect_prefix: str) -> Any | None:
-        """Caller must hold self._lock. Sends one command, retrying
-        QUERY_RETRIES times, until a line starting with `expect_prefix +
-        ':'` arrives; returns its JSON payload, or None if nothing
-        matched within the retry budget or the connection isn't open.
-        Fine for 't'/'n'/'s'/'c' -- confirmed those always arrive as one
-        complete, self-contained line. NOT used for 'd'/'h' (see
+        """Caller must hold self._lock. Sends the command exactly ONCE,
+        then reads until a line starting with `expect_prefix + ':'`
+        arrives or QUERY_TIMEOUT_S elapses -- never resends mid-wait (see
+        QUERY_TIMEOUT_S's own comment for why: a resend while the genuine
+        reply is just running behind creates two outstanding requests for
+        the same thing, and their replies can arrive interleaved or out of
+        order). Returns the parsed JSON payload, or None if nothing
+        matched within the window or the connection isn't open. Fine for
+        't'/'n'/'s'/'c' -- confirmed those always arrive as one complete,
+        self-contained line. NOT used for 'd'/'h' (see
         _query_device_list_locked): those can arrive split across
         multiple physical lines with a log message interleaved mid-array."""
         if self._serial is None:
             return None
-        for _ in range(QUERY_RETRIES):
+        try:
+            await asyncio.to_thread(self._serial.write, f"{command}\n".encode("ascii"))
+        except Exception:  # noqa: BLE001 -- a write failure means the port is gone
+            return None
+        deadline = time.monotonic() + QUERY_TIMEOUT_S
+        while time.monotonic() < deadline:
             try:
-                await asyncio.to_thread(self._serial.write, f"{command}\n".encode("ascii"))
-            except Exception:  # noqa: BLE001 -- a write failure means the port is gone
+                line = await asyncio.to_thread(self._serial.readline)
+            except Exception:  # noqa: BLE001
                 return None
-            deadline = time.monotonic() + QUERY_RETRY_INTERVAL_S
-            while time.monotonic() < deadline:
+            if not line:
+                continue
+            text = line.decode("ascii", errors="replace").strip()
+            if text.startswith(f"{expect_prefix}:"):
                 try:
-                    line = await asyncio.to_thread(self._serial.readline)
-                except Exception:  # noqa: BLE001
+                    return json.loads(text[len(expect_prefix) + 1 :])
+                except json.JSONDecodeError:
+                    log.warning("unparseable BrewPi response: %r", text)
                     return None
-                if not line:
-                    continue
-                text = line.decode("ascii", errors="replace").strip()
-                if text.startswith(f"{expect_prefix}:"):
-                    try:
-                        return json.loads(text[len(expect_prefix) + 1 :])
-                    except json.JSONDecodeError:
-                        log.warning("unparseable BrewPi response: %r", text)
-                        return None
         return None
 
     async def _query_device_list_locked(self, command: str, expect_prefix: str) -> list[Any] | None:
-        """Caller must hold self._lock. Like _query_locked, but for 'd'/'h'
+        """Caller must hold self._lock. Like _query_locked (single write,
+        no resend, one QUERY_TIMEOUT_S deadline), but for 'd'/'h'
         responses specifically: accumulates lines starting from the one
         with the matching prefix (stripping any embedded log fragments --
         see _LOG_FRAGMENT_RE) until the accumulated text parses as a JSON
-        array, or the retry budget is exhausted."""
+        array, or the timeout is exhausted."""
         if self._serial is None:
             return None
-        for _ in range(QUERY_RETRIES):
+        try:
+            await asyncio.to_thread(self._serial.write, f"{command}\n".encode("ascii"))
+        except Exception:  # noqa: BLE001 -- a write failure means the port is gone
+            return None
+        deadline = time.monotonic() + QUERY_TIMEOUT_S
+        accumulated = ""
+        collecting = False
+        while time.monotonic() < deadline:
             try:
-                await asyncio.to_thread(self._serial.write, f"{command}\n".encode("ascii"))
-            except Exception:  # noqa: BLE001 -- a write failure means the port is gone
+                line = await asyncio.to_thread(self._serial.readline)
+            except Exception:  # noqa: BLE001
                 return None
-            deadline = time.monotonic() + QUERY_RETRY_INTERVAL_S
-            accumulated = ""
-            collecting = False
-            while time.monotonic() < deadline:
-                try:
-                    line = await asyncio.to_thread(self._serial.readline)
-                except Exception:  # noqa: BLE001
-                    return None
-                if not line:
+            if not line:
+                continue
+            text = line.decode("ascii", errors="replace").strip()
+            if not collecting:
+                if not text.startswith(f"{expect_prefix}:"):
                     continue
-                text = line.decode("ascii", errors="replace").strip()
-                if not collecting:
-                    if not text.startswith(f"{expect_prefix}:"):
-                        continue
-                    text = text[len(expect_prefix) + 1 :]
-                    collecting = True
-                accumulated += _LOG_FRAGMENT_RE.sub("", text)
-                try:
-                    parsed = json.loads(accumulated)
-                except json.JSONDecodeError:
-                    continue  # incomplete so far (or a stray log fragment) -- keep reading
-                if isinstance(parsed, list):
-                    return parsed
-                log.warning("unexpected non-list BrewPi device-list response: %r", accumulated)
-                return None
+                text = text[len(expect_prefix) + 1 :]
+                collecting = True
+            accumulated += _LOG_FRAGMENT_RE.sub("", text)
+            try:
+                parsed = json.loads(accumulated)
+            except json.JSONDecodeError:
+                continue  # incomplete so far (or a stray log fragment) -- keep reading
+            if isinstance(parsed, list):
+                return parsed
+            log.warning("unexpected non-list BrewPi device-list response: %r", accumulated)
+            return None
         return None
