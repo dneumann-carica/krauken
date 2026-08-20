@@ -98,6 +98,26 @@ BOOT_DELAY_S = 22.0
 # timeout at all) -- so this trades a slower cold-connect scan for a
 # connection that actually succeeds, not a slower scan that also still
 # fails, which is what the old, too-short value produced in practice.
+
+# Confirmed live 2026-08-19, via strace of the daemon's own serial fd,
+# during the device-config wizard's relay-identification sweep: two
+# install_device() writes issued back-to-back (abandoning the previous
+# candidate, then installing the next one -- no read of any kind in
+# between, since install_device() is a deliberate fire-and-forget write,
+# see its own docstring) arrived only ~12ms apart, and the SECOND command
+# came back corrupted -- echoed as a fully-zeroed/uninstalled device
+# ({"f":0,"h":0,"p":0}) instead of what was actually sent. Installing a
+# device almost certainly triggers a synchronous EEPROM write on the AVR
+# (EEPROM writes are ~3.3ms/byte and block the main loop), which can
+# outlast the Arduino's small serial RX buffer if a second full command's
+# bytes arrive before the first one has been fully processed -- exactly
+# what happened here. The old wait-based wizard design never hit this:
+# it always had several real seconds of polling between installs by
+# accident. The redesigned, deliberately-fast off-based sweep (see
+# device_config.py's identify_relay_pin) removed that accidental
+# protection, so install_device() now provides it directly instead of
+# relying on every caller to happen to have one.
+INSTALL_SETTLE_S = 0.3
 #
 # A single flat wait, no resend -- confirmed live 2026-08-18 via this
 # session's own strace captures that re-sending the command on every
@@ -286,8 +306,22 @@ class BrewPiConnection:
         set_fridge_target: brewpi.py's own handler proxies this straight
         through with zero validation, and a rejected write produces no
         response at all (confirmed via source -- see module docstring), so
-        there's nothing useful to await here. Caller re-queries
-        list_installed_devices() to confirm the install actually took."""
+        there's no response worth awaiting here. Caller re-queries
+        list_installed_devices() to confirm the install actually took.
+
+        Settles for INSTALL_SETTLE_S after writing -- see that constant's
+        own comment for the confirmed-live corruption this prevents
+        (two installs sent back-to-back, with nothing else awaited in
+        between, can arrive faster than the Arduino's own EEPROM write for
+        the first one finishes, corrupting the second). Uses a real
+        asyncio.sleep(), NOT self.clock.sleep() -- deliberately, same
+        precedent as identify_and_connect()'s own boot delay: this method
+        can run before any platform role is mapped (that's the entire
+        point of the device-config wizard), which is exactly when the
+        daemon's clock selection can still land on the accelerated
+        SimulatorClock (see _select_clock() in daemon/app.py) -- a
+        clock-relative sleep here would silently evaporate in precisely
+        the scenario this delay exists to protect."""
         body = "U" + json.dumps(device.to_wire_json())
         async with self._lock:
             if self._serial is None:
@@ -296,6 +330,12 @@ class BrewPiConnection:
                 await asyncio.to_thread(self._serial.write, f"{body}\n".encode("ascii"))
             except Exception:  # noqa: BLE001 -- best-effort; caller's re-query surfaces the real outcome
                 log.warning("failed to write install_device(%r) to BrewPi", device)
+                return
+            # Held INSIDE the lock, not after it -- otherwise a concurrent
+            # caller (e.g. a control-tick read_temps()) could send its own
+            # command into exactly the same window this delay exists to
+            # protect, reintroducing the same hazard from a different path.
+            await asyncio.sleep(INSTALL_SETTLE_S)
 
     async def reset_and_reconnect(self) -> bool:
         """`R` -- a real AVR watchdog hardware reset (confirmed via

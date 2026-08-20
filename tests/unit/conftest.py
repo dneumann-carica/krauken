@@ -29,3 +29,16 @@ def _fast_query_timeout(monkeypatch: pytest.MonkeyPatch):
     the eventual give-up behavior, so shrinking it well below its real
     value is always safe here."""
     monkeypatch.setattr(connection, "QUERY_TIMEOUT_S", 0.05)
+
+
+@pytest.fixture(autouse=True)
+def _fast_install_settle(monkeypatch: pytest.MonkeyPatch):
+    """install_device()'s INSTALL_SETTLE_S is a real asyncio.sleep()
+    (deliberately not clock-relative -- see the constant's own comment),
+    and every device_config.py test runner installs multiple devices per
+    call. Left at its real 0.3s value, this would add real, cumulative
+    wall-clock time across the whole suite (many tests each doing several
+    installs) for no test-value: no test in this codebase cares about the
+    exact settle duration, only that a settle happens at all (see
+    test_brewpi_connection.py's own test for that)."""
+    monkeypatch.setattr(connection, "INSTALL_SETTLE_S", 0.0)

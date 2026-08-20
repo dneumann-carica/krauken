@@ -13,6 +13,7 @@ import pytest
 
 from krauken.contracts.clock import SimulatorClock
 from krauken.contracts.models import ChamberMode, Health
+from krauken.platforms.brewpi import connection
 from krauken.platforms.brewpi.connection import BrewPiConnection
 from krauken.platforms.brewpi.live import BrewPiBeerTempSource, BrewPiChamberDriver
 
@@ -304,6 +305,54 @@ async def test_install_device_omits_t_and_v_fields():
     body = json.loads(written[1:].strip())
     assert "t" not in body
     assert "v" not in body
+
+
+async def test_install_device_settles_with_a_real_sleep_not_the_injected_clock(monkeypatch: pytest.MonkeyPatch):
+    # Confirmed live 2026-08-19: two install_device() writes back-to-back,
+    # with nothing else awaited in between, arrived at the Arduino only
+    # ~12ms apart and corrupted the second one (see INSTALL_SETTLE_S's own
+    # comment for the full strace-confirmed story). The settle sleep must
+    # be real-time always -- NOT self.clock.sleep() -- because this method
+    # can run before any platform role is mapped (the device-config
+    # wizard's whole reason to exist), exactly when the daemon's clock
+    # selection can land on the accelerated SimulatorClock -- same
+    # precedent as identify_and_connect()'s own BOOT_DELAY_S.
+    from krauken.platforms.brewpi.device_config import BrewPiDevice
+
+    conn = _connected({})
+    real_sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        real_sleeps.append(seconds)
+
+    monkeypatch.setattr(connection.asyncio, "sleep", fake_sleep)
+    clock_sleeps: list[float] = []
+    original_clock_sleep = conn.clock.sleep
+
+    async def spy_clock_sleep(seconds: float) -> None:
+        clock_sleeps.append(seconds)
+        await original_clock_sleep(seconds)
+
+    monkeypatch.setattr(conn.clock, "sleep", spy_clock_sleep)
+
+    device = BrewPiDevice(slot=0, chamber=1, beer=0, function=1, hardware=1, pin=2, invert=0)
+    await conn.install_device(device)
+
+    assert real_sleeps == [connection.INSTALL_SETTLE_S]
+    assert clock_sleeps == []  # never touches the injected (possibly-accelerated) clock
+
+
+async def test_install_device_skips_the_settle_when_the_write_itself_fails():
+    from krauken.platforms.brewpi.device_config import BrewPiDevice
+
+    conn = _connected({})
+
+    def raise_on_write(data: bytes) -> int:
+        raise OSError("simulated write failure")
+
+    conn._serial.write = raise_on_write  # type: ignore[method-assign]
+    device = BrewPiDevice(slot=0, chamber=1, beer=0, function=1, hardware=1, pin=2, invert=0)
+    await conn.install_device(device)  # must not raise
 
 
 async def test_reset_and_reconnect_sends_r_then_reidentifies():

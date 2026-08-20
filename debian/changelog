@@ -1,3 +1,31 @@
+krauken (0.1.12) stable; urgency=medium
+
+  * Fix: install_device() (connection.py) was a pure fire-and-forget
+    write, and 0.1.11's redesigned identify_relay_pin now abandons the
+    previous candidate and installs the next one back-to-back, with
+    nothing else awaited in between. Confirmed live via strace of the
+    daemon's own serial fd during real wizard testing: the two writes
+    arrived only ~12ms apart, and the second one came back corrupted --
+    echoed as a fully-zeroed/uninstalled device instead of what was
+    actually sent. Installing a device almost certainly triggers a
+    synchronous EEPROM write on the AVR (~3.3ms/byte, blocks the main
+    loop), which can outlast the Arduino's small serial RX buffer if a
+    second full command's bytes arrive before the first has been fully
+    processed -- exactly what happened. The old wait-based wizard design
+    never hit this: it always had several real seconds of polling between
+    installs by accident; the new, deliberately-fast off-based sweep
+    removed that accidental protection. install_device() now settles for
+    a new INSTALL_SETTLE_S (0.3s, held under the connection's own lock so
+    nothing else can slip a command into the same window) after every
+    write, fixing every call site uniformly rather than requiring each
+    caller to remember to pace itself. Uses a real asyncio.sleep(), not
+    the injected clock -- same reasoning as identify_and_connect()'s own
+    BOOT_DELAY_S: this method can run before any platform role is mapped,
+    exactly when the daemon's clock selection can land on the accelerated
+    SimulatorClock, which would silently defeat a clock-relative delay.
+
+ -- The Krauken Project <dneumann@arpio.io>  Wed, 19 Aug 2026 21:13:42 -0400
+
 krauken (0.1.11) stable; urgency=medium
 
   * Redesign: identify_relay_pin no longer forces a heat demand and polls
