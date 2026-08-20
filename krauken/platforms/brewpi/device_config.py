@@ -93,48 +93,17 @@ IDENTIFY_ONEWIRE_BACKSTOP_S = 3600.0
 # picked free slot in the (very unlikely) case something unrelated already
 # occupies it.
 RELAY_IDENTIFY_SLOT = 15
-# Matches MIN_SWITCH_TIME/MIN_COOL_OFF_TIME_FRIDGE_CONSTANT (both confirmed
-# 600s in the real firmware's TempControl.h) -- the worst-case wait before
-# a relay may first engage in a fresh connection, since Krauken always
-# uses fridge-constant mode.
-RELAY_IDENTIFY_WINDOW_S = 600.0
-RELAY_IDENTIFY_POLL_S = 2.0
-# ALWAYS added to the baseline chamber temp, never subtracted -- this
-# module must never command a target below the current chamber temp (a
-# cooling demand). Forcing "heat" is the sole, universal trigger used to
-# energize a candidate pin during discovery; whatever is actually wired
-# there responds (a real heater, or the fridge if that's what's on this
-# pin), and the human observer -- not the firmware -- says which.
-RELAY_IDENTIFY_FORCE_DELTA_F = 15.0
-
-# Raw firmware State codes (TempControl.h's `enum states`) that mean "the
-# heat function is actually driven right now" -- includes the
-# MIN_TIME-held code (9), not just the freshly-engaged one (3), since both
-# mean the relay is physically on. There is no cool-side equivalent here:
-# this module never commands a cooling demand at all (see
-# RELAY_IDENTIFY_FORCE_DELTA_F above). Deliberately narrower than
-# connection.py's own STATES_HEATING/STATES_COOLING (which reference codes
-# 13/14 not present in the confirmed firmware enum -- see the plan's
-# "residual risks" section) -- this module uses only the directly-verified
-# codes.
-HEAT_ENGAGED_STATES = frozenset({3, 9})
-HEAT_WAITING_STATES = frozenset({6})  # WAITING_TO_HEAT
-
-# Safe-off dance (see _safe_uninstall_heat below): confirmed live 2026-08-16
-# that a flipped-polarity re-engagement is always near-instant (same bypass
-# mechanism as any other mid-sweep swap, since timers are already satisfied
-# -- it was JUST engaged). This window is a generous multiple of every
-# observed real-world timing (sub-second in every manual test), not a real
-# anti-short-cycle wait like RELAY_IDENTIFY_WINDOW_S.
-SAFE_OFF_CONFIRM_WINDOW_S = 15.0
-SAFE_OFF_POLL_S = 1.0
-
-# A single missed baseline chamber-temp read shouldn't hard-fail the whole
-# candidate test -- confirmed live 2026-08-18 as a real, occasional
-# connection-layer timing issue, not a persistent probe problem. Bounded
-# and short; not a real anti-short-cycle wait.
-BASELINE_READ_RETRIES = 3
-BASELINE_READ_RETRY_S = 1.0
+# Brief settle after installing a candidate under a forced-off chamber --
+# one control-loop tick plus real relay switch time, confirmed live
+# 2026-08-18 to be all that's needed. NOT a real anti-short-cycle wait:
+# anti-short-cycle protection (MIN_SWITCH_TIME/MIN_COOL_OFF_TIME_FRIDGE_
+# CONSTANT, both 600s in the real firmware) only ever guards against
+# turning something ON too soon -- never against commanding off, which is
+# what every identify_relay_pin test does now (see the module docstring's
+# "off-based identification" section). This constant never grows with
+# sweep history the way the old wait-based design's first real engagement
+# did.
+RELAY_IDENTIFY_SETTLE_S = 2.0
 
 
 @dataclass
@@ -240,52 +209,46 @@ async def _uninstall(conn: Any, slot: int) -> None:
     await conn.install_device(BrewPiDevice(slot=slot, function=DEVICE_FUNCTION_NONE))
 
 
-async def _safe_uninstall_heat(ctx: Any, conn: Any, device: BrewPiDevice) -> None:
-    """Abandon a CHAMBER_HEAT candidate without leaving it electrically
-    stuck on. Confirmed live 2026-08-16: DeviceManager.cpp's
-    uninstallDevice() never calls setActive(false) -- it only deletes the
-    C++ actuator object, so a pin that was genuinely driven "on" stays at
-    that level indefinitely once its device is bare-uninstalled (reproduced
-    live: a light standing in for the fridge stayed on after its actuator
-    was uninstalled to free the CHAMBER_HEAT function for the next
-    candidate). Only matters if `device` is genuinely engaged RIGHT NOW --
-    a candidate that was only ever waiting, or timed out with no
-    engagement, was never driven to an "on" level in the first place, so a
-    bare uninstall is correct and sufficient for that case, unchanged.
+async def _abandon_heat(conn: Any, device: BrewPiDevice, resolved: Mapping[int, int]) -> None:
+    """Abandon whatever currently holds CHAMBER_HEAT before installing the
+    next candidate, without leaving it electrically stuck on. Confirmed
+    live 2026-08-16: DeviceManager.cpp's uninstallDevice() never calls
+    setActive(false) -- it only deletes the C++ actuator object, so a pin
+    that was genuinely driven "on" stays at that level indefinitely once
+    its device is bare-uninstalled.
 
-    Fix: reinstall the SAME pin as CHAMBER_HEAT with invert flipped. Demand
-    and anti-short-cycle timers are already satisfied (it was JUST
-    engaged), so the flipped actuator re-engages near-instantly -- same
-    bypass mechanism as any other mid-sweep swap -- driving the pin to the
-    OPPOSITE physical level, which is the correct real off level for this
-    pin's actual wiring. Confirm that re-engagement actually happened
-    (bounded, short window -- this is NOT a real anti-short-cycle wait,
-    just confirmation the flip took), then uninstall for real."""
-    reading = await conn.read_temps()
-    if reading is None or reading.state not in HEAT_ENGAGED_STATES:
-        await _uninstall(conn, device.slot)
-        return
-    flipped = BrewPiDevice(
-        slot=device.slot,
-        chamber=1,
-        beer=0,
-        function=DEVICE_FUNCTION_CHAMBER_HEAT,
-        hardware=DEVICE_HARDWARE_PIN,
-        pin=device.pin,
-        invert=1 - int(device.invert or 0),
-    )
-    await conn.install_device(flipped)
-    elapsed_s = 0.0
-    while elapsed_s < SAFE_OFF_CONFIRM_WINDOW_S:
-        await ctx.clock.sleep(SAFE_OFF_POLL_S)
-        elapsed_s += SAFE_OFF_POLL_S
-        reading = await conn.read_temps()
-        if reading is not None and reading.state in HEAT_ENGAGED_STATES:
-            break
-    # Best-effort even if the confirm window times out (never observed in
-    # real testing -- every flip re-engaged in well under a second) --
-    # uninstalling is still the right final step either way, and must not
-    # hang the sweep indefinitely on a safety cleanup step.
+    Replaces the old flip-and-confirm-via-live-State dance (see git
+    history for the previous _safe_uninstall_heat): once identify_relay_pin
+    stopped forcing a real heat demand and started forcing the chamber off
+    instead (2026-08-18 redesign -- see this module's identify_relay_pin
+    docstring), the firmware's own State can never distinguish "correctly
+    off" from "incorrectly energized" any more -- both look identical
+    (idle), since nothing ever drives a real HEATING state during
+    identification. The only way to know which is which is what the human
+    already told the wizard.
+
+    `resolved` maps pin -> the confirmed-safe (off) invert for every pin
+    the wizard has already finished identifying this sweep (see
+    identify_relay_pin's `resolved` param). If `device.pin` is in it and
+    its currently-installed invert doesn't match, reinstall at the safe
+    invert first (a no-op if it's already correct) so the physical level
+    is corrected BEFORE anything is removed, then uninstall. If the pin
+    isn't in `resolved` at all, there's nothing to protect -- either
+    nothing is really wired there, or this is a mid-sweep candidate that
+    was never positively identified -- so a bare uninstall is correct and
+    sufficient, unchanged."""
+    safe_invert = resolved.get(device.pin) if device.pin is not None else None
+    if safe_invert is not None and safe_invert != int(device.invert or 0):
+        corrected = BrewPiDevice(
+            slot=device.slot,
+            chamber=1,
+            beer=0,
+            function=DEVICE_FUNCTION_CHAMBER_HEAT,
+            hardware=DEVICE_HARDWARE_PIN,
+            pin=device.pin,
+            invert=safe_invert,
+        )
+        await conn.install_device(corrected)
     await _uninstall(conn, device.slot)
 
 
@@ -540,53 +503,49 @@ async def _run_install_probe(ctx: Any, job: Any, device_id: str, params: dict[st
 
 
 async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: dict[str, Any]) -> None:
-    """Tests exactly one (pin, polarity) combination by forcing a heat
-    demand and watching the firmware's own raw State -- never which
-    physical thing responds. That's for the human observer to say: forcing
-    "heat" and assigning `candidate` to CHAMBER_HEAT just tells the
-    firmware "turn this pin on"; if what's actually wired there is the
-    fridge relay, the fridge is what turns on. `outcome == "engaged"` means
-    only "the firmware just switched this pin on" -- the frontend asks the
-    human what physically happened next.
+    """Tests exactly one (pin, polarity) combination by forcing the chamber
+    OFF and watching whether the human observer sees anything react
+    anyway -- never by watching the firmware's own State.
+
+    Redesigned 2026-08-18 (see plans/jiggly-bubbling-popcorn.md for the
+    full session): the previous design forced a heat DEMAND and polled
+    State for a genuine HEATING transition, which meant paying BrewPi's
+    real anti-short-cycle wait (up to 600s, TempControl.h's
+    MIN_SWITCH_TIME/MIN_COOL_OFF_TIME_FRIDGE_CONSTANT) the first time a
+    relay engaged. That protection only ever guards against turning
+    something ON too soon -- never against turning off -- so forcing off
+    instead (`conn.set_fridge_target(None)`, `j{mode:"o"}`) takes effect on
+    the very next control-loop tick, no wait at all, regardless of sweep
+    history.
+
+    Because we always command off, the ONLY way anything visibly reacts is
+    if the guessed `invert` is backwards for this pin's real wiring -- our
+    "off" is actually its "on". That surprise-on is the positive
+    identification signal, and it's invisible to the firmware/API: State
+    stays idle either way, since nothing here ever drives a real HEATING
+    state. So there is no `outcome` field in this job's result -- there is
+    nothing for software to conclude. Every single call needs a live human
+    to say whether anything visibly reacted right after it completes; the
+    frontend (`devicePinSweep`) owns that question and the two-tries-per-
+    pin sequencing (normal invert, then reversed if normal showed nothing)
+    entirely -- there is no per-call polarity retry mechanism here.
 
     Invariant, load-bearing (see module docstring): before installing the
     requested candidate, always abandons whatever currently holds the
-    CHAMBER_HEAT function, so at most one device ever shares that function
-    at a time. This is what replaced the old sweep_relay's "leave a
-    candidate energized between steps" design -- confirmed live this
-    session that BrewPi does not enforce one-actuator-per-function, so
-    several stray same-function candidates left installed get driven
-    together the instant that function is commanded, not just the intended
-    one. Also reports the WAITING_TO_HEAT code explicitly (qualitative
-    only -- the firmware never exposes a numeric remaining-wait-seconds
-    value on the wire, confirmed via exhaustive search of PiLink.cpp) so
-    the wizard can show "waiting on the compressor-protection timer"
-    rather than a blank screen.
+    CHAMBER_HEAT function via `_abandon_heat`, so at most one device ever
+    shares that function at a time (confirmed live: BrewPi does not
+    enforce one-actuator-per-function on its own -- leaving several
+    same-function candidates installed gets them all driven together the
+    instant that function is commanded).
 
-    How that existing device gets abandoned depends on whether it was ever
-    positively identified (confirmed live 2026-08-18): `_safe_uninstall_heat`
-    (flip polarity, confirm re-engagement at the real off level, then
-    uninstall) is only correct when we actually know which polarity is
-    "off" for that pin -- which is only true once a human has confirmed it
-    as the heater or the fridge. For a pin where every polarity tried came
-    back "nothing happened," there's no confirmed off level to aim for
-    (and no real device there to protect anyway), so a bare uninstall is
-    both correct and sufficient -- running the flip dance in that case
-    would arbitrarily pick a polarity that's just as likely to be "on" as
-    "off" for whatever, if anything, is actually wired there. The caller
-    (the wizard) tells this action which pins have been confirmed via
-    `identified_pins`; the currently-installed CHAMBER_HEAT device only
-    gets the safe-off treatment if its pin is in that list.
-
-    Never forces a target below the current chamber temp -- this action
-    must never command a cooling demand. Normal and reversed polarity are
-    two separate calls to this same action (the caller passes `invert`
-    explicitly); there is no "function" param and no per-call polarity
-    retry mechanism here -- the frontend drives that sequencing.
-
-    params: candidate: {"pin": int, "invert": 0|1}, window_s: float,
-    identified_pins: list[int] (pins already confirmed as heat or fridge
-    this sweep -- see above), both optional.
+    params: candidate: {"pin": int, "invert": 0|1}; resolved:
+    list[{"pin": int, "safe_invert": int}] -- every pin the wizard has
+    already finished identifying this sweep (confirmed as heat or fridge,
+    with its correct off invert), passed through unchanged to
+    `_abandon_heat` so it can tell a currently-wrong-and-energized pin
+    apart from an already-safe one. A pin the wizard hasn't resolved yet
+    (still mid-sweep, or genuinely nothing wired there) is simply bare-
+    uninstalled -- there's nothing to protect either way.
     """
     conn = _brewpi_connection(ctx)
     if conn is None:
@@ -601,16 +560,20 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
         job.error = "identify_relay_pin requires a candidate with a pin"
         return
     invert = int(candidate.get("invert", 0))
-    window_s = float(params.get("window_s", RELAY_IDENTIFY_WINDOW_S))
-    identified_pins = set(params.get("identified_pins") or [])
+    resolved = {
+        int(r["pin"]): int(r["safe_invert"])
+        for r in (params.get("resolved") or [])
+        if r.get("pin") is not None
+    }
+
+    # Force the chamber off -- see docstring above for why this replaces
+    # the old forced-heat-demand design entirely.
+    await conn.set_fridge_target(None)
 
     installed = await conn.list_all_devices(with_values=False)
     existing_heat = next((d for d in installed if d.function == DEVICE_FUNCTION_CHAMBER_HEAT), None)
     if existing_heat is not None:
-        if existing_heat.pin in identified_pins:
-            await _safe_uninstall_heat(ctx, conn, existing_heat)
-        else:
-            await _uninstall(conn, existing_heat.slot)
+        await _abandon_heat(conn, existing_heat, resolved)
         installed = [d for d in installed if d.slot != existing_heat.slot]
 
     reserved_taken = next((d for d in installed if d.slot == RELAY_IDENTIFY_SLOT), None)
@@ -628,52 +591,10 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
     )
     await conn.install_device(device)
 
-    # A single missed read here shouldn't hard-fail the whole test --
-    # confirmed live 2026-08-18 that the chamber probe can occasionally
-    # miss one read_temps() call (a real, demonstrated connection-layer
-    # timing issue, not a persistent probe problem: a `brewpi_devices`
-    # check immediately after a failure like this showed the probe
-    # reading fine). A short, bounded retry here is just tolerance for
-    # one missed line, not a real anti-short-cycle wait.
-    reading = None
-    for _ in range(BASELINE_READ_RETRIES):
-        reading = await conn.read_temps()
-        if reading is not None and reading.fridge_temp_f is not None:
-            break
-        await ctx.clock.sleep(BASELINE_READ_RETRY_S)
-    if reading is None or reading.fridge_temp_f is None:
-        job.state = "failed"
-        job.error = "chamber probe isn't reading -- can't run a live relay test"
-        return
-    baseline_f = reading.fridge_temp_f
-    # ALWAYS added, never subtracted -- see RELAY_IDENTIFY_FORCE_DELTA_F.
-    forced_target = baseline_f + RELAY_IDENTIFY_FORCE_DELTA_F
-    await conn.set_fridge_target(forced_target)
-
     try:
-        current_f = baseline_f
-        outcome = "waiting"
-        job.result = {"outcome": outcome, "baseline_f": baseline_f, "forced_target_f": forced_target, "current_f": current_f, "slot": slot}
-        elapsed_s = 0.0
-        while elapsed_s < window_s:
-            await ctx.clock.sleep(RELAY_IDENTIFY_POLL_S)
-            elapsed_s += RELAY_IDENTIFY_POLL_S
-            reading = await conn.read_temps()
-            if reading is not None:
-                current_f = reading.fridge_temp_f
-                if reading.state in HEAT_ENGAGED_STATES:
-                    outcome = "engaged"
-                elif reading.state in HEAT_WAITING_STATES:
-                    outcome = "waiting"
-            job.result = {"outcome": outcome, "baseline_f": baseline_f, "forced_target_f": forced_target, "current_f": current_f, "slot": slot}
-            if outcome == "engaged":
-                break
-        else:
-            # while...else: only reached if the loop exhausted window_s
-            # without ever breaking -- i.e. never engaged.
-            outcome = "timeout"
-            job.result = {"outcome": outcome, "baseline_f": baseline_f, "forced_target_f": forced_target, "current_f": current_f, "slot": slot}
+        await ctx.clock.sleep(RELAY_IDENTIFY_SETTLE_S)
         job.state = "completed"
+        job.result = {"pin": pin, "invert": invert, "slot": slot}
     except asyncio.CancelledError:
         job.state = "cancelled"
         raise

@@ -1,3 +1,35 @@
+krauken (0.1.11) stable; urgency=medium
+
+  * Redesign: identify_relay_pin no longer forces a heat demand and polls
+    the firmware's own State for a genuine HEATING transition -- which
+    meant paying BrewPi's real anti-short-cycle wait (up to 600s,
+    TempControl.h's MIN_SWITCH_TIME/MIN_COOL_OFF_TIME_FRIDGE_CONSTANT) the
+    first time a relay engaged. That protection only ever guards against
+    turning something ON too soon, never against turning off, so the
+    action now forces the chamber OFF instead (set_fridge_target(None),
+    already-existing j{mode:"o"}) and installs the candidate -- takes
+    effect on the very next control-loop tick, no wait at all, regardless
+    of sweep history. The only way anything visibly reacts is if the
+    guessed invert is backwards for that pin's real wiring (our "off" is
+    actually its "on"), which is invisible to the firmware/API -- so the
+    job result no longer has an "outcome" field; every test now needs a
+    human to confirm whether anything reacted, immediately after each
+    (now near-instant) test. The wizard's pin sweep asks that yes/no
+    directly, tries the reversed polarity on the same pin before ruling it
+    out (a real device can't hide from both polarities being tried), and
+    silently self-corrects a just-identified pin back to its confirmed-
+    safe invert before moving to the next candidate. _safe_uninstall_heat
+    (which used to check live State to decide whether a pin needed a
+    flip-then-uninstall) is replaced by _abandon_heat, which takes the
+    wizard's own confirmed-safe-invert bookkeeping directly instead --
+    strictly more reliable than the old State-based check ever was, and
+    the only option left now that State can no longer distinguish
+    "correctly off" from "incorrectly energized" during identification.
+    Removes the now-unused everEngaged/Skip-button gating entirely (there
+    is no multi-minute wait left to skip).
+
+ -- The Krauken Project <dneumann@arpio.io>  Wed, 19 Aug 2026 20:27:35 -0400
+
 krauken (0.1.10) stable; urgency=medium
 
   * Fix: connection.py's BOOT_DELAY_S (the wait after opening a fresh

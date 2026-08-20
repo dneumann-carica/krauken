@@ -26,11 +26,15 @@ type Stage =
   | "deviceProbeId"
   | "deviceNoProbe"
   // Unified relay pin-identification sweep -- replaces the old two-pass
-  // deviceCoolSweep/deviceHeatSweep split. Always forces a heat demand and
-  // lets the human observer say what physically turned on (fridge/heater/
-  // nothing); confirmed live this session that testing cool and heat as
-  // separate passes left stray same-function candidates installed, which
-  // BrewPi drives together rather than enforcing one-actuator-per-function.
+  // deviceCoolSweep/deviceHeatSweep split. Redesigned 2026-08-18 (see
+  // plans/jiggly-bubbling-popcorn.md): forces the chamber OFF rather than
+  // forcing a heat demand, so there's no real anti-short-cycle wait ever
+  // -- the human observer says whether anything reacted anyway (a
+  // surprise-on means the guessed polarity was backwards for this pin).
+  // Still forces at most one CHAMBER_HEAT candidate installed at a time;
+  // confirmed live this session that testing cool and heat as separate
+  // passes left stray same-function candidates installed, which BrewPi
+  // drives together rather than enforcing one-actuator-per-function.
   | "devicePinSweep"
   | "deviceNoCool"
   | "deviceFinalizing";
@@ -104,13 +108,13 @@ interface IdentifyOnewireResult {
 // dedicated result interface exists for either (would be unused, same as
 // every other job.result shape that's genuinely only a completion signal).
 
-type RelayOutcome = "waiting" | "engaged" | "timeout";
-
+// No `outcome` field any more (see the Stage type's devicePinSweep
+// comment) -- forcing the chamber off can never be auto-detected as
+// "reacted" by software, so the job just reports what it installed and
+// the frontend asks the human immediately.
 interface IdentifyRelayPinResult {
-  outcome: RelayOutcome;
-  baseline_f: number;
-  forced_target_f: number;
-  current_f: number | null;
+  pin: number;
+  invert: number;
   slot: number;
 }
 
@@ -185,19 +189,22 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   // on hardware nobody has.
   const [heatSweepConfirmed, setHeatSweepConfirmed] = useState(false);
   const [heatDeclined, setHeatDeclined] = useState(false);
-  // Tracks whether this sweep has EVER reached a genuine engagement
-  // (outcome === "engaged") -- confirmed live 2026-08-16: the very first
-  // candidate's wait is a real, unavoidable BrewPi anti-short-cycle timer
-  // (observed ~2m15s), but every subsequent candidate swap is near-instant
-  // once that first engagement has happened (the bypass mechanism --
-  // reassigning CHAMBER_HEAT to a different pin without ever idling in
-  // between leaves the firmware's timers satisfied). Before that first
-  // engagement, offering a "skip" while waiting silently discards it and
-  // forces the NEXT candidate to pay the same real wait from scratch, with
-  // no indication anything was lost. Reset to false only on a genuine
-  // restart-from-scratch (deviceNoCool's "Start over", or a fresh
-  // begin_device_config), never merely on a candidate/polarity swap.
-  const [everEngaged, setEverEngaged] = useState(false);
+  // Set right after the human confirms a candidate reacted (heater or
+  // fridge came on) -- the just-tested invert was backwards (see
+  // runIdentifyRelayPin's comment), so this pin is currently installed at
+  // the WRONG, energized invert. Holds {pin, invert: <the corrected,
+  // confirmed-safe one>} until a follow-up identify_relay_pin call
+  // reinstalls it there, which a dedicated effect below fires
+  // automatically and silently (no yes/no prompt -- we already know the
+  // answer). Blocks the normal candidate-testing effect from starting a
+  // new test on a different pin until this correction lands, so the sweep
+  // never leaves a pin sitting energized any longer than the single
+  // corrective round-trip takes.
+  const [correcting, setCorrecting] = useState<{ pin: number; invert: number } | null>(null);
+
+  function flipInvert(invert: number): number {
+    return invert ? 0 : 1;
+  }
 
   const startTest = useStartTest();
   const cancelTest = useCancelTest();
@@ -268,7 +275,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     setPolarityPhase("normal");
     setHeatSweepConfirmed(false);
     setHeatDeclined(false);
-    setEverEngaged(false);
+    setCorrecting(null);
   }
 
   function goTo(next: Stage, nextPicks?: Picks) {
@@ -326,26 +333,28 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   }
 
   // One (pin, polarity) combination per call -- no "function" param.
-  // Forcing "heat" is the sole trigger used regardless of which physical
-  // role this pin turns out to have; the frontend asks the human what
-  // turned on. invert is passed explicitly by the caller (normal vs.
-  // reversed polarity are two separate calls, never a retry the backend
-  // decides on its own).
-  function runIdentifyRelayPin(candidate: RawBrewPiDevice, invert: number) {
+  // Forces the chamber off and installs the candidate; there's nothing
+  // for the backend to detect, so the frontend asks the human what
+  // happened immediately once the job completes. invert is passed
+  // explicitly by the caller (normal vs. reversed polarity, or a
+  // corrective reinstall, are all separate calls -- there is no per-call
+  // polarity retry mechanism on the backend).
+  function runIdentifyRelayPin(pin: number, invert: number) {
     setTestId(undefined);
-    // identified_pins tells the backend which currently-installed
-    // CHAMBER_HEAT device (if any) has actually been confirmed as the
-    // heater or the fridge -- it only gets the safe-off flip-and-confirm
-    // treatment if its pin is in this list. A pin where every polarity
-    // came back "nothing happened" has no confirmed off level to aim
-    // for, so it gets a bare uninstall instead (see device_config.py's
-    // own docstring for the full reasoning).
-    const identifiedPins = [devicePicks.cool?.pin, devicePicks.heat?.pin].filter((p): p is number => p != null);
+    // `resolved` tells the backend which currently-installed CHAMBER_HEAT
+    // device (if any) has already been positively identified, and what
+    // its confirmed-safe (off) invert is -- so abandoning it before
+    // installing this new candidate can correct a currently-wrong,
+    // energized invert instead of just bare-uninstalling it (see
+    // device_config.py's _abandon_heat docstring for the full reasoning).
+    const resolved = [devicePicks.cool, devicePicks.heat]
+      .filter((r): r is RelayIdentity => r != null)
+      .map((r) => ({ pin: r.pin, safe_invert: r.invert }));
     startTest.mutate(
       {
         deviceId: device.device_id,
         action: "identify_relay_pin",
-        params: { candidate: { pin: candidate.pin, invert }, identified_pins: identifiedPins },
+        params: { candidate: { pin, invert }, resolved },
       },
       { onSuccess: (r) => { localStartRef.current = Date.now(); setTestId(r.test_id); } },
     );
@@ -478,6 +487,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   // effect below moves on to finalize/deviceNoCool.
   useEffect(() => {
     if (stage !== "devicePinSweep" || deviceList === undefined) return;
+    if (correcting !== null) return; // a pin is still being returned to a safe state -- see its own declaration
     if (testId !== undefined || startTest.isPending) return;
     const needCool = devicePicks.cool === undefined;
     const needHeat = devicePicks.heat === undefined && !heatDeclined && heatSweepConfirmed;
@@ -485,34 +495,31 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     const candidates = buildRelayCandidates();
     const candidate = candidates[0];
     if (candidate === undefined) return; // exhausted -- exit-condition effect handles this
-    const invert = polarityPhase === "reversed" ? (candidate.invert ? 0 : 1) : (candidate.invert ?? 0);
-    runIdentifyRelayPin(candidate, invert);
+    const invert = polarityPhase === "reversed" ? flipInvert(candidate.invert ?? 0) : (candidate.invert ?? 0);
+    runIdentifyRelayPin(candidate.pin as number, invert);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, deviceList, testId, polarityPhase, testedPins, devicePicks.cool, devicePicks.heat, heatDeclined, heatSweepConfirmed]);
+  }, [stage, deviceList, testId, correcting, polarityPhase, testedPins, devicePicks.cool, devicePicks.heat, heatDeclined, heatSweepConfirmed]);
 
-  // A real 600s timeout with nothing identified auto-advances -- never a
-  // user-facing choice (the user isn't asked to try reversed polarity;
-  // see advancePolarityOrCandidate).
+  // Fires the corrective reinstall the instant `correcting` is set (see
+  // its own declaration) -- silent, no yes/no prompt, just returns the
+  // just-identified pin to its confirmed-safe invert.
   useEffect(() => {
-    if (stage !== "devicePinSweep") return;
+    if (stage !== "devicePinSweep" || correcting === null) return;
+    if (testId !== undefined || startTest.isPending) return;
+    runIdentifyRelayPin(correcting.pin, correcting.invert);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, correcting, testId]);
+
+  // Clears `correcting` once the corrective reinstall completes, letting
+  // the normal candidate-testing effect above resume (for the next role,
+  // or the exit-condition effect below to move on to finalize/deviceNoCool).
+  useEffect(() => {
+    if (stage !== "devicePinSweep" || correcting === null) return;
     if (testStatus.data?.kind !== "identify_relay_pin" || testStatus.data.state !== "completed") return;
-    const result = testStatus.data.result as IdentifyRelayPinResult | null;
-    if (result?.outcome !== "timeout") return;
-    const candidate = buildRelayCandidates()[0];
-    if (candidate) advancePolarityOrCandidate(candidate);
+    setCorrecting(null);
+    setTestId(undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, testStatus.data]);
-
-  // Latches the first genuine engagement this sweep -- see everEngaged's
-  // own declaration for why this matters (the Skip button is only safe to
-  // offer once this has happened at least once).
-  useEffect(() => {
-    if (stage !== "devicePinSweep" || everEngaged) return;
-    if (testStatus.data?.kind !== "identify_relay_pin") return;
-    const result = testStatus.data.result as IdentifyRelayPinResult | null;
-    if (result?.outcome === "engaged") setEverEngaged(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stage, testStatus.data, everEngaged]);
+  }, [stage, correcting, testStatus.data]);
 
   // The exit transitions belong here (real effects), not inline during
   // render.
@@ -529,12 +536,14 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, deviceList, devicePicks.cool, devicePicks.heat, heatDeclined, testedPins]);
 
-  // Shared by the automatic timeout-advance effect and the "Nothing
-  // happened" button: on the pin's first (normal) polarity, automatically
-  // move to reversed polarity on the SAME pin -- never a user choice (the
-  // user isn't asked whether to try reversed polarity, they wouldn't know
-  // how to answer). Only after both polarities have found nothing does
-  // this pin get excluded and the sweep move to the next candidate.
+  // The "Nothing happened" button's handler: on the pin's first (normal)
+  // polarity, automatically move to reversed polarity on the SAME pin --
+  // never a user choice (the user isn't asked whether to try reversed
+  // polarity, they wouldn't know how to answer). Only after both
+  // polarities have found nothing does this pin get excluded and the
+  // sweep move to the next candidate -- see the module docstring's
+  // decision rule: a real device can't hide from both polarities being
+  // tried, so this is a complete check, not a heuristic.
   function advancePolarityOrCandidate(candidate: RawBrewPiDevice) {
     cancelCurrentTest();
     setTestId(undefined);
@@ -780,18 +789,23 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       ? "Optional -- a heater makes cold-garage ferments possible, but a cooling-only rig is valid."
       : "Finding which pin drives cooling (checking for a heater along the way).";
 
-    if (coolKnown && devicePicks.heat === undefined && !heatDeclined && !heatSweepConfirmed) {
+    if (correcting !== null) {
+      // Silent housekeeping, not a real test -- no yes/no prompt, the
+      // wizard already knows the answer. See `correcting`'s declaration.
+      body = <p className={styles.body}>Confirming pin {correcting.pin} is left in a safe state…</p>;
+    } else if (coolKnown && devicePicks.heat === undefined && !heatDeclined && !heatSweepConfirmed) {
       // One-time interstitial, asked once cooling is known and there are
       // still untested candidates -- heat is optional, so continuing to
-      // burn through every remaining candidate's real anti-short-cycle
-      // wait needs an explicit yes, not an automatic continuation.
+      // burn through the remaining candidates needs an explicit yes, not
+      // an automatic continuation (each test is quick now, but still not
+      // free of the human's attention).
       body = (
         <>
           <p className={styles.body}>
             Cooling confirmed on pin {devicePicks.cool?.pin}. Want to also look for a heater?
           </p>
           <div className={styles.choiceGrid}>
-            {choice("Test for a heater", "Sweep the remaining pins for one that engages.", () => setHeatSweepConfirmed(true))}
+            {choice("Test for a heater", "Sweep the remaining pins for one that reacts.", () => setHeatSweepConfirmed(true))}
             {choice("No heater", "Cooling-only rig -- heating stays unfilled.", () => setHeatDeclined(true))}
           </div>
         </>
@@ -804,12 +818,9 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       // the brief frame in between.
       body = <p className={styles.body}>Checking results…</p>;
     } else if (testStatus.data?.state === "failed") {
-      // A failed job (e.g. the chamber probe isn't reading) is a systemic
-      // precondition failure, not "this pin wasn't it" -- surfacing it as
-      // an ordinary timeout would silently hide the real error and invite
-      // cycling through every remaining candidate against the identical
-      // failure. Offer Retry (same pin/polarity) instead of "try the next
-      // pin."
+      // A failed job (e.g. a connection hiccup) is a systemic precondition
+      // failure, not "this pin wasn't it" -- offer Retry (same pin/
+      // polarity) instead of "try the next pin."
       body = (
         <>
           <p className={styles.body}>Something went wrong: {testStatus.data.error ?? "unknown error"}.</p>
@@ -819,59 +830,35 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
           </div>
         </>
       );
-    } else if (testId === undefined || (result === undefined && testRunning === false && !testDone)) {
-      body = <p className={styles.body}>Starting the live test on pin {candidate.pin}…</p>;
-    } else if (result?.outcome === "waiting" || (testRunning && result === undefined)) {
+    } else if (!testDone || result == null) {
+      // Every test is now a brief, forced-off settle (a couple of
+      // seconds, not a real anti-short-cycle wait) -- there's no
+      // "waiting"/"engaged" state to distinguish any more, just "still
+      // running" vs. "done, go ask the human."
+      body = <p className={styles.body}>Testing pin {candidate.pin}…</p>;
+    } else {
       body = (
         <>
           <p className={styles.body}>
-            Forced the target to {result?.forced_target_f?.toFixed(1) ?? "…"}°F (chamber was{" "}
-            {result?.baseline_f?.toFixed(1) ?? "…"}°F) on pin {candidate.pin}. Waiting for the compressor-protection
-            timer to clear -- no countdown is available, but this is normal.
-          </p>
-          {everEngaged ? (
-            <div className={styles.choiceGrid}>
-              {choice("Skip -- try the next test", "Move on without waiting further.", () => advancePolarityOrCandidate(candidate))}
-            </div>
-          ) : (
-            // No skip before this sweep's first genuine engagement --
-            // confirmed live 2026-08-16: skipping here doesn't save time,
-            // it discards the one real wait BrewPi's anti-short-cycle
-            // timer requires and forces the next candidate to pay it
-            // again from scratch, with no indication anything was lost.
-            <p className={styles.body}>
-              This first test can take up to 10 minutes -- BrewPi's compressor-protection timer has to clear once
-              before anything can switch on for the first time. This only happens once.
-            </p>
-          )}
-        </>
-      );
-    } else if (result?.outcome === "engaged") {
-      body = (
-        <>
-          <p className={styles.body}>
-            Pin {candidate.pin}'s state just switched to a heating demand. Chamber probe:{" "}
-            {result.current_f != null ? `${result.current_f.toFixed(1)}°F` : "reading…"}. Did anything turn on?
+            Pin {candidate.pin} was just forced off. Did anything turn on anyway?
           </p>
           <div className={styles.choiceGrid}>
             {choice("The heater came on", "This pin is confirmed as heating.", () => {
-              const invert = polarityPhase === "reversed" ? (candidate.invert ? 0 : 1) : (candidate.invert ?? 0);
-              setDevicePicks((p) => ({ ...p, heat: { pin: candidate.pin as number, invert } }));
+              const safeInvert = flipInvert(result.invert);
+              setDevicePicks((p) => ({ ...p, heat: { pin: candidate.pin as number, invert: safeInvert } }));
               setPolarityPhase("normal");
+              setCorrecting({ pin: candidate.pin as number, invert: safeInvert });
             })}
             {choice("The fridge came on", "This pin is confirmed as cooling.", () => {
-              const invert = polarityPhase === "reversed" ? (candidate.invert ? 0 : 1) : (candidate.invert ?? 0);
-              setDevicePicks((p) => ({ ...p, cool: { pin: candidate.pin as number, invert } }));
+              const safeInvert = flipInvert(result.invert);
+              setDevicePicks((p) => ({ ...p, cool: { pin: candidate.pin as number, invert: safeInvert } }));
               setPolarityPhase("normal");
+              setCorrecting({ pin: candidate.pin as number, invert: safeInvert });
             })}
             {choice("Nothing happened", "Check the next test.", () => advancePolarityOrCandidate(candidate))}
           </div>
         </>
       );
-    } else {
-      // A brief transitional frame -- outcome === "timeout" auto-advances
-      // via its own effect with no user interaction required.
-      body = <p className={styles.body}>Nothing detected on pin {candidate.pin} -- checking the next test…</p>;
     }
   } else if (stage === "deviceNoCool") {
     subtitle = "Cooling is required -- no pin engaged cooling across every candidate.";
@@ -889,7 +876,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       setPolarityPhase("normal");
       setHeatSweepConfirmed(false);
       setHeatDeclined(false);
-      setEverEngaged(false);
+      setCorrecting(null);
       goTo("devicePinSweep");
     };
   } else if (stage === "deviceFinalizing") {
