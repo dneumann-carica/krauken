@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button, Tag } from "../../design/primitives";
 import {
+  apiErrorMessage,
   useAppState,
   useDevices,
   useFermentations,
@@ -67,6 +68,16 @@ export function HardwareSetupView() {
   const saveMapping = useSaveMapping();
 
   const [scanId, setScanId] = useState<string>();
+  // Confirmed live 2026-08-22: if the scan can't even START (the daemon
+  // was unreachable -- a real, real-hardware-observed case, not
+  // hypothetical), the mutation had no onError handler at all, so scanId
+  // just stayed undefined forever and the header silently sat on
+  // "Scanning for devices..." indefinitely, with no sign anything had
+  // gone wrong. This is a DIFFERENT case from a scan that completes with
+  // zero devices found (that already has its own "No devices found"
+  // empty-state row below) -- this is "the scan never got to run at
+  // all," and needs its own explicit banner.
+  const [scanStartError, setScanStartError] = useState<string>();
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [seeded, setSeeded] = useState(false);
   const [wizardDeviceId, setWizardDeviceId] = useState<string>();
@@ -91,7 +102,10 @@ export function HardwareSetupView() {
   useEffect(() => {
     if (scanStartedRef.current) return;
     scanStartedRef.current = true;
-    startScan.mutate(undefined, { onSuccess: (r) => setScanId(r.scan_id) });
+    startScan.mutate(undefined, {
+      onSuccess: (r) => setScanId(r.scan_id),
+      onError: (e) => setScanStartError(apiErrorMessage(e, "Could not start a hardware scan.")),
+    });
   }, [startScan]);
 
   const scanStatus = useScanStatus(scanId);
@@ -190,13 +204,14 @@ export function HardwareSetupView() {
   const wizardDevice = wizardDeviceId ? deviceById[wizardDeviceId] : undefined;
 
   const filledRequired = [...REQUIRED_ROLES].filter((r) => preview.roles[r] != null).length;
-  const scanLabel =
-    scanState === "running" || scanState === undefined
+  const scanLabel = scanStartError
+    ? "Scan couldn't start"
+    : scanState === "running" || scanState === undefined
       ? "Scanning for devices…"
       : scanState === "complete"
         ? `${deviceList.length} device${deviceList.length === 1 ? "" : "s"} found`
         : "Scan failed -- try again";
-  const scanning = scanState === "running" || scanState === undefined;
+  const scanning = !scanStartError && (scanState === "running" || scanState === undefined);
 
   const saved = saveResult != null && !saveError;
   const saveDisabled = !preview.valid || saveMapping.isPending || saved;
@@ -242,12 +257,25 @@ export function HardwareSetupView() {
             variant="secondary"
             size="sm"
             disabled={scanning}
-            onClick={() => startScan.mutate(undefined, { onSuccess: (r) => setScanId(r.scan_id) })}
+            onClick={() => {
+              setScanStartError(undefined);
+              startScan.mutate(undefined, {
+                onSuccess: (r) => setScanId(r.scan_id),
+                onError: (e) => setScanStartError(apiErrorMessage(e, "Could not start a hardware scan.")),
+              });
+            }}
           >
             Scan again
           </Button>
         </div>
       </div>
+
+      {scanStartError && (
+        <div className={`${styles.notice} ${styles.danger}`}>
+          Couldn't reach the hardware scanner: {scanStartError} Check that krauken-daemon is running, then try
+          "Scan again".
+        </div>
+      )}
 
       {saveResult && saveResult.auto_resolved.length > 0 && (
         <div className={styles.notices}>

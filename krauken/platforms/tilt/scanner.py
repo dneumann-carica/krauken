@@ -78,6 +78,24 @@ DEFAULT_HCI_DEVICE = 0
 # barely work.
 DROPOUT_TIMEOUT_S = 30.0
 
+# Confirmed live 2026-08-22: aioblescan's create_bt_socket() is a
+# synchronous, blocking syscall against the hci device, and it doesn't
+# raise when the interface is rfkill soft-blocked or simply powered off
+# (common on a fresh headless Raspberry Pi OS install -- nothing ever
+# powers Bluetooth on automatically without a desktop's Bluetooth
+# applet) -- it just blocks forever. Because start() used to call it
+# directly on the daemon's own event loop, this didn't just make Tilt
+# unavailable: it starved the ENTIRE daemon. Nothing else could run,
+# including the IPC server (which never got to start listening -- the
+# API then reported "cannot reach daemon" for every single request) and
+# even SIGTERM stopped being handled, since asyncio's own signal
+# delivery runs on that same blocked loop (confirmed live: systemd had
+# to SIGKILL it after a 90s stop-sigterm timeout). This constant bounds
+# the whole connect sequence, run off the event loop specifically so a
+# hang here can never take the rest of the daemon down with it -- see
+# _connect()'s own docstring.
+TILT_START_TIMEOUT_S = 10.0
+
 
 @dataclass
 class TiltReading:
@@ -120,33 +138,21 @@ class TiltScanner:
         import aioblescan as aiobs
         from aioblescan.plugins import Tilt as TiltDecoder
 
+        self._aiobs = aiobs
+        self._decoder = TiltDecoder()
         try:
-            socket = aiobs.create_bt_socket(self._hci_device)
-            loop = asyncio.get_running_loop()
-            # Private asyncio API (event_loop._create_connection_transport),
-            # not the documented create_connection() -- matches BrewPi
-            # Remix's own working aioblescan usage on this exact Python
-            # version verbatim (their own comment: "This used to work but
-            # now requires a STREAM socket... thanks to martensjacobs for
-            # this fix"), rather than a fresh guess at the "right" modern
-            # API. Accepted fragility: could break on a future
-            # Python/asyncio version, but aioblescan's own example code
-            # has the identical exposure, so this driver is no more
-            # fragile than its upstream.
-            conn, btctrl = await loop._create_connection_transport(socket, aiobs.BLEScanRequester, None, None)
-            # process MUST be assigned before send_scan_request(), not
-            # after -- matches aioblescan's own __main__.py example
-            # ordering exactly. Getting this backwards was a real bug
-            # caught testing against the actual Tilt: advertisements
-            # arriving in the window between the scan starting and
-            # .process being assigned were silently dropped by whatever
-            # BLEScanRequester.process defaults to.
-            self._aiobs = aiobs
-            self._decoder = TiltDecoder()
-            btctrl.process = self._on_packet
-            await btctrl.send_scan_request()
+            conn, btctrl = await asyncio.wait_for(self._connect(aiobs), TILT_START_TIMEOUT_S)
         except PlatformUnavailable:
             raise
+        except TimeoutError as e:
+            # See TILT_START_TIMEOUT_S's own comment -- a real, confirmed
+            # failure mode (rfkill-blocked/powered-off hci device), not a
+            # hypothetical one. Message doubles as the on-device fix.
+            raise PlatformUnavailable(
+                f"Tilt BLE scanner unavailable: hci{self._hci_device} didn't respond within "
+                f"{TILT_START_TIMEOUT_S}s -- likely rfkill-blocked or powered off; try "
+                f"'sudo rfkill unblock bluetooth && sudo hciconfig hci{self._hci_device} up'"
+            ) from e
         except Exception as e:
             # Anything from here down is platform/environment trouble, not
             # "aioblescan is missing" (requires_optional already covers
@@ -170,6 +176,37 @@ class TiltScanner:
         self._conn = conn
         self._btctrl = btctrl
         log.info("Tilt scanner started on hci%d", self._hci_device)
+
+    async def _connect(self, aiobs: Any) -> tuple[Any, Any]:
+        """The actual connect sequence -- wrapped by start() in
+        TILT_START_TIMEOUT_S, and create_bt_socket() specifically run off
+        the event loop via asyncio.to_thread, since it's the synchronous,
+        blocking syscall confirmed live to hang indefinitely against an
+        rfkill-blocked/powered-off hci device (see TILT_START_TIMEOUT_S's
+        own comment for why that's dangerous if left on the main loop)."""
+        socket = await asyncio.to_thread(aiobs.create_bt_socket, self._hci_device)
+        loop = asyncio.get_running_loop()
+        # Private asyncio API (event_loop._create_connection_transport),
+        # not the documented create_connection() -- matches BrewPi
+        # Remix's own working aioblescan usage on this exact Python
+        # version verbatim (their own comment: "This used to work but
+        # now requires a STREAM socket... thanks to martensjacobs for
+        # this fix"), rather than a fresh guess at the "right" modern
+        # API. Accepted fragility: could break on a future
+        # Python/asyncio version, but aioblescan's own example code
+        # has the identical exposure, so this driver is no more
+        # fragile than its upstream.
+        conn, btctrl = await loop._create_connection_transport(socket, aiobs.BLEScanRequester, None, None)
+        # process MUST be assigned before send_scan_request(), not
+        # after -- matches aioblescan's own __main__.py example
+        # ordering exactly. Getting this backwards was a real bug
+        # caught testing against the actual Tilt: advertisements
+        # arriving in the window between the scan starting and
+        # .process being assigned were silently dropped by whatever
+        # BLEScanRequester.process defaults to.
+        btctrl.process = self._on_packet
+        await btctrl.send_scan_request()
+        return conn, btctrl
 
     async def stop(self) -> None:
         if self._btctrl is not None:

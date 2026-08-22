@@ -12,11 +12,15 @@ Temp: 39F) exactly.
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 pytest.importorskip("aioblescan")
 
 from krauken.contracts.clock import SimulatorClock  # noqa: E402
+from krauken.contracts.errors import PlatformUnavailable  # noqa: E402
+from krauken.platforms.tilt import scanner as scanner_module  # noqa: E402
 from krauken.platforms.tilt.scanner import ALL_TILT_COLORS, DROPOUT_TIMEOUT_S, TiltScanner  # noqa: E402
 
 # Verbatim raw HCI event bytes captured 2026-08-11 -- a real Tilt Orange
@@ -110,3 +114,41 @@ def test_a_fresh_beacon_before_the_timeout_keeps_it_alive():
     s._on_packet(REAL_TILT_ORANGE_PACKET)  # a fresh beacon resets the clock
     clock.advance(DROPOUT_TIMEOUT_S - 1)
     assert s.latest("orange") is not None  # would have expired from the FIRST beacon alone
+
+
+async def test_start_treats_a_hung_hci_device_as_unavailable_instead_of_hanging_forever(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Confirmed live 2026-08-22: create_bt_socket() blocks indefinitely
+    # against an rfkill-blocked/powered-off hci device instead of raising
+    # -- confirmed on real hardware, not a hypothetical. Left unbounded on
+    # the daemon's own event loop, this starved the ENTIRE daemon (no IPC
+    # server, no signal handling, nothing) rather than just leaving Tilt
+    # unavailable. start() must convert a hang like this into a normal,
+    # already-handled PlatformUnavailable within TILT_START_TIMEOUT_S, not
+    # hang the caller forever.
+    import aioblescan as aiobs
+
+    monkeypatch.setattr(scanner_module, "TILT_START_TIMEOUT_S", 0.05)
+
+    # A real hang, not a short sleep -- but bounded (a few seconds, not
+    # forever) so a leaked, non-daemon ThreadPoolExecutor worker can't
+    # hang the whole test PROCESS at exit even after this test itself has
+    # finished and moved on; asyncio.wait_for() cancelling the awaiting
+    # coroutine can't stop this actual OS thread, only make start() stop
+    # waiting on it -- released early via .set() below once the assertion
+    # is done, so this bound is only ever hit if something regresses.
+    release = threading.Event()
+
+    def _hangs_until_released(hci_device: int) -> None:
+        release.wait(timeout=5.0)
+
+    monkeypatch.setattr(aiobs, "create_bt_socket", _hangs_until_released)
+
+    s = TiltScanner(SimulatorClock(), hci_device=0)
+    try:
+        with pytest.raises(PlatformUnavailable, match="didn't respond within"):
+            await s.start()
+        assert not s.running
+    finally:
+        release.set()

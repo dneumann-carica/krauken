@@ -1,3 +1,36 @@
+krauken (0.1.14) stable; urgency=medium
+
+  * Fix: TiltScanner.start()'s aioblescan create_bt_socket() call is a
+    synchronous, blocking syscall that hangs indefinitely against an
+    rfkill soft-blocked or powered-off hci device instead of raising --
+    confirmed live against a fresh headless Raspberry Pi OS install
+    (nothing ever powers Bluetooth on automatically without a desktop's
+    Bluetooth applet). Because start() ran it directly on the daemon's
+    own event loop, this didn't just make Tilt unavailable: it starved
+    the ENTIRE daemon -- the IPC server never got to start listening (the
+    API then reported "cannot reach daemon" for every request, including
+    Hardware Setup's scan), and even SIGTERM stopped being handled, since
+    asyncio's own signal delivery runs on that same blocked loop
+    (systemd had to SIGKILL it after a 90s stop-sigterm timeout). Fixed:
+    the connect sequence now runs off the event loop via
+    asyncio.to_thread and is bounded by a new TILT_START_TIMEOUT_S
+    (10s) -- a timeout now converts into the same, already-handled
+    PlatformUnavailable outcome Tilt startup failures always used to
+    produce, instead of hanging the caller (and the whole daemon)
+    forever. New regression test confirms this without ever needing a
+    real (or even fake-but-fast) Bluetooth adapter.
+  * Fix: Hardware Setup's scan-start mutation had no onError handler --
+    if POST /hardware/scan itself failed (confirmed live: exactly the
+    daemon-unreachable case above), scanId just stayed unset forever and
+    the page silently sat on "Scanning for devices..." indefinitely, with
+    no indication anything had gone wrong. This is a different case from
+    a scan that completes with zero devices found (that already had its
+    own "No devices found" empty-state row). Both the auto-start effect
+    and the "Scan again" button now surface the real API error in a
+    clear banner instead.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 22 Aug 2026 12:17:51 -0400
+
 krauken (0.1.13) stable; urgency=medium
 
   * Supply-chain security: Python dependencies were declared as loose

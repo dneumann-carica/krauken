@@ -365,6 +365,7 @@
   font: var(--kr-type-small);
 }
 .notice.info { background: var(--kr-surface-sunken); color: var(--kr-ink-body); border: 1px solid var(--kr-border); }
+.notice.danger { background: var(--kr-danger-faint); color: var(--kr-danger); border: 1px solid var(--kr-danger-tint); }
 
 .loading,
 .error {
