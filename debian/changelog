@@ -1,3 +1,23 @@
+krauken (0.1.15) stable; urgency=medium
+
+  * Pin 2 is now permanently excluded from the relay-identification
+    sweep (new RESERVED_RELAY_PINS in device_config.py, rejected before
+    identify_relay_pin touches the connection at all; mirrored in
+    HardwareWizard.tsx's candidate list so the sweep never even attempts
+    it). Confirmed live on the real rig: installing pin 2 as CHAMBER_HEAT
+    produced chaotic, rapidly-toggling voltage -- not a clean driven
+    level, and not the merely-noisy float an unclaimed pin shows --
+    consistent with Arduino Uno's D2 (one of only two hardware-interrupt
+    pins) being wired to the classic shield's rotary encoder, fighting
+    our actuator output for the same physical pin. The shield's own
+    original wiring instructions also explicitly call out pins 5/6 as
+    the intended relay pins, never 2. A denylist, not an allowlist --
+    pins other than 2 aren't restricted, preserving this project's
+    "test whatever the Arduino actually reports as available" discovery
+    design for any other pin a different board/shield might expose.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 22 Aug 2026 17:21:55 -0400
+
 krauken (0.1.14) stable; urgency=medium
 
   * Fix: TiltScanner.start()'s aioblescan create_bt_socket() call is a

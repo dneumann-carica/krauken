@@ -105,6 +105,26 @@ RELAY_IDENTIFY_SLOT = 15
 # did.
 RELAY_IDENTIFY_SETTLE_S = 2.0
 
+# Pin 2 is permanently off-limits as a relay candidate on this Arduino
+# Uno-based BrewPi shield -- confirmed live 2026-08-22, not a guess. Uno's
+# D2 is one of only two hardware-interrupt-capable pins (D2/D3), and
+# classic BrewPi shields commonly wire the LCD's rotary encoder to one of
+# them; the shield's own original wiring instructions explicitly call out
+# pins 5/6 as the intended relay pins, never 2. Installing pin 2 as
+# CHAMBER_HEAT produced chaotic, rapidly-toggling voltage on a multimeter
+# -- not a clean driven level, and not the merely-noisy float an
+# unclaimed pin shows -- consistent with the firmware's own
+# rotary-encoder interrupt handler fighting our actuator output for the
+# same physical pin, not with "nothing wired here." Pins other than 2
+# are NOT similarly restricted -- this project's discovery design is
+# deliberately "test whatever the Arduino actually reports as available,
+# don't assume a standard configuration" (an earlier, real lesson from
+# this same project), and there's no evidence any other pin is
+# similarly reserved; a denylist of confirmed-bad pins preserves that
+# philosophy for pins added by a different board/shield, whereas an
+# allowlist of "only ever try 5/6" would not.
+RESERVED_RELAY_PINS = frozenset({2})
+
 
 @dataclass
 class BrewPiDevice:
@@ -546,6 +566,9 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
     apart from an already-safe one. A pin the wizard hasn't resolved yet
     (still mid-sweep, or genuinely nothing wired there) is simply bare-
     uninstalled -- there's nothing to protect either way.
+
+    Rejects a candidate pin in RESERVED_RELAY_PINS outright, before
+    touching the connection at all -- see that constant's own comment.
     """
     conn = _brewpi_connection(ctx)
     if conn is None:
@@ -558,6 +581,10 @@ async def _run_identify_relay_pin(ctx: Any, job: Any, device_id: str, params: di
     if pin is None:
         job.state = "failed"
         job.error = "identify_relay_pin requires a candidate with a pin"
+        return
+    if pin in RESERVED_RELAY_PINS:
+        job.state = "failed"
+        job.error = f"pin {pin} is reserved on this hardware and can never be tested as a relay -- see RESERVED_RELAY_PINS"
         return
     invert = int(candidate.get("invert", 0))
     resolved = {

@@ -51,6 +51,18 @@ const FIRE_DURATION_S = 10;
 // candidates down to raw hardware pins.
 const DEVICE_HARDWARE_PIN = 1;
 
+// Pin 2 is permanently off-limits as a relay candidate on this Arduino
+// Uno-based BrewPi shield -- confirmed live 2026-08-22, not a guess.
+// Matches device_config.py's RESERVED_RELAY_PINS (see its own comment
+// for the full story: Uno's D2 is an interrupt-only pin, commonly wired
+// to the classic shield's rotary encoder; installing it as CHAMBER_HEAT
+// produced chaotic, rapidly-toggling voltage, not a clean level or a
+// merely-noisy float). Excluded here too, not just server-side, so the
+// sweep never even attempts a candidate the backend will always reject
+// -- the backend's own RESERVED_RELAY_PINS check is what actually
+// enforces this; this is purely to avoid a pointless failed-test flash.
+const RESERVED_RELAY_PINS = new Set([2]);
+
 const STEP_LABELS: Record<Stage, string> = {
   intro: "Step 1 of 3",
   relayA: "Step 2 of 3",
@@ -471,7 +483,9 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     const excluded = new Set(
       [devicePicks.cool?.pin, devicePicks.heat?.pin, ...testedPins].filter((p): p is number => p != null),
     );
-    return (deviceList ?? []).filter((d) => d.hardware === DEVICE_HARDWARE_PIN && d.pin != null && !excluded.has(d.pin));
+    return (deviceList ?? []).filter(
+      (d) => d.hardware === DEVICE_HARDWARE_PIN && d.pin != null && !excluded.has(d.pin) && !RESERVED_RELAY_PINS.has(d.pin),
+    );
   }
 
   useEffect(() => {

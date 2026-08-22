@@ -147,6 +147,29 @@ def _isolated_baseline_path(monkeypatch: pytest.MonkeyPatch, tmp_path):
 # --- identify_relay_pin ---
 
 
+async def test_identify_relay_pin_rejects_a_reserved_pin_before_touching_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Confirmed live 2026-08-22: pin 2 is permanently off-limits on this
+    # Arduino Uno-based shield (see RESERVED_RELAY_PINS's own comment).
+    # Must fail before making any hardware calls at all -- not even
+    # set_fridge_target(None) -- since there's nothing to gain from
+    # forcing the chamber off just to reject the candidate anyway.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection()
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_relay_pin", {"candidate": {"pin": 2, "invert": 0}})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "failed"
+    assert "pin 2" in job.error
+    assert "reserved" in job.error
+    assert conn.install_calls == []
+    assert conn.set_target_calls == []
+
+
 async def test_identify_relay_pin_forces_the_chamber_off_and_installs_the_candidate(monkeypatch: pytest.MonkeyPatch):
     # Redesigned 2026-08-18 (see plans/jiggly-bubbling-popcorn.md): no more
     # forced heat demand / State polling -- just force the chamber off
