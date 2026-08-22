@@ -24,9 +24,20 @@ override_dh_auto_build:
 # code path. All three build/import fine on x86_64 (lgpio only *talks* to
 # real GPIO hardware lazily, at instantiation -- see cli/hwid.py's
 # LgpioBackend); only actual pin access needs a real Pi.
+#
+# Installs from requirements-dev.lock.txt (exact-pinned, checked into the
+# repo -- regenerate with `uv pip compile pyproject.toml --extra dev
+# --extra pi -o requirements-dev.lock.txt` whenever pyproject.toml
+# changes) rather than resolving '.[dev,pi]' live -- this is what actually
+# runs in CI on every real release build, so it deserves the same
+# reproducibility guarantee as the production install path below. The
+# package itself is then installed editable, --no-deps -- its
+# dependencies are already satisfied by the lock file; asking pip to
+# resolve them again here would defeat the point of pinning.
 override_dh_auto_test:
 	python3 -m venv /tmp/krauken-build-venv
-	/tmp/krauken-build-venv/bin/pip install --quiet -e '.[dev,pi]'
+	/tmp/krauken-build-venv/bin/pip install --quiet -r requirements-dev.lock.txt
+	/tmp/krauken-build-venv/bin/pip install --quiet --no-deps -e '.[dev,pi]'
 	/tmp/krauken-build-venv/bin/pytest -q
 	rm -rf /tmp/krauken-build-venv
 
@@ -36,7 +47,7 @@ override_dh_auto_install:
 	# device, so its own pip/piwheels.org resolve correctly for whatever
 	# architecture actually ends up running this.
 	mkdir -p debian/krauken/opt/krauken/src
-	cp -r krauken pyproject.toml debian/krauken/opt/krauken/src/
+	cp -r krauken pyproject.toml requirements-pi.lock.txt debian/krauken/opt/krauken/src/
 	find debian/krauken/opt/krauken/src -name '__pycache__' -exec rm -rf {} +
 
 	# Pre-built frontend static assets -- plain JS/CSS/HTML, genuinely

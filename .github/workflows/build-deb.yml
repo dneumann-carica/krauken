@@ -71,6 +71,28 @@ jobs:
           path: dist/*.deb
           if-no-files-found: error
 
+      # SBOMs for exactly what this release ships: requirements-pi.lock.txt
+      # (the pinned production dependency set -- see debian/krauken.postinst)
+      # and the frontend's package-lock.json. Generated from the lock
+      # files directly, not by introspecting a live venv/node_modules --
+      # override_dh_auto_test's own venv is already gone by this point
+      # (removed at the end of that step), and the lock files are the
+      # authoritative record of what actually gets installed regardless.
+      - name: Generate Python SBOM (CycloneDX)
+        run: |
+          pip install --quiet pip-audit
+          pip-audit -r requirements-pi.lock.txt --format cyclonedx-json -o krauken-sbom-python.cdx.json
+
+      - name: Generate frontend SBOM (CycloneDX)
+        working-directory: frontend
+        run: npm sbom --sbom-format cyclonedx > ../krauken-sbom-frontend.cdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: krauken-sboms
+          path: krauken-sbom-*.cdx.json
+          if-no-files-found: error
+
   sign-and-publish:
     needs: build
     runs-on: ubuntu-latest
@@ -84,6 +106,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: krauken-deb
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: krauken-sboms
           path: dist
 
       - name: Install repo-building tools
@@ -120,10 +147,12 @@ jobs:
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: ./scripts/publish-apt-repo.sh dist public krauken-archive-keyring.asc "$GPG_KEY_ID" "$PAGES_URL"
 
-      - name: Attach .deb to the GitHub Release
+      - name: Attach .deb and SBOMs to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.deb
+          files: |
+            dist/*.deb
+            dist/*.cdx.json
           fail_on_unmatched_files: true
 
       - uses: actions/upload-pages-artifact@v3

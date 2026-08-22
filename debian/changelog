@@ -1,3 +1,47 @@
+krauken (0.1.13) stable; urgency=medium
+
+  * Supply-chain security: Python dependencies were declared as loose
+    lower bounds only (fastapi>=0.115, pydantic>=2.8, etc.) with no
+    lockfile, and -- unlike the frontend, which npm ci's a locked
+    package-lock.json -- were resolved live from PyPI/piwheels.org on the
+    end user's own Pi at install time (postinst's `pip install -e
+    ".[pi]"`), not at CI build time. Two installs of the identical .deb,
+    weeks apart, could silently pull different actual dependency code,
+    with no lockfile to even ask afterward what was really installed.
+    Added requirements-pi.lock.txt (production, exact-pinned via `uv pip
+    compile`) and requirements-dev.lock.txt (dev+pi, what CI's own test
+    step runs against) -- postinst and debian/rules' override_dh_auto_test
+    now install from these locked files (then the package itself
+    editable/--no-deps) instead of resolving pyproject.toml's ranges live.
+    Deliberately version-pinned, not hash-pinned: hashes are per-artifact,
+    and this lock file can't be generated with piwheels' actual ARM wheel
+    hashes from a dev machine -- a mismatch against whatever pip
+    legitimately downloads on the real target architecture would break
+    every install. Version-pinning alone already fixes the reproducibility
+    problem; hash-pinning is a real follow-up that needs generating (or
+    verifying) on the actual target architecture first.
+  * Enabled Dependabot vulnerability alerts + automated security updates,
+    and secret scanning + push protection (all free for this public
+    repo, all were off). Added .github/dependabot.yml for weekly
+    version-update PRs across pip, npm, and the release workflow's own
+    GitHub Actions versions -- reviewed, not auto-merged, since there's
+    no CI running on plain pushes/PRs yet for any of them to lean on
+    besides a human actually running the suite locally.
+  * Added .github/workflows/security-scan.yml (push/PR-triggered, unlike
+    build-deb.yml which only runs on release tags): pip-audit against
+    both lock files, npm audit --audit-level=high against the frontend.
+    Running this for the first time immediately found a real, live high
+    severity vulnerability (nanoid, a transitive frontend dependency) --
+    fixed via `npm audit fix` in the same pass, confirmed build/lint
+    still clean.
+  * build-deb.yml now generates a CycloneDX SBOM for both ecosystems
+    (pip-audit --format cyclonedx-json against requirements-pi.lock.txt;
+    npm sbom --sbom-format cyclonedx for the frontend) and attaches both
+    to the GitHub Release alongside the .deb on every real release, for
+    "was version X affected by CVE-Y" traceability later.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 22 Aug 2026 11:34:54 -0400
+
 krauken (0.1.12) stable; urgency=medium
 
   * Fix: install_device() (connection.py) was a pure fire-and-forget

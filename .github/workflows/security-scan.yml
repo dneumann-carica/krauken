@@ -1,0 +1,67 @@
+name: Dependency vulnerability scan
+
+# Runs on every push/PR, unlike build-deb.yml (tag-triggered only) --
+# there's no other workflow that runs on plain pushes yet, so this is
+# also the first line of CI feedback for a branch, not just a
+# security-specific check. Checks the actual pinned lock files
+# (requirements-pi.lock.txt / requirements-dev.lock.txt / frontend/
+# package-lock.json), not whatever pyproject.toml's loose ranges would
+# resolve to today -- catching a known-vulnerable version here only means
+# something if it's checking the exact thing that would actually get
+# installed on a real device.
+"on":
+  push:
+    branches: ["**"]
+  pull_request: {}
+  workflow_dispatch: {}
+
+jobs:
+  python-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: pip install --quiet pip-audit
+
+      # Both lock files: requirements-pi.lock.txt is what actually ships
+      # to real hardware (see debian/krauken.postinst); requirements-dev
+      # .lock.txt is what CI itself runs tests against (debian/rules'
+      # override_dh_auto_test) -- a vulnerable dev-only dependency can't
+      # reach an end user's Pi, but it can still compromise this CI
+      # pipeline or a contributor's machine, so it's worth checking too.
+      - name: Audit production dependencies (requirements-pi.lock.txt)
+        run: pip-audit -r requirements-pi.lock.txt
+
+      - name: Audit dev/test dependencies (requirements-dev.lock.txt)
+        run: pip-audit -r requirements-dev.lock.txt
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install (from lock file only, no resolution)
+        run: npm ci
+
+      # --audit-level=high, not the npm-audit default of "any finding
+      # fails" -- low/moderate-severity findings in transitive
+      # build-tooling deps (vite/eslint plugins etc., never shipped to a
+      # browser) are common and often have no available fix yet; failing
+      # CI on every one of those would train everyone to ignore this
+      # check entirely. High/critical still fails the build.
+      - name: Audit
+        run: npm audit --audit-level=high

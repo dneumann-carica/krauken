@@ -55,11 +55,11 @@ case "$1" in
     fi
 
     # 3. The actual Python virtualenv. `pip install` only re-runs when
-    # pyproject.toml has actually changed since the last successful
-    # install (tracked via a stored hash), not unconditionally on every
-    # upgrade -- editable installs already pick up plain code changes
-    # for free (${SRC} is referenced directly, not copied), so the only
-    # reason to ever re-run pip here is a real dependency/entry-point
+    # requirements-pi.lock.txt has actually changed since the last
+    # successful install (tracked via a stored hash), not unconditionally
+    # on every upgrade -- editable installs already pick up plain code
+    # changes for free (${SRC} is referenced directly, not copied), so the
+    # only reason to ever re-run pip here is a real dependency/entry-point
     # change. This used to re-resolve the whole [pi] dependency set on
     # every single upgrade, including pure no-op ones -- measured on a
     # real Pi Zero W (single 1GHz ARM11 core): even a package with a
@@ -77,6 +77,25 @@ case "$1" in
     # actually a real, slow, but progressing pip resolve). Echoing here
     # doesn't speed anything up, but it's the difference between "this
     # is clearly still working" and "did this hang?"
+    #
+    # Installs from requirements-pi.lock.txt (exact-pinned versions,
+    # shipped alongside pyproject.toml -- see debian/rules'
+    # override_dh_auto_install) rather than resolving the [pi] extra's
+    # loose pyproject.toml ranges live against piwheels.org -- otherwise
+    # two installs of the IDENTICAL .deb, weeks apart, could silently
+    # pull different actual dependency code depending on whatever's
+    # newest on PyPI/piwheels at install time, with no way to even ask
+    # afterward what was really installed. Deliberately NOT hash-pinned
+    # (pip install --require-hashes): hashes are per-artifact, and this
+    # lock file is generated on a dev machine that can't produce piwheels'
+    # actual ARM wheel hashes -- a hash mismatch against whatever pip
+    # legitimately downloads on the real target architecture would break
+    # every install. Version-pinning alone already solves the
+    # reproducibility problem; hash-pinning is a real follow-up but needs
+    # generating (or verifying) on the actual target architecture first.
+    # The package itself installs editable, --no-deps -- its dependencies
+    # are already satisfied by the lock file install just above; asking
+    # pip to resolve them again here would defeat the point of pinning.
     fresh_venv=false
     if [ ! -x "$VENV/bin/python3" ]; then
         echo "krauken: creating the Python virtualenv..."
@@ -84,12 +103,13 @@ case "$1" in
         fresh_venv=true
     fi
     hash_file="$VENV/.krauken-pyproject-sha256"
-    new_hash="$(sha256sum "${SRC}/pyproject.toml" | cut -d' ' -f1)"
+    new_hash="$(cat "${SRC}/pyproject.toml" "${SRC}/requirements-pi.lock.txt" | sha256sum | cut -d' ' -f1)"
     old_hash="$(cat "$hash_file" 2>/dev/null || true)"
     if [ "$fresh_venv" = true ] || [ "$new_hash" != "$old_hash" ]; then
         echo "krauken: dependencies changed (or this is a fresh install) -- installing/upgrading the [pi] extra now. On a Pi Zero W this can genuinely take a few minutes even with piwheels prebuilt wheels; this is expected, not a hang."
         "$VENV/bin/pip" install --quiet --upgrade pip
-        "$VENV/bin/pip" install --quiet -e "${SRC}[pi]"
+        "$VENV/bin/pip" install --quiet -r "${SRC}/requirements-pi.lock.txt"
+        "$VENV/bin/pip" install --quiet --no-deps -e "${SRC}[pi]"
         echo "$new_hash" > "$hash_file"
         echo "krauken: dependencies installed."
     else

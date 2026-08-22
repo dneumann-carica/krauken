@@ -1,0 +1,38 @@
+# Scheduled version-update PRs, on top of the security-only alerts/fixes
+# enabled separately via the repo's own Dependabot settings (Settings >
+# Code security). This is the "keep the pinned lockfile/package-lock.json
+# from calcifying into permanently-stale" half of the supply-chain story
+# -- pinning without a renewal process just trades "silently vulnerable"
+# for "silently stuck on an old version forever". Weekly, reviewed PRs
+# (not auto-merged) -- deliberately not more frequent than that; this
+# project has no CI that runs on plain pushes/PRs yet (only on release
+# tags), so every one of these PRs needs a human to actually run the
+# suite locally before merging.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  # The workflow that builds/signs/publishes every real release -- an
+  # outdated or vulnerable Action version is a supply-chain risk to the
+  # release pipeline itself, same category of concern as the app's own
+  # dependencies.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
