@@ -1,3 +1,29 @@
+krauken (0.1.20) stable; urgency=medium
+
+  * Fix: finalize_device_config could permanently leave the real cooling
+    or heating relay installed on RELAY_IDENTIFY_SLOT (15) -- the relay
+    sweep's own scratch slot, meant only for testing pins during the
+    wizard. Root cause: identify_relay_pin always installs every
+    candidate it tests as CHAMBER_HEAT regardless of its eventual real
+    role, reusing slot 15 across the whole sweep. Whichever candidate the
+    sweep last confirmed as the REAL heat pin was therefore already
+    sitting at slot 15 with a matching pin+function by the time finalize
+    ran, so its "_slot_for() reuses a matching existing device's slot"
+    heuristic picked slot 15 right back up as that pin's permanent home.
+    (Cooling never hit this, since it's tested as CHAMBER_HEAT too but
+    finalized as CHAMBER_COOL -- no function match, so it always landed
+    on a genuinely free slot instead.) Confirmed live this session: slot
+    15 still held CHAMBER_HEAT after a completed wizard run.
+    _pick_free_slot() now takes an `exclude` param, and every permanent
+    install (a probe, or finalize's cool/heat) refuses to reuse slot 15
+    even when it already matches by pin+function. finalize_device_config
+    also now unconditionally uninstalls slot 15 as an explicit step every
+    run, regardless of whether anything used it that particular time --
+    a real invariant now, not an incidental side effect of avoiding
+    reuse.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 23 Aug 2026 15:40:21 -0400
+
 krauken (0.1.19) stable; urgency=medium
 
   * Fix (data loss): the BrewPi setup wizard's Finish setup step

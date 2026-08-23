@@ -94,6 +94,19 @@ IDENTIFY_ONEWIRE_BACKSTOP_S = 3600.0
 # so a long sweep doesn't churn through slots. Falls back to a freshly
 # picked free slot in the (very unlikely) case something unrelated already
 # occupies it.
+#
+# Invariant: never a permanent home for anything. _pick_free_slot's
+# `exclude` param and _run_finalize_device_config's own _slot_for both
+# refuse to reuse this slot for a real role even when it happens to
+# already match by pin+function -- which, for whichever candidate the
+# sweep last confirmed as heat, it always will (identify_relay_pin always
+# installs every candidate it tests as CHAMBER_HEAT regardless of its
+# eventual real role). finalize_device_config unconditionally uninstalls
+# this slot as its own explicit step, every run, regardless of whether
+# anything used it that particular time -- confirmed live this session:
+# without both of these, the real heat pin's permanent home ended up
+# being this scratch slot purely by coincidence, and survived a completed
+# wizard run.
 RELAY_IDENTIFY_SLOT = 15
 # Brief settle after installing a candidate under a forced-off chamber --
 # one control-loop tick plus real relay switch time, confirmed live
@@ -229,12 +242,21 @@ class BrewPiDevice:
         return self.hardware in _ONEWIRE_HARDWARE
 
 
-def _pick_free_slot(installed: list[BrewPiDevice]) -> int:
+def _pick_free_slot(installed: list[BrewPiDevice], *, exclude: frozenset[int] = frozenset()) -> int:
     """The firmware does NOT auto-assign a slot on install (confirmed via
     DeviceManager.cpp -- see module docstring) -- the caller picks an
     explicit, currently-unused slot number. Lowest free integer in
-    range(MAX_DEVICE_SLOT) not already claimed."""
-    used = {d.slot for d in installed}
+    range(MAX_DEVICE_SLOT) not already claimed.
+
+    `exclude` lets a caller rule out slots that are technically free but
+    off-limits for what it's picking a slot for -- every PERMANENT install
+    (a probe, or finalize's cool/heat) passes {RELAY_IDENTIFY_SLOT} here,
+    so a scratch slot that happens to be unoccupied at that exact moment
+    can never end up holding a device meant to survive the wizard.
+    identify_relay_pin's own scratch usage is the one caller that
+    deliberately leaves this empty -- RELAY_IDENTIFY_SLOT is exactly where
+    it wants to land."""
+    used = {d.slot for d in installed} | exclude
     for slot in range(MAX_DEVICE_SLOT):
         if slot not in used:
             return slot
@@ -500,8 +522,11 @@ async def _run_install_probe(ctx: Any, job: Any, device_id: str, params: dict[st
     function = DEVICE_FUNCTION_CHAMBER_TEMP if role == "chamber" else DEVICE_FUNCTION_BEER_TEMP
 
     installed = await conn.list_all_devices(with_values=False)
-    existing = next((d for d in installed if d.function == function), None)
-    slot = existing.slot if existing is not None else _pick_free_slot(installed)
+    # Never reuse RELAY_IDENTIFY_SLOT for a probe, even if something with
+    # this function already happens to be sitting there -- that slot is
+    # the relay sweep's scratch space only, never a permanent role's home.
+    existing = next((d for d in installed if d.function == function and d.slot != RELAY_IDENTIFY_SLOT), None)
+    slot = existing.slot if existing is not None else _pick_free_slot(installed, exclude=frozenset({RELAY_IDENTIFY_SLOT}))
 
     device = BrewPiDevice(
         slot=slot,
@@ -668,14 +693,26 @@ async def _run_finalize_device_config(ctx: Any, job: Any, device_id: str, params
                 # behavior, documented at the top of this module). Only
                 # a genuinely installed device's slot is ever safe to
                 # reuse.
-                if d.slot < 0:
+                if d.slot < 0 or d.slot == RELAY_IDENTIFY_SLOT:
+                    # RELAY_IDENTIFY_SLOT is never a valid reuse target for
+                    # a permanent role, even when it happens to already
+                    # match by pin+function -- which it always will for
+                    # whichever candidate the relay sweep last confirmed
+                    # as heat, since identify_relay_pin always installs
+                    # every candidate it tests as CHAMBER_HEAT regardless
+                    # of its eventual real role (see that function's own
+                    # docstring). Without this, that candidate's real,
+                    # permanent home ends up being the sweep's own scratch
+                    # slot purely by coincidence -- confirmed live this
+                    # session (slot 15 still held CHAMBER_HEAT after a
+                    # completed wizard run).
                     continue
                 if function in (DEVICE_FUNCTION_CHAMBER_TEMP, DEVICE_FUNCTION_BEER_TEMP):
                     if d.address == address:
                         return d.slot
                 elif d.pin == pin and d.function == function:
                     return d.slot
-            return _pick_free_slot(installed)
+            return _pick_free_slot(installed, exclude=frozenset({RELAY_IDENTIFY_SLOT}))
 
         def _matches_intended(actual: BrewPiDevice | None, intended: BrewPiDevice) -> bool:
             if actual is None or actual.function != intended.function:
@@ -729,6 +766,15 @@ async def _run_finalize_device_config(ctx: Any, job: Any, device_id: str, params
             await conn.install_device(dev)
             pushed.append(dev)
             installed.append(dev)
+
+        # Unconditional, regardless of whether anything actually landed
+        # there this run -- RELAY_IDENTIFY_SLOT is scratch space for the
+        # relay sweep only and must never survive a completed wizard run.
+        # Not added to `pushed` (nothing to verify a device *against* --
+        # this is confirming an absence, not a value), and safe to call
+        # even when the slot's already empty (an uninstall of a bare slot
+        # is a no-op on the firmware side).
+        await _uninstall(conn, RELAY_IDENTIFY_SLOT)
 
         # Confirmed live 2026-08-22: sending R too soon after the last
         # install risks the reset firing before its EEPROM write has

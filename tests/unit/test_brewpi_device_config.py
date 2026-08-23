@@ -406,6 +406,29 @@ async def test_install_probe_reuses_the_existing_slot_for_the_same_function(monk
     assert conn.install_calls[0].address == "NEW"
 
 
+async def test_install_probe_never_reuses_the_relay_sweep_scratch_slot(monkeypatch: pytest.MonkeyPatch):
+    # Same invariant as finalize_device_config's own scratch-slot test:
+    # RELAY_IDENTIFY_SLOT is never a valid home for a probe, even if a
+    # device with a matching function happens to already be sitting there.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(
+        installed=[
+            BrewPiDevice(
+                slot=device_config.RELAY_IDENTIFY_SLOT, function=device_config.DEVICE_FUNCTION_CHAMBER_TEMP,
+                hardware=2, pin=18, address="OLD",
+            ),
+        ],
+    )
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "install_probe", {"role": "chamber", "address": "NEW", "pin": 18})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    assert conn.install_calls[0].slot != device_config.RELAY_IDENTIFY_SLOT
+
+
 async def test_install_probe_is_blocked_while_a_fermentation_is_active(monkeypatch: pytest.MonkeyPatch):
     _patch_active_fermentation(monkeypatch)
     conn = _FakeBrewPiConnection()
@@ -522,7 +545,10 @@ async def test_finalize_device_config_installs_each_device_then_resets_exactly_o
     await job._task
 
     assert job.state == "completed"
-    assert len(conn.install_calls) == 3  # chamber_probe, cool, heat -- beer_probe is None
+    # chamber_probe, cool, heat, plus the unconditional RELAY_IDENTIFY_SLOT
+    # cleanup -- beer_probe is None.
+    assert len(conn.install_calls) == 4
+    assert "uninstall:15" in conn.call_order
     assert conn.reset_calls == 1
     assert "installed" in job.result
 
@@ -539,6 +565,41 @@ async def test_finalize_device_config_still_resets_exactly_once_when_an_install_
     assert job.state == "failed"
     # The safety-net reset fired exactly once -- not zero, not twice.
     assert conn.reset_calls == 1
+
+
+async def test_finalize_device_config_never_leaves_the_real_heat_pin_permanently_on_the_scratch_slot(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Confirmed live this session: identify_relay_pin always installs
+    # every candidate it tests as CHAMBER_HEAT (regardless of its eventual
+    # real role -- see that function's own docstring), reusing
+    # RELAY_IDENTIFY_SLOT (15). Whichever candidate the sweep last
+    # confirmed as the REAL heat pin was therefore always already sitting
+    # at slot 15 with a matching pin+function by the time finalize ran --
+    # so _slot_for's "reuse a matching existing device's slot" heuristic
+    # picked slot 15 right back up as that pin's permanent home. A
+    # completed wizard run left CHAMBER_HEAT installed on the sweep's own
+    # scratch slot, indefinitely.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(
+        installed=[
+            BrewPiDevice(
+                slot=device_config.RELAY_IDENTIFY_SLOT, function=device_config.DEVICE_FUNCTION_CHAMBER_HEAT,
+                hardware=device_config.DEVICE_HARDWARE_PIN, pin=6, invert=0,
+            ),
+        ],
+    )
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "finalize_device_config", {"config": _FULL_CONFIG})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    heat_install = next(d for d in conn.install_calls if d.function == device_config.DEVICE_FUNCTION_CHAMBER_HEAT)
+    assert heat_install.slot != device_config.RELAY_IDENTIFY_SLOT
+    # And the scratch slot itself was explicitly cleared, not just avoided.
+    assert f"uninstall:{device_config.RELAY_IDENTIFY_SLOT}" in conn.call_order
 
 
 async def test_finalize_device_config_reuses_a_free_slot_for_a_probe_only_ever_seen_available(
