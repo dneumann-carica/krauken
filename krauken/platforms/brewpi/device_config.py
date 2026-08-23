@@ -47,12 +47,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from krauken.contracts.errors import ValidationError
 from krauken.contracts.interfaces import PlatformTestRunner
+
+log = logging.getLogger("krauken.platforms.brewpi.device_config")
 
 # DeviceFunction (the "f" field) -- confirmed via BrewPiLess's wire-compatible
 # EepromStructs.h plus real captured data from the reference rig.
@@ -124,6 +127,24 @@ RELAY_IDENTIFY_SETTLE_S = 2.0
 # philosophy for pins added by a different board/shield, whereas an
 # allowlist of "only ever try 5/6" would not.
 RESERVED_RELAY_PINS = frozenset({2})
+
+# See _run_finalize_device_config's own comment for the full story:
+# sending the final `R` reset only INSTALL_SETTLE_S after the last
+# install isn't reliably enough margin before a hard reset specifically
+# -- unlike a normal follow-up command, which just waits in the serial
+# buffer until the firmware's own main loop is free to read it, R
+# triggers an unconditional AVR watchdog reset that doesn't wait for
+# anything in-flight (e.g. a still-committing EEPROM write) to finish.
+# Confirmed live 2026-08-22 with real, direct evidence: two different
+# devices' EEPROM-persisted fields (a OneWire probe's address, and a
+# relay's invert) both came back different from what was just written
+# and correctly echoed, immediately after a reset that followed a tight
+# run of installs. A retried verification read-back before ever sending
+# R gives real settle time AND catches a miss instead of trusting it
+# blindly -- a short, bounded retry, not a real anti-short-cycle wait,
+# same shape as BASELINE_READ_RETRIES elsewhere in this module.
+FINALIZE_VERIFY_RETRIES = 5
+FINALIZE_VERIFY_RETRY_S = 0.5
 
 
 @dataclass
@@ -661,12 +682,33 @@ async def _run_finalize_device_config(ctx: Any, job: Any, device_id: str, params
 
         def _slot_for(pin: int | None, address: str | None, function: int) -> int:
             for d in installed:
+                # `installed` here is really list_all_devices()'s full
+                # installed+available union (see its own docstring) --
+                # every AVAILABLE (not-yet-installed) entry always
+                # reports slot -1, confirmed live 2026-08-22 that
+                # matching one of those by address (the ordinary case
+                # for a probe finalize is about to install for the
+                # first time) sent "i":-1 to the Arduino for the beer
+                # probe -- silently rejected, no echo, never actually
+                # installed (see DeviceManager.cpp's first-check
+                # behavior, documented at the top of this module). Only
+                # a genuinely installed device's slot is ever safe to
+                # reuse.
+                if d.slot < 0:
+                    continue
                 if function in (DEVICE_FUNCTION_CHAMBER_TEMP, DEVICE_FUNCTION_BEER_TEMP):
                     if d.address == address:
                         return d.slot
                 elif d.pin == pin and d.function == function:
                     return d.slot
             return _pick_free_slot(installed)
+
+        def _matches_intended(actual: BrewPiDevice | None, intended: BrewPiDevice) -> bool:
+            if actual is None or actual.function != intended.function:
+                return False
+            if intended.hardware == DEVICE_HARDWARE_PIN:
+                return actual.pin == intended.pin and int(actual.invert or 0) == int(intended.invert or 0)
+            return actual.address == intended.address
 
         pushed: list[BrewPiDevice] = []
 
@@ -713,6 +755,27 @@ async def _run_finalize_device_config(ctx: Any, job: Any, device_id: str, params
             await conn.install_device(dev)
             pushed.append(dev)
             installed.append(dev)
+
+        # Confirmed live 2026-08-22: sending R too soon after the last
+        # install risks the reset firing before its EEPROM write has
+        # actually committed, reconstructing stale/wrong data at boot --
+        # see FINALIZE_VERIFY_RETRIES's own comment for the real
+        # evidence. Verify every pushed device before ever resetting;
+        # best-effort past the retry budget (logged, not fatal) -- the
+        # reset must still always happen either way, matching this
+        # function's own "always reset" guarantee.
+        for _ in range(FINALIZE_VERIFY_RETRIES):
+            current = await conn.list_installed_devices(with_values=False)
+            by_slot = {d.slot: d for d in current}
+            if all(_matches_intended(by_slot.get(d.slot), d) for d in pushed):
+                break
+            await ctx.clock.sleep(FINALIZE_VERIFY_RETRY_S)
+        else:
+            log.warning(
+                "finalize_device_config: pushed devices did not verify correctly after %d retries -- "
+                "resetting anyway, but the final device table below is worth double-checking",
+                FINALIZE_VERIFY_RETRIES,
+            )
 
         await conn.reset_and_reconnect()
         reset_done = True

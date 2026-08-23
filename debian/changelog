@@ -1,3 +1,34 @@
+krauken (0.1.16) stable; urgency=high
+
+  * Fix (safety): finalize_device_config could leave the heater genuinely
+    on after completing successfully. Confirmed live on the real rig via
+    strace: the correct off-polarity heat install was sent and echoed
+    back correctly by the firmware, but the immediately-following `R`
+    reset landed only ~0.3s later (the standard per-install settle) --
+    not reliably enough margin before a hard reset specifically, which
+    (unlike a normal follow-up command) doesn't wait for an in-flight
+    EEPROM write to actually commit. Real, direct evidence: two separate
+    devices in the same finalize batch (a probe's OneWire address, and
+    the heat relay's invert) both came back different from what was just
+    written and correctly echoed, immediately after the reset. New
+    FINALIZE_VERIFY_RETRIES: before ever sending R, finalize now reads
+    back and verifies every pushed device actually matches what was
+    intended, retrying a few times first -- both closing the race (a
+    real round trip is genuine settle time) and catching a miss instead
+    of trusting it blindly. Best-effort past the retry budget (logged,
+    not fatal) -- the reset always still happens either way.
+  * Fix: _slot_for() (used by finalize_device_config to decide whether to
+    reuse an existing slot or pick a fresh one) matched entries in the
+    AVAILABLE list by address, not just genuinely installed ones --
+    every available entry always reports slot -1 (list_all_devices() is
+    installed+available combined), so a probe being installed for the
+    first time (the ordinary case) got sent to the Arduino as "i":-1.
+    Confirmed live: DeviceManager.cpp silently rejects that (no response
+    at all), so the beer probe never actually got installed. Only a
+    genuinely installed device's slot is ever reused now.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 22 Aug 2026 21:38:05 -0400
+
 krauken (0.1.15) stable; urgency=medium
 
   * Pin 2 is now permanently excluded from the relay-identification

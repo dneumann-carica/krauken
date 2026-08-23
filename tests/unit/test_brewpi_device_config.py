@@ -37,11 +37,16 @@ class _FakeBrewPiConnection:
     set_target_calls: list[float | None] = field(default_factory=list)
     raise_on_install_call: int | None = None  # 1-indexed -- which install_device() call raises
     fail_first_n_reads: int = 0  # read_temps() returns None for this many calls before behaving normally
+    stale_reads_before_correct: int = 0  # list_installed_devices() returns [] for this many calls first -- simulates a reset-verification miss (a just-pushed device not showing up correctly yet)
     call_order: list[str] = field(default_factory=list)  # e.g. "reset", "install:5", "uninstall:5" -- for ordering assertions
     _state_idx: int = 0
     _read_calls: int = 0
+    _list_installed_calls: int = 0
 
     async def list_installed_devices(self, *, with_values: bool = True) -> list[BrewPiDevice]:
+        self._list_installed_calls += 1
+        if self._list_installed_calls <= self.stale_reads_before_correct:
+            return []
         return list(self.installed)
 
     async def list_available_devices(self, *, with_values: bool = True) -> list[BrewPiDevice]:
@@ -534,6 +539,75 @@ async def test_finalize_device_config_still_resets_exactly_once_when_an_install_
     assert job.state == "failed"
     # The safety-net reset fired exactly once -- not zero, not twice.
     assert conn.reset_calls == 1
+
+
+async def test_finalize_device_config_reuses_a_free_slot_for_a_probe_only_ever_seen_available(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Confirmed live 2026-08-22: _slot_for() matched an AVAILABLE (not
+    # yet installed) entry by address -- which always reports slot -1,
+    # since list_all_devices() is installed+available combined -- and
+    # sent "i":-1 to the Arduino for the beer probe. Silently rejected,
+    # no echo, never actually installed. The ordinary case for every
+    # probe finalize ever installs is exactly this: it was only ever
+    # seen in the available list before now.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(
+        available=[
+            BrewPiDevice(slot=-1, function=device_config.DEVICE_FUNCTION_NONE, hardware=2, pin=18, address="BEER-ADDR"),
+        ],
+    )
+    ctx = _FakeCtx(conn)
+    config = {**_FULL_CONFIG, "beer_probe": {"address": "BEER-ADDR", "pin": 18}}
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "finalize_device_config", {"config": config})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    beer_install = next(d for d in conn.install_calls if d.function == device_config.DEVICE_FUNCTION_BEER_TEMP)
+    assert beer_install.slot >= 0
+
+
+async def test_finalize_device_config_retries_verification_before_resetting(monkeypatch: pytest.MonkeyPatch):
+    # Confirmed live 2026-08-22: sending R too soon after the last
+    # install risked resetting before an EEPROM write had actually
+    # committed. A transient miss on the first couple of verification
+    # reads (simulated here) must not fail the job -- just delay the
+    # reset until the pushed devices actually verify.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(stale_reads_before_correct=2)
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "finalize_device_config", {"config": _FULL_CONFIG})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    assert conn.reset_calls == 1
+    assert conn._list_installed_calls >= 3  # 2 misses + the one that finally verified
+
+
+async def test_finalize_device_config_still_resets_when_verification_never_succeeds(monkeypatch: pytest.MonkeyPatch):
+    # Best-effort past the retry budget: this function's own guarantee is
+    # "always reset exactly once" regardless -- a persistent verification
+    # mismatch is logged, not fatal, and must never skip or hang the
+    # reset it exists specifically to always perform.
+    _patch_no_active_fermentation(monkeypatch)
+    conn = _FakeBrewPiConnection(stale_reads_before_correct=999)
+    ctx = _FakeCtx(conn)
+
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "finalize_device_config", {"config": _FULL_CONFIG})
+    job = ctx.jobs[result["test_id"]]
+    await job._task
+
+    assert job.state == "completed"
+    assert conn.reset_calls == 1
+    # The full retry budget, plus the one extra list_installed_devices()
+    # call this function always makes after resetting to report the final
+    # device table in job.result -- exhausting the budget must not skip
+    # that either.
+    assert conn._list_installed_calls == device_config.FINALIZE_VERIFY_RETRIES + 1
 
 
 async def test_finalize_device_config_resets_exactly_once_when_cancelled(monkeypatch: pytest.MonkeyPatch):
