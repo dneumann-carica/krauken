@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Button, Dialog } from "../../design/primitives";
 import { useCancelTest, useSaveMapping, useStartTest, useTestStatus } from "../../api/queries";
 import type { DeviceResponse, MappingSaveResponse } from "../../api/types";
-import { CHAMBER_BUNDLE, Role } from "../../hardware/resolve";
+import { Role } from "../../hardware/resolve";
 import styles from "./HardwareWizard.module.css";
 
 type Stage =
@@ -633,6 +633,22 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       : merged.chamber_heating === device.device_id
         ? null
         : merged.chamber_heating;
+    // devicePicks.beerProbe is only ever undefined for the legacy
+    // outlet-firing flow, which never determines a beer probe at all --
+    // leave currentDraft's existing beer_temp alone in that case. The
+    // BrewPi flow always settles this one way or the other (a real probe,
+    // or an explicit "No beer probe" -> null) by the time this runs, so
+    // this was previously the one role summary showed but Finish setup
+    // never actually saved -- confirmed live this session: the wizard
+    // correctly picked up a beer probe, but the saved mapping never
+    // reflected it.
+    if (devicePicks.beerProbe !== undefined) {
+      merged.beer_temp = devicePicks.beerProbe
+        ? device.device_id
+        : merged.beer_temp === device.device_id
+          ? null
+          : merged.beer_temp;
+    }
     onFinish(await saveMapping.mutateAsync(merged));
   }
 
@@ -1186,45 +1202,65 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   } else if (stage === "summary") {
     subtitle = `${device.name} will take these roles.`;
     // "chamber temp" -> "chamber temperature" -- every other row on this
-    // page spells its terms out in full (outlet controller, chamber
-    // probe, beer probe); the raw Role enum's "_temp" shouldn't be the
-    // one place that still abbreviates.
+    // page spells its terms out in full (outlet controller, probe
+    // address); the raw Role enum's "_temp" shouldn't be the one place
+    // that still abbreviates.
     const roleLabel = (role: Role) => role.replace(/_/g, " ").replace(/\btemp\b/, "temperature");
+
+    // Exactly four rows, always -- one per role, each showing the actual
+    // hardware behind it (a probe's address, or an outlet controller's
+    // pin+polarity) instead of a separate, redundant detail row per
+    // device underneath a generic "BrewPi Controller" placeholder. Order
+    // matches how the wizard itself collects these: cooling and heating
+    // (the pin sweep), then chamber and beer temperature (the probe ID
+    // step) -- not CHAMBER_BUNDLE's own iteration order, which is
+    // unrelated to this page's presentation.
+    const SUMMARY_ROLE_ORDER = [Role.CHAMBER_COOLING, Role.CHAMBER_HEATING, Role.CHAMBER_TEMP, Role.BEER_TEMP];
+
+    function probeValue(probe: ProbeIdentity): ReactNode {
+      return (
+        <span className={styles.summaryValueStack}>
+          <span>Probe</span>
+          <span className={styles.summaryValueMono}>0x{probe.address}</span>
+        </span>
+      );
+    }
+
+    function outletValue(relay: RelayIdentity): ReactNode {
+      return <span>outlet controller {outletLabel(relay.pin, relay.invert)}</span>;
+    }
+
+    function roleValue(role: Role): ReactNode {
+      switch (role) {
+        case Role.CHAMBER_TEMP:
+          return devicePicks.chamberProbe ? probeValue(devicePicks.chamberProbe) : device.name;
+        case Role.BEER_TEMP:
+          return devicePicks.beerProbe
+            ? probeValue(devicePicks.beerProbe)
+            : devicePicks.beerProbe === null
+              ? "left unmapped -- no beer probe confirmed"
+              : device.name;
+        case Role.CHAMBER_COOLING:
+          return devicePicks.cool ? outletValue(devicePicks.cool) : device.name;
+        case Role.CHAMBER_HEATING:
+          return devicePicks.heat
+            ? outletValue(devicePicks.heat)
+            : heatingConfirmed
+              ? device.name
+              : "left unmapped -- no heater confirmed";
+        default:
+          return device.name;
+      }
+    }
+
     body = (
       <div className={styles.summaryList}>
-        {[...CHAMBER_BUNDLE].map((role) => {
-          const included = role !== Role.CHAMBER_HEATING || heatingConfirmed;
-          return (
-            <div key={role} className={styles.summaryRow}>
-              <span>{roleLabel(role)}</span>
-              <span>{included ? device.name : "left unmapped -- no heater confirmed"}</span>
-            </div>
-          );
-        })}
-        {devicePicks.chamberProbe && (
-          <div className={styles.summaryRow}>
-            <span>chamber probe</span>
-            <span className={styles.summaryValueMono}>0x{devicePicks.chamberProbe.address}</span>
+        {SUMMARY_ROLE_ORDER.map((role) => (
+          <div key={role} className={styles.summaryRow}>
+            <span>{roleLabel(role)}</span>
+            {roleValue(role)}
           </div>
-        )}
-        {devicePicks.beerProbe && (
-          <div className={styles.summaryRow}>
-            <span>beer probe</span>
-            <span className={styles.summaryValueMono}>0x{devicePicks.beerProbe.address}</span>
-          </div>
-        )}
-        {devicePicks.cool && (
-          <div className={styles.summaryRow}>
-            <span>cooling outlet</span>
-            <span>outlet controller {outletLabel(devicePicks.cool.pin, devicePicks.cool.invert)}</span>
-          </div>
-        )}
-        {devicePicks.heat && (
-          <div className={styles.summaryRow}>
-            <span>heating outlet</span>
-            <span>outlet controller {outletLabel(devicePicks.heat.pin, devicePicks.heat.invert)}</span>
-          </div>
-        )}
+        ))}
       </div>
     );
     showNext = true;

@@ -1,3 +1,33 @@
+krauken (0.1.19) stable; urgency=medium
+
+  * Fix (data loss): the BrewPi setup wizard's Finish setup step
+    (HardwareWizard.tsx's handleFinish) never actually saved the beer_temp
+    role at all -- it set chamber_temp/chamber_cooling/chamber_heating in
+    the mapping it persists, but had no line for beer_temp whatsoever.
+    The wizard correctly tracked and displayed the chosen beer probe
+    throughout (including on its own summary screen), but that pick was
+    silently dropped on save -- confirmed live this session: committed a
+    configuration with a beer probe assigned, then found the hardware
+    page reporting beer_temp as unassigned. Now mirrors the existing
+    chamber_heating pattern: assigns beer_temp to this device if a probe
+    was picked, clears it (only if this device currently holds the role,
+    never clobbering a different device's assignment) if "No beer probe"
+    was explicitly chosen, and leaves it alone entirely for the legacy
+    non-BrewPi outlet-firing flow, which never determines it in the first
+    place.
+  * Redesigned the setup wizard's final summary screen: exactly four rows
+    (chamber cooling, chamber heating, chamber temperature, beer
+    temperature -- BrewPi's only four possible roles; beer_gravity is
+    Tilt-only and never applies here), each showing the actual detected
+    hardware -- a probe's address (small, muted, monospace, under a plain
+    "Probe" label) or an outlet controller's pin+polarity -- instead of a
+    generic "BrewPi Controller" placeholder on three rows plus separate,
+    redundant detail rows underneath for the real values. A role left
+    unmapped (no heater confirmed, no beer probe confirmed) still says so
+    directly in its own row.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 23 Aug 2026 14:39:34 -0400
+
 krauken (0.1.18) stable; urgency=medium
 
   * Fix: `krauken-db seed-demo` (and therefore the "Sample batch - Citra Pale
