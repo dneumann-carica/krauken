@@ -57,6 +57,7 @@ import contextlib
 import glob
 import json
 import logging
+import logging.handlers
 import re
 import time
 from dataclasses import dataclass
@@ -68,6 +69,53 @@ from krauken.platforms.base import requires_optional
 from krauken.platforms.brewpi.device_config import BrewPiDevice
 
 log = logging.getLogger("krauken.platforms.brewpi")
+
+# Raw serial read/write trace -- see plans/i-do-want-the-mellow-sloth.md.
+# The control loop has been observed stalling for real minutes at a time on
+# the actual rig, with only a single confirmed-malformed response to go on;
+# rather than guess further at the mechanism, every byte in or out gets
+# logged here so the next occurrence can be read directly. Separate logger
+# (not `log` above) so this never mixes into or floods the normal daemon
+# log -- it has its own dedicated, rotating file instead.
+_SERIAL_TRACE_LOG_PATH = "/var/lib/krauken/brewpi-serial.log"
+_serial_trace_log = logging.getLogger("krauken.platforms.brewpi.serial_trace")
+_serial_trace_configured = False
+
+
+class _UTCFormatter(logging.Formatter):
+    """Timestamps in UTC, matching timefmt.iso()'s convention elsewhere in
+    this app -- logging.Formatter defaults to local time, which would make
+    cross-referencing this trace against samples/events timestamps a
+    real source of confusion, not just an inconsistency."""
+
+    converter = time.gmtime  # type: ignore[assignment]
+
+
+def _ensure_serial_trace_configured() -> None:
+    """Lazy, best-effort, tried exactly once -- not at import time, since
+    this module is imported by the test suite on machines that have no
+    /var/lib/krauken at all. A failure here (missing directory, no
+    permission) must never crash real serial I/O over a diagnostic
+    concern; it just means the trace falls through to whatever the
+    default logging config already does with it (journald), same as
+    before this existed, rather than silently going nowhere."""
+    global _serial_trace_configured
+    if _serial_trace_configured:
+        return
+    _serial_trace_configured = True
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            _SERIAL_TRACE_LOG_PATH, maxBytes=10_000_000, backupCount=5,
+        )
+        handler.setFormatter(_UTCFormatter("%(asctime)s.%(msecs)03d %(message)s", datefmt="%Y-%m-%dT%H:%M:%S"))
+        _serial_trace_log.addHandler(handler)
+        # Only suppress the default (journald) path once the dedicated
+        # file is confirmed working -- if the handler above raised, this
+        # line is never reached, so the trace still goes somewhere.
+        _serial_trace_log.propagate = False
+    except OSError:
+        pass
+    _serial_trace_log.setLevel(logging.INFO)
 
 BAUD_RATE = 57600
 # Confirmed live 2026-08-18 (extensively, repeatedly, not a one-off): the
@@ -270,7 +318,7 @@ class BrewPiConnection:
             if self._serial is None:
                 return
             try:
-                await asyncio.to_thread(self._serial.write, f"{body}\n".encode("ascii"))
+                await self._write_traced(f"{body}\n".encode("ascii"))
             except Exception:  # noqa: BLE001 -- best-effort; next read_temps() surfaces UNREACHABLE
                 log.warning("failed to write set_fridge_target(%r) to BrewPi", temp_f)
 
@@ -327,7 +375,7 @@ class BrewPiConnection:
             if self._serial is None:
                 return
             try:
-                await asyncio.to_thread(self._serial.write, f"{body}\n".encode("ascii"))
+                await self._write_traced(f"{body}\n".encode("ascii"))
             except Exception:  # noqa: BLE001 -- best-effort; caller's re-query surfaces the real outcome
                 log.warning("failed to write install_device(%r) to BrewPi", device)
                 return
@@ -358,7 +406,7 @@ class BrewPiConnection:
         async with self._lock:
             if self._serial is not None:
                 try:
-                    await asyncio.to_thread(self._serial.write, b"R\n")
+                    await self._write_traced(b"R\n")
                 except Exception:  # noqa: BLE001 -- best-effort; identify_and_connect() below re-verifies
                     log.warning("failed to write reset command to BrewPi")
         await self.clock.sleep(BOOT_DELAY_S)
@@ -409,6 +457,30 @@ class BrewPiConnection:
         self._serial = None
         self.port = None
 
+    async def _write_traced(self, data: bytes) -> None:
+        """Every raw serial write goes through here, so the trace log has
+        no gaps regardless of which higher-level method triggered it.
+        Raises exactly like a bare self._serial.write() would -- callers
+        keep their own existing try/except; this only adds the trace line
+        before attempting the real write."""
+        _ensure_serial_trace_configured()
+        _serial_trace_log.info("WRITE %r", data)
+        await asyncio.to_thread(self._serial.write, data)
+
+    async def _readline_traced(self) -> bytes:
+        """Every raw serial read goes through here. Logs even an empty/
+        timed-out read (pyserial's readline() returns b"" rather than
+        blocking forever, given the timeout=1.0 the port was opened
+        with) -- during a real stall, a run of empty reads IS the
+        signal: it distinguishes "nothing arrived for minutes" from
+        "we never even got a turn to try" (lock contention) from
+        "garbage kept arriving" (a parsing/framing problem), which a
+        trace that only logs successful reads couldn't tell apart."""
+        _ensure_serial_trace_configured()
+        line = await asyncio.to_thread(self._serial.readline)
+        _serial_trace_log.info("READ %r", line if line else b"<timeout, no data>")
+        return line
+
     async def _query_locked(self, command: str, expect_prefix: str) -> Any | None:
         """Caller must hold self._lock. Sends the command exactly ONCE,
         then reads until a line starting with `expect_prefix + ':'`
@@ -425,13 +497,13 @@ class BrewPiConnection:
         if self._serial is None:
             return None
         try:
-            await asyncio.to_thread(self._serial.write, f"{command}\n".encode("ascii"))
+            await self._write_traced(f"{command}\n".encode("ascii"))
         except Exception:  # noqa: BLE001 -- a write failure means the port is gone
             return None
         deadline = time.monotonic() + QUERY_TIMEOUT_S
         while time.monotonic() < deadline:
             try:
-                line = await asyncio.to_thread(self._serial.readline)
+                line = await self._readline_traced()
             except Exception:  # noqa: BLE001
                 return None
             if not line:
@@ -455,7 +527,7 @@ class BrewPiConnection:
         if self._serial is None:
             return None
         try:
-            await asyncio.to_thread(self._serial.write, f"{command}\n".encode("ascii"))
+            await self._write_traced(f"{command}\n".encode("ascii"))
         except Exception:  # noqa: BLE001 -- a write failure means the port is gone
             return None
         deadline = time.monotonic() + QUERY_TIMEOUT_S
@@ -463,7 +535,7 @@ class BrewPiConnection:
         collecting = False
         while time.monotonic() < deadline:
             try:
-                line = await asyncio.to_thread(self._serial.readline)
+                line = await self._readline_traced()
             except Exception:  # noqa: BLE001
                 return None
             if not line:

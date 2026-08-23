@@ -1,3 +1,24 @@
+krauken (0.1.21) stable; urgency=medium
+
+  * Added a raw serial read/write trace log for the BrewPi connection
+    (krauken/platforms/brewpi/connection.py) -- every byte in or out now
+    goes through one of two wrapper methods that log an ISO-timestamped
+    (millisecond precision, UTC) READ or WRITE line to its own rotating
+    file, /var/lib/krauken/brewpi-serial.log. This is purely diagnostic:
+    the control loop has been observed on a real rig stalling for real
+    minutes at a time (well beyond the ~15s worst case a single bad
+    serial read should cause), and OG auto-detection never locking on a
+    live fermentation was traced to exactly this -- readings arriving too
+    sparsely for its stability window to ever see a gap-free span, not a
+    detection-logic bug. Rather than guess further at the mechanism
+    (one confirmed cause so far: an Arduino log message spliced into a
+    temperature-read response), this makes the next occurrence directly
+    readable instead of inferred. Lazy, best-effort setup (never crashes
+    real serial I/O over a logging concern; harmlessly no-ops on a
+    machine without /var/lib/krauken, e.g. the test suite).
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 23 Aug 2026 19:07:26 -0400
+
 krauken (0.1.20) stable; urgency=medium
 
   * Fix: finalize_device_config could permanently leave the real cooling
