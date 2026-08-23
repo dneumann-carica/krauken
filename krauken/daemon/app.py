@@ -98,6 +98,25 @@ class Daemon:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         await self.server.stop()
+        # Any still-running background job -- a hardware scan
+        # (discovery.py's ScanJob) or a hardware test (tests_runtime.py's
+        # TestJob), the only two job kinds that track their own `_task` --
+        # must be cancelled and awaited BEFORE the db connection closes
+        # below, or it can crash into "Cannot operate on a closed
+        # database" the next time it reaches a write. Confirmed live: a
+        # scan that outlives whatever budget its caller gave up on
+        # (db/seed.py's _scan_and_wait, on real out-of-process IPC) used to
+        # keep running as an orphaned task straight through this shutdown
+        # and hit exactly that. Duck-typed via getattr, not an isinstance
+        # check against ScanJob/TestJob -- this context deliberately holds
+        # no concrete-class knowledge of what a "job" is (see
+        # DaemonContext's own docstring above).
+        for job in list(self.ctx.jobs.values()):
+            task: asyncio.Task | None = getattr(job, "_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await self.ctx.registry.stop_all()
         self.ctx.conn.close()
         log.info("daemon stopped")

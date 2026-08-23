@@ -39,6 +39,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterator
 
+from krauken.daemon.discovery import DEFAULT_SCAN_BUDGET_S
 from krauken.daemon.testing import build_scenario_daemon
 from krauken.db.connection import open_ro, open_rw
 from krauken.ipc.client import AsyncIPCClient
@@ -96,14 +97,34 @@ MAX_SIMULATED_HOURS = 800.0
 CONTROL_TICK_INTERVAL_S = 300.0
 
 
+# The scan itself (discovery.py's DiscoveryService) budgets
+# DEFAULT_SCAN_BUDGET_S for every platform's discover() to return -- this
+# poll loop has to give it at least that long, plus real margin, not a
+# second, tighter ad hoc number derived independently of it. The old
+# hardcoded budget here (50 x 0.02s = 1.0s total) was exactly that kind of
+# drift: confirmed live on real Raspberry Pi hardware, discovering across
+# the Simulator + Manual platforms over real out-of-process IPC (separate
+# service processes, real Unix sockets, ARM CPU) took longer than 1s, so
+# this loop gave up and raised while the scan was still genuinely running
+# -- and _generate()'s finally block then tore the daemon (and this
+# scratch db connection) down out from under that still-running task,
+# producing a second, more confusing "closed database" crash on top of the
+# real one. Polls coarsely (a few times a second) since a 15s+ budget
+# doesn't need 0.02s granularity to still return promptly once the real
+# scan completes.
+SCAN_WAIT_BUDGET_S = DEFAULT_SCAN_BUDGET_S + 5.0
+SCAN_WAIT_POLL_INTERVAL_S = 0.25
+
+
 async def _scan_and_wait(client: AsyncIPCClient) -> None:
     result = await client.call("hardware.scan_start")
     scan_id = result["scan_id"]
-    for _ in range(50):
+    attempts = int(SCAN_WAIT_BUDGET_S / SCAN_WAIT_POLL_INTERVAL_S)
+    for _ in range(attempts):
         status = await client.call("hardware.scan_status", {"scan_id": scan_id})
         if status["state"] == "complete":
             return
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(SCAN_WAIT_POLL_INTERVAL_S)
     raise AssertionError("scan never completed")
 
 

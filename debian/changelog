@@ -1,3 +1,44 @@
+krauken (0.1.18) stable; urgency=medium
+
+  * Fix: `krauken-db seed-demo` (and therefore the "Sample batch - Citra Pale
+    Ale" demo data that a fresh install's postinst is supposed to seed)
+    could silently/confusingly fail on real Raspberry Pi hardware.
+    Root-caused live on a real Pi: db/seed.py's _scan_and_wait polled the
+    daemon's hardware-scan status with a hardcoded budget of
+    range(50) x asyncio.sleep(0.02) -- 1.0 second total -- then raised
+    "scan never completed" if the scan wasn't done by then. Discovering
+    across the Simulator + Manual platforms over real out-of-process IPC
+    (separate service processes, real Unix sockets, ARM CPU) simply takes
+    longer than 1s there, so this budget gave up while the scan was still
+    genuinely running. _generate()'s own `finally` block then tore the
+    daemon down immediately (closing the scratch sqlite connection) while
+    that abandoned scan task -- discovery.py's start_scan() launches it
+    fire-and-forget, via asyncio.create_task() with nothing tracking or
+    cancelling it -- was still in flight. When it finally reached
+    writes.upsert_device() against the now-closed connection, it raised a
+    second, more confusing sqlite3.ProgrammingError on top of the real
+    failure. Traced via `git log -p` to commit 772fe98 (the out-of-process
+    IPC refactor), which introduced the new real-IPC latency but never
+    widened this budget to account for it -- discovery.py already had its
+    own DEFAULT_SCAN_BUDGET_S = 10.0 that seed.py never used, inventing a
+    second, much tighter, ad hoc number instead.
+  * Fixed in two parts:
+    1. _scan_and_wait now polls for DEFAULT_SCAN_BUDGET_S + 5.0s margin
+       (imported from discovery.py, not re-derived), at a coarser 0.25s
+       interval -- plenty for a multi-second real scan without needing
+       0.02s granularity.
+    2. discovery.py's ScanJob now tracks its own background asyncio.Task
+       (the same shape tests_runtime.py's TestJob already used for its
+       hardware test jobs), and daemon/app.py's Daemon.stop() cancels and
+       awaits any outstanding job's task -- generically, via getattr, not
+       an isinstance check against ScanJob/TestJob specifically -- before
+       closing the db connection. This closes the whole class of bug, not
+       just this one timeout: any future caller giving up on a scan early
+       (a still-slower Pi, a busier system) can no longer race an orphaned
+       scan task into a closed-database crash.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 23 Aug 2026 13:54:06 -0400
+
 krauken (0.1.17) stable; urgency=medium
 
   * Fix: the BrewPi setup wizard's probe-identification screen (deviceProbeId)

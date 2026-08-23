@@ -31,6 +31,12 @@ class ScanJob:
     started_ts: float = 0.0
     platform_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     error: str | None = None
+    # Tracks the actual asyncio.Task running _run_scan, the same way
+    # tests_runtime.py's TestJob tracks its own -- so a shutdown in
+    # progress (app.py's Daemon.stop()) can find, cancel, and await this
+    # job before the db connection it writes through gets closed out from
+    # under it. Not otherwise read by scan_status()/callers.
+    _task: asyncio.Task | None = field(default=None, repr=False)
 
 
 def _candidate_to_row(c: DeviceCandidate, as_of: str) -> dict[str, Any]:
@@ -73,7 +79,7 @@ class DiscoveryService:
     def start_scan(self) -> dict[str, Any]:
         job = ScanJob(job_id=uuid.uuid4().hex[:12], started_ts=self.ctx.clock.now())
         self.ctx.jobs[job.job_id] = job
-        asyncio.create_task(self._run_scan(job))
+        job._task = asyncio.create_task(self._run_scan(job))
         return {"scan_id": job.job_id, "state": job.state}
 
     def scan_status(self, scan_id: str) -> dict[str, Any]:
