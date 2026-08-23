@@ -745,11 +745,14 @@ async def test_identify_onewire_probes_completes_immediately_with_zero_sensors(m
     await job._task
 
     assert job.state == "completed"
-    assert job.result["identified_address"] is None
     assert job.result["readable"] == {}
 
 
-async def test_identify_onewire_probes_confirms_a_single_readable_sensor(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_onewire_probes_surfaces_a_single_readable_sensor(monkeypatch: pytest.MonkeyPatch):
+    # No identification logic lives here any more (see the function's own
+    # docstring) -- this just confirms a lone candidate's reading is
+    # surfaced correctly. Which candidate (if any) counts as "selected" is
+    # entirely HardwareWizard.tsx's call.
     _patch_no_active_fermentation(monkeypatch)
     device = BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="AAA", value=60.0)
     conn = _SequencedOneWireConnection(snapshots=[[device]])
@@ -760,11 +763,15 @@ async def test_identify_onewire_probes_confirms_a_single_readable_sensor(monkeyp
     await job._task
 
     assert job.state == "completed"
-    assert job.result["identified_address"] == "AAA"
+    assert job.result["baseline_f"] == {"AAA": 60.0}
+    assert job.result["current_f"] == {"AAA": 60.0}
     assert job.result["readable"] == {"AAA": True}
 
 
-async def test_identify_onewire_probes_identifies_the_one_that_warms_up(monkeypatch: pytest.MonkeyPatch):
+async def test_identify_onewire_probes_keeps_current_f_updated_across_polls(monkeypatch: pytest.MonkeyPatch):
+    # The frontend does its own delta-vs-baseline_f comparison against
+    # whatever current_f reads on each poll -- this just confirms current_f
+    # actually tracks a later reading rather than freezing at the first one.
     _patch_no_active_fermentation(monkeypatch)
     baseline = [
         BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="AAA", value=60.0),
@@ -772,17 +779,18 @@ async def test_identify_onewire_probes_identifies_the_one_that_warms_up(monkeypa
     ]
     warmed = [
         BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="AAA", value=60.0),
-        BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="BBB", value=90.0),  # +29F, well past the 3F delta
+        BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="BBB", value=90.0),
     ]
     conn = _SequencedOneWireConnection(snapshots=[baseline, warmed, warmed])
     ctx = _FakeCtx(conn)
 
-    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_onewire_probes", {"window_s": 10.0})
+    result = tests_runtime.start_test(ctx, DEVICE_ID, "identify_onewire_probes", {"window_s": 2.0})
     job = ctx.jobs[result["test_id"]]
     await job._task
 
     assert job.state == "completed"
-    assert job.result["identified_address"] == "BBB"
+    assert job.result["baseline_f"] == {"AAA": 60.0, "BBB": 61.0}
+    assert job.result["current_f"] == {"AAA": 60.0, "BBB": 90.0}
 
 
 async def test_identify_onewire_probes_tracks_readable_false_when_a_sensor_goes_null_mid_poll(monkeypatch: pytest.MonkeyPatch):
@@ -791,9 +799,8 @@ async def test_identify_onewire_probes_tracks_readable_false_when_a_sensor_goes_
         BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="AAA", value=60.0),
         BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="BBB", value=61.0),
     ]
-    # BBB goes null (the confirmed-real "detected but unreadable" state) --
-    # must never be reported as identified while null, regardless of what
-    # its last real value was.
+    # BBB goes null -- a confirmed-real "detected but unreadable" state on
+    # real hardware this session, not a transient hiccup.
     bbb_null = [
         BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="AAA", value=60.0),
         BrewPiDevice(hardware=device_config.DEVICE_HARDWARE_ONEWIRE_TEMP, address="BBB", value=None),
@@ -806,8 +813,8 @@ async def test_identify_onewire_probes_tracks_readable_false_when_a_sensor_goes_
     await job._task
 
     assert job.state == "completed"
-    assert job.result["identified_address"] is None
     assert job.result["readable"]["BBB"] is False
+    assert job.result["current_f"]["BBB"] is None
 
 
 async def test_identify_onewire_probes_excludes_the_already_identified_chamber_address(monkeypatch: pytest.MonkeyPatch):
@@ -823,7 +830,6 @@ async def test_identify_onewire_probes_excludes_the_already_identified_chamber_a
     await job._task
 
     assert job.state == "completed"
-    assert job.result["identified_address"] is None
     assert job.result["readable"] == {}
 
 

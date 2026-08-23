@@ -24,7 +24,6 @@ type Stage =
   // device installed anywhere).
   | "deviceBootstrap"
   | "deviceProbeId"
-  | "deviceNoProbe"
   // Unified relay pin-identification sweep -- replaces the old two-pass
   // deviceCoolSweep/deviceHeatSweep split. Redesigned 2026-08-18 (see
   // plans/jiggly-bubbling-popcorn.md): forces the chamber OFF rather than
@@ -63,6 +62,14 @@ const DEVICE_HARDWARE_PIN = 1;
 // enforces this; this is purely to avoid a pointless failed-test flash.
 const RESERVED_RELAY_PINS = new Set([2]);
 
+// "Warmed enough to count as selected." identify_onewire_probes
+// (device_config.py) only ever surfaces raw readings -- baseline_f (the
+// first poll) and current_f (the latest one) -- it doesn't do any
+// identification of its own; this is where that threshold actually lives,
+// computed from the same two fields for every candidate uniformly
+// regardless of how many are on screen.
+const PROBE_IDENTIFY_DELTA_F = 3.0;
+
 const STEP_LABELS: Record<Stage, string> = {
   intro: "Step 1 of 3",
   relayA: "Step 2 of 3",
@@ -74,7 +81,6 @@ const STEP_LABELS: Record<Stage, string> = {
   summary: "Summary",
   deviceBootstrap: "Preparing",
   deviceProbeId: "Step 1 of 3",
-  deviceNoProbe: "Step 1 of 3 · no probe",
   devicePinSweep: "Step 2 of 3",
   deviceNoCool: "Step 2 of 3 · no cooling",
   deviceFinalizing: "Finishing up",
@@ -108,7 +114,6 @@ interface BrewPiDevicesResult {
 }
 
 interface IdentifyOnewireResult {
-  identified_address: string | null;
   baseline_f: Record<string, number | null>;
   current_f: Record<string, number | null>;
   readable: Record<string, boolean>;
@@ -187,6 +192,15 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   // until the very last wizard step, which runs after the relay sweep --
   // so every sweep attempt failed regardless of what was actually wired.
   const [probePhase, setProbePhase] = useState<"chamber" | "installingChamberProbe" | "beer">("chamber");
+  // The user's selection on the current deviceProbeId screen -- undefined
+  // until something is selected (nothing chosen yet), null for the beer
+  // phase's explicit "no beer probe" choice, or a OneWire address. Set
+  // either by the auto-select effect below (warming a probe, or there
+  // being only one possible choice at all) or directly by clicking a
+  // probe card -- either way it's sticky (never un-set by a later poll
+  // whose reading happens to normalize back down) until the next
+  // identify_onewire_probes job resets it via runIdentifyOnewire.
+  const [selectedProbeAddr, setSelectedProbeAddr] = useState<string | null | undefined>(undefined);
   // devicePinSweep's per-candidate state: testedPins have had both
   // polarities tried with nothing identified (excluded from the
   // candidate list going forward, alongside whichever pins devicePicks
@@ -216,6 +230,15 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
 
   function flipInvert(invert: number): number {
     return invert ? 0 : 1;
+  }
+
+  // "5+"/"6-" -- the number+polarity half of a user-facing outlet
+  // controller label. invert: 0 -> "+", invert: 1 -> "-". Shared by
+  // devicePinSweep and summary; every call site is responsible for
+  // pairing this with the literal words "outlet controller" (never shown
+  // bare) -- this only returns the number+polarity part.
+  function outletLabel(pin: number, invert: number): string {
+    return `${pin}${invert ? "-" : "+"}`;
   }
 
   const startTest = useStartTest();
@@ -330,6 +353,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
 
   function runIdentifyOnewire(exclude: string[]) {
     setTestId(undefined);
+    setSelectedProbeAddr(undefined); // a fresh job means a fresh selection
     startTest.mutate(
       { deviceId: device.device_id, action: "identify_onewire_probes", params: { exclude_addresses: exclude } },
       { onSuccess: (r) => setTestId(r.test_id) },
@@ -452,6 +476,35 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     runIdentifyOnewire(exclude);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage, deviceList, probePhase]);
+
+  // Auto-selects a probe card the instant we have enough to justify it,
+  // without waiting for the job to reach "completed" -- see the PROBE_
+  // IDENTIFY_DELTA_F comment for why this is computed here rather than
+  // trusted from the backend's own identified_address. Never overrides an
+  // existing selection (manual or already-auto'd), so once something's
+  // chosen this leaves it alone for the rest of the job.
+  useEffect(() => {
+    if (stage !== "deviceProbeId" || probePhase === "installingChamberProbe") return;
+    if (selectedProbeAddr !== undefined) return;
+    const result = testStatus.data?.result as IdentifyOnewireResult | null | undefined;
+    if (result == null) return;
+    const addresses = Object.keys(result.current_f ?? {});
+    const allowNone = probePhase === "beer";
+    if (addresses.length + (allowNone ? 1 : 0) === 1) {
+      // The only possible choice there is -- chamber's sole candidate
+      // "must be it" (nothing to compare against), beer's total absence
+      // of any candidate means "no beer probe" is the only real answer.
+      setSelectedProbeAddr(addresses.length === 1 ? addresses[0] : null);
+      return;
+    }
+    const warmed = addresses.find((addr) => {
+      const baseline = result.baseline_f?.[addr];
+      const current = result.current_f?.[addr];
+      return baseline != null && current != null && current - baseline >= PROBE_IDENTIFY_DELTA_F;
+    });
+    if (warmed !== undefined) setSelectedProbeAddr(warmed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, probePhase, selectedProbeAddr, testStatus.data]);
 
   // Installs the chamber probe as CHAMBER_TEMP the instant it's confirmed
   // -- not deferred to finalize_device_config (see runInstallProbe's own
@@ -631,15 +684,24 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
   let onNext: () => void = () => {};
 
   if (stage === "intro") {
-    subtitle = canFireOutlets
-      ? "Three steps: switch each outlet on to learn what it controls, then identify the probes."
-      : "This controller manages cooling and heating internally -- we'll identify the probes, then find the cooling (and optional heating) pin.";
-    body = (
-      <p className={styles.body}>
-        Nothing is written until you finish. Cooling and chamber temp are required; heating and beer temp are
-        optional and can be skipped.
-      </p>
-    );
+    if (canFireOutlets) {
+      subtitle = "Three steps: switch each outlet on to learn what it controls, then identify the probes.";
+      body = (
+        <p className={styles.body}>
+          Nothing is written until you finish. Cooling and chamber temp are required; heating and beer temp are
+          optional and can be skipped.
+        </p>
+      );
+    } else {
+      subtitle = "Identify the BrewPi hardware that manages heating and cooling.";
+      body = (
+        <p className={styles.body}>
+          The BrewPi controller manages cooling, and optionally heating. It tracks the chamber temp and optionally
+          the beer temp as well. We'll identify the temperature probes, which outlet controls cooling, and
+          optionally which outlet controls heating.
+        </p>
+      );
+    }
     showNext = true;
     nextLabel = "Start setup";
     onNext = () => goTo(canFireOutlets ? "relayA" : canConfigureDevices ? "deviceBootstrap" : "probes");
@@ -653,119 +715,130 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     const result = testStatus.data?.result as IdentifyOnewireResult | null | undefined;
     const addresses = Object.keys(result?.current_f ?? {});
     const pinFor = (addr: string) => deviceList?.find((d) => d.address === addr)?.pin ?? 0;
+    const allowNone = probePhase === "beer";
+
+    function retryIdentify() {
+      cancelCurrentTest();
+      runIdentifyOnewire(allowNone && devicePicks.chamberProbe ? [devicePicks.chamberProbe.address] : []);
+    }
+
+    function deltaFor(addr: string): number | null {
+      const baseline = result?.baseline_f?.[addr];
+      const current = result?.current_f?.[addr];
+      return baseline != null && current != null ? current - baseline : null;
+    }
 
     if (probePhase === "installingChamberProbe") {
       body = <p className={styles.body}>Installing the chamber probe…</p>;
-    } else if (deviceList === undefined || testId === undefined || testStatus.data === undefined) {
+    } else if (deviceList === undefined || testId === undefined || testStatus.data === undefined || result == null) {
       // testStatus.data can briefly be undefined even once testId is set
       // (TanStack Query resets `data` to undefined the instant the query
       // key -- which includes testId -- changes, before the new job's
-      // first poll response arrives). Without this check, that one-render
-      // gap fell through to the `addresses.length === 0` branch below and
-      // rendered a false "no probe detected" -- reproduced live this
-      // session on every job-to-job transition in this stage, not just
-      // the first one.
+      // first poll response arrives), and separately, a freshly-started
+      // identify_onewire_probes job reports state:"running", result:null
+      // until its serial round trip actually resolves (real I/O latency,
+      // not a bug). Both are the same "nothing to show the user yet" gap
+      // -- reproduced live this session on every job-to-job transition in
+      // this stage, not just the first one -- and neither should fall
+      // through to "zero probes found" below.
       body = <p className={styles.body}>Reading the controller's currently-wired sensors…</p>;
-    } else if (addresses.length === 0) {
-      body = <p className={styles.body}>No {probePhase} probe detected.</p>;
-      if (!testRunning) {
-        showNext = true;
-        nextLabel = "Continue";
-        onNext = () =>
-          probePhase === "chamber"
-            ? goTo("deviceNoProbe")
-            : (setDevicePicks((p) => ({ ...p, beerProbe: null })), goTo("devicePinSweep"));
-      }
-    } else if (addresses.length === 1) {
-      // Nothing to compare against -- same "just confirm it responds"
-      // shape as the existing single-probe identify_probes path.
-      const addr = addresses[0];
-      const reading = result?.current_f?.[addr] ?? null;
-      const readable = result?.readable?.[addr] ?? false;
-      body = (
-        <div className={styles.probeReadout}>
-          <span className={styles.probeReadoutLabel}>{probePhase === "chamber" ? "Chamber probe" : "Beer probe"}</span>
-          <span className={styles.probeReadoutValue}>
-            {readable && reading != null ? `${reading.toFixed(1)}°F` : "not currently reading"}
-          </span>
-        </div>
-      );
-      if (!testRunning) {
-        showNext = true;
-        nextLabel = "Continue";
-        onNext = () => {
-          if (probePhase === "chamber") {
-            setDevicePicks((p) => ({ ...p, chamberProbe: { address: addr, pin: pinFor(addr) } }));
-            setTestId(undefined); // let the install-probe effect start its own fresh test
-            setProbePhase("installingChamberProbe");
-          } else {
-            setDevicePicks((p) => ({ ...p, beerProbe: { address: addr, pin: pinFor(addr) } }));
-            goTo("devicePinSweep");
-          }
-        };
-      }
     } else {
-      body = (
-        <>
-          <p className={styles.body}>
-            {result?.identified_address
-              ? "Confirmed -- the highlighted probe moved."
-              : testRunning
-                ? `Warm the ${probePhase} probe in your hand and watch for a 3°F change…`
-                : "No temperature change detected yet -- warm the probe and try again."}
-          </p>
-          <div className={styles.probeGrid}>
-            {addresses.map((addr) => {
-              const reading = result?.current_f?.[addr] ?? null;
-              const baseline = result?.baseline_f?.[addr] ?? null;
-              const readable = result?.readable?.[addr] ?? false;
-              const delta = reading != null && baseline != null ? reading - baseline : null;
-              const moved = result?.identified_address === addr;
-              return (
-                <div key={addr} className={`${styles.probeRow} ${moved ? styles.probeRowMoved : ""}`}>
-                  <span className={styles.probeReadoutLabel}>{addr}</span>
-                  <span className={styles.probeReadoutValue}>
-                    {readable && reading != null ? `${reading.toFixed(1)}°F` : "not currently reading"}
-                  </span>
-                  {delta != null && <span className={styles.probeDelta}>{delta >= 0 ? "+" : ""}{delta.toFixed(1)}°F</span>}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      );
-      if (result?.identified_address) {
-        showNext = true;
-        nextLabel = "Continue";
-        onNext = () => {
-          const addr = result.identified_address as string;
-          if (probePhase === "chamber") {
-            setDevicePicks((p) => ({ ...p, chamberProbe: { address: addr, pin: pinFor(addr) } }));
-            setTestId(undefined); // let the install-probe effect start its own fresh test
-            setProbePhase("installingChamberProbe");
-          } else {
-            setDevicePicks((p) => ({ ...p, beerProbe: { address: addr, pin: pinFor(addr) } }));
-            goTo("devicePinSweep");
-          }
-        };
-      } else if (!testRunning) {
-        showNext = true;
-        nextLabel = "Try again";
-        onNext = () => runIdentifyOnewire(probePhase === "beer" && devicePicks.chamberProbe ? [devicePicks.chamberProbe.address] : []);
+      const totalOptions = addresses.length + (allowNone ? 1 : 0);
+      if (totalOptions === 0) {
+        body = (
+          <>
+            <p className={styles.body}>No chamber probe detected.</p>
+            <Button variant="ghost" onClick={retryIdentify}>
+              Retry
+            </Button>
+          </>
+        );
+      } else {
+        const instruction =
+          totalOptions === 1
+            ? allowNone
+              ? "No beer probe was detected -- that's fine, it's optional. Retry if you just wired one."
+              : "Found one temperature probe -- this will be the chamber probe."
+            : selectedProbeAddr !== undefined
+              ? `Selected below. Tap Continue, or choose a different ${allowNone ? "option" : "probe"}.`
+              : allowNone
+                ? 'If a beer probe is wired, warm it in your hand and watch for a 3°F change, or tap it directly below. Otherwise, choose "No beer probe."'
+                : "Warm the chamber probe in your hand and watch for a 3°F change, or tap the correct one below.";
+        body = (
+          <>
+            <p className={styles.body}>{instruction}</p>
+            <div className={styles.probeCardList}>
+              {addresses.map((addr, i) => {
+                const reading = result.current_f?.[addr] ?? null;
+                const readable = result.readable?.[addr] ?? false;
+                const delta = deltaFor(addr);
+                const selected = selectedProbeAddr === addr;
+                return (
+                  <button
+                    key={addr}
+                    type="button"
+                    className={`${styles.probeCard} ${selected ? styles.probeCardSelected : ""}`}
+                    onClick={() => setSelectedProbeAddr(addr)}
+                  >
+                    <div className={styles.probeCardMain}>
+                      <span className={styles.probeCardLabel}>Probe {i + 1}</span>
+                      <span className={styles.probeCardAddr}>0x{addr}</span>
+                    </div>
+                    <div className={styles.probeCardReading}>
+                      <span className={styles.probeCardValue}>
+                        {readable && reading != null ? `${reading.toFixed(1)}°F` : "not currently reading"}
+                      </span>
+                      {delta != null && (
+                        <span className={styles.probeCardDelta}>
+                          {delta >= 0 ? "+" : ""}
+                          {delta.toFixed(1)}°F
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+              {allowNone && (
+                <button
+                  type="button"
+                  className={`${styles.probeCard} ${selectedProbeAddr === null ? styles.probeCardSelected : ""}`}
+                  onClick={() => setSelectedProbeAddr(null)}
+                >
+                  <div className={styles.probeCardMain}>
+                    <span className={styles.probeCardLabel}>No beer probe</span>
+                  </div>
+                </button>
+              )}
+            </div>
+            <Button variant="ghost" onClick={retryIdentify}>
+              Retry
+            </Button>
+          </>
+        );
       }
-    }
-    // Skip button for the beer pass only -- a chamber-only rig is valid,
-    // and a detected-but-unwanted second sensor shouldn't force a beer
-    // mapping the user doesn't want.
-    if (probePhase === "beer" && !testRunning) {
-      body = (
-        <>
-          {body}
-          <Button variant="ghost" onClick={() => { setDevicePicks((p) => ({ ...p, beerProbe: null })); goTo("devicePinSweep"); }}>
-            No beer probe
-          </Button>
-        </>
-      );
+      showNext = selectedProbeAddr !== undefined;
+      nextLabel = "Continue";
+      onNext = () => {
+        // The backend job behind this screen no longer auto-completes on
+        // its own (see device_config.py's _run_identify_onewire_probes --
+        // it just keeps polling for up to an hour, since deciding "which
+        // one" is entirely this component's job now). It's very likely
+        // still "running" the instant Continue is clickable, so it has to
+        // be cancelled explicitly here -- otherwise it's still occupying
+        // this device's one-test-at-a-time slot when the next stage tries
+        // to start its own test right after.
+        cancelCurrentTest();
+        setTestId(undefined);
+        if (probePhase === "chamber") {
+          const addr = selectedProbeAddr as string;
+          setDevicePicks((p) => ({ ...p, chamberProbe: { address: addr, pin: pinFor(addr) } }));
+          setProbePhase("installingChamberProbe");
+        } else {
+          const addr = selectedProbeAddr ?? null;
+          setDevicePicks((p) => ({ ...p, beerProbe: addr == null ? null : { address: addr, pin: pinFor(addr) } }));
+          goTo("devicePinSweep");
+        }
+      };
     }
   } else if (stage === "deviceBootstrap") {
     subtitle = "Preparing device configuration.";
@@ -782,31 +855,18 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     } else {
       body = <p className={styles.body}>Checking the controller's current configuration…</p>;
     }
-  } else if (stage === "deviceNoProbe") {
-    subtitle = "No OneWire temperature sensor was detected at all.";
-    body = (
-      <p className={styles.body}>
-        A chamber probe is required -- check that a OneWire sensor is actually wired to this controller, then try
-        again.
-      </p>
-    );
-    showNext = true;
-    nextLabel = "Try again";
-    onNext = () => { setDeviceList(undefined); setProbePhase("chamber"); goTo("deviceProbeId"); };
   } else if (stage === "devicePinSweep") {
     const candidates = buildRelayCandidates();
     const candidate = candidates[0];
     const result = testStatus.data?.result as IdentifyRelayPinResult | null | undefined;
     const coolKnown = devicePicks.cool !== undefined;
 
-    subtitle = coolKnown
-      ? "Optional -- a heater makes cold-garage ferments possible, but a cooling-only rig is valid."
-      : "Finding which pin drives cooling (checking for a heater along the way).";
+    subtitle = "Identifying the role of each outlet";
 
     if (correcting !== null) {
       // Silent housekeeping, not a real test -- no yes/no prompt, the
       // wizard already knows the answer. See `correcting`'s declaration.
-      body = <p className={styles.body}>Confirming pin {correcting.pin} is left in a safe state…</p>;
+      body = <p className={styles.body}>Resetting outlet controller {outletLabel(correcting.pin, correcting.invert)}…</p>;
     } else if (coolKnown && devicePicks.heat === undefined && !heatDeclined && !heatSweepConfirmed) {
       // One-time interstitial, asked once cooling is known and there are
       // still untested candidates -- heat is optional, so continuing to
@@ -815,17 +875,15 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       // free of the human's attention).
       body = (
         <>
-          <p className={styles.body}>
-            Cooling confirmed on pin {devicePicks.cool?.pin}. Want to also look for a heater?
-          </p>
+          <p className={styles.body}>Cooling outlet has been found. Want to also look for a heater?</p>
           <div className={styles.choiceGrid}>
-            {choice("Test for a heater", "Sweep the remaining pins for one that reacts.", () => setHeatSweepConfirmed(true))}
-            {choice("No heater", "Cooling-only rig -- heating stays unfilled.", () => setHeatDeclined(true))}
+            {choice("Test for a heater", "Continue identifying additional outlet controllers.", () => setHeatSweepConfirmed(true))}
+            {choice("No heater", "This is a cooling-only rig.", () => setHeatDeclined(true))}
           </div>
         </>
       );
     } else if (deviceList === undefined) {
-      body = <p className={styles.body}>Reading the controller's currently-wired pins…</p>;
+      body = <p className={styles.body}>Reading the controller's current configuration…</p>;
     } else if (candidate === undefined) {
       // Exhausted -- the exit-condition effect handles the real
       // transition (to deviceFinalizing or deviceNoCool); this is just
@@ -840,7 +898,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
           <p className={styles.body}>Something went wrong: {testStatus.data.error ?? "unknown error"}.</p>
           <div className={styles.choiceGrid}>
             {choice("Retry", "Try this test again.", () => setTestId(undefined))}
-            {choice("Cancel setup", "Nothing further is written.", handleCancel)}
+            {choice("Cancel setup", "Nothing further is identified.", handleCancel)}
           </div>
         </>
       );
@@ -849,37 +907,37 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
       // seconds, not a real anti-short-cycle wait) -- there's no
       // "waiting"/"engaged" state to distinguish any more, just "still
       // running" vs. "done, go ask the human."
-      body = <p className={styles.body}>Testing pin {candidate.pin}…</p>;
+      const testingInvert = polarityPhase === "reversed" ? flipInvert(candidate.invert ?? 0) : (candidate.invert ?? 0);
+      body = <p className={styles.body}>Testing outlet controller {outletLabel(candidate.pin as number, testingInvert)}…</p>;
     } else {
       body = (
         <>
           <p className={styles.body}>
-            Pin {candidate.pin} was just forced off. Did anything turn on anyway?
+            Outlet controller {outletLabel(candidate.pin as number, result.invert)} was just activated. Did anything turn on?
           </p>
           <div className={styles.choiceGrid}>
-            {choice("The heater came on", "This pin is confirmed as heating.", () => {
+            {choice("The heater came on", "This outlet controls heating.", () => {
               const safeInvert = flipInvert(result.invert);
               setDevicePicks((p) => ({ ...p, heat: { pin: candidate.pin as number, invert: safeInvert } }));
               setPolarityPhase("normal");
               setCorrecting({ pin: candidate.pin as number, invert: safeInvert });
             })}
-            {choice("The fridge came on", "This pin is confirmed as cooling.", () => {
+            {choice("The fridge came on", "This outlet controls cooling.", () => {
               const safeInvert = flipInvert(result.invert);
               setDevicePicks((p) => ({ ...p, cool: { pin: candidate.pin as number, invert: safeInvert } }));
               setPolarityPhase("normal");
               setCorrecting({ pin: candidate.pin as number, invert: safeInvert });
             })}
-            {choice("Nothing happened", "Check the next test.", () => advancePolarityOrCandidate(candidate))}
+            {choice("Nothing happened", "Check the next outlet controller.", () => advancePolarityOrCandidate(candidate))}
           </div>
         </>
       );
     }
   } else if (stage === "deviceNoCool") {
-    subtitle = "Cooling is required -- no pin engaged cooling across every candidate.";
+    subtitle = "Cooling is required, but no outlet controller for cooling was found.";
     body = (
       <p className={styles.body}>
-        Check that the fridge/compressor relay is actually wired to one of this controller's actuator terminals,
-        then try again.
+        Check that the fridge is plugged in and the BrewPi is correctly wired to the corresponding relay.
       </p>
     );
     showNext = true;
@@ -908,7 +966,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     } else if (testRunning || testId === undefined) {
       body = <p className={styles.body}>Writing the configuration and resetting the controller…</p>;
     } else if (testStatus.data?.state === "completed") {
-      body = <p className={styles.body}>Configuration pushed -- {result?.installed?.length ?? 0} devices installed.</p>;
+      body = <p className={styles.body}>Configuration pushed -- {result?.installed?.length ?? 0} roles assigned.</p>;
       showNext = true;
       nextLabel = "Continue";
       onNext = () => goTo("summary");
@@ -926,7 +984,7 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
                 heat: devicePicks.heat,
               });
             })}
-            {choice("Cancel setup", "Nothing further is written.", handleCancel)}
+            {choice("Cancel setup", "Configuration is restored to prior setup.", handleCancel)}
           </div>
         </>
       );
@@ -1127,13 +1185,18 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
     }
   } else if (stage === "summary") {
     subtitle = `${device.name} will take these roles.`;
+    // "chamber temp" -> "chamber temperature" -- every other row on this
+    // page spells its terms out in full (outlet controller, chamber
+    // probe, beer probe); the raw Role enum's "_temp" shouldn't be the
+    // one place that still abbreviates.
+    const roleLabel = (role: Role) => role.replace(/_/g, " ").replace(/\btemp\b/, "temperature");
     body = (
       <div className={styles.summaryList}>
         {[...CHAMBER_BUNDLE].map((role) => {
           const included = role !== Role.CHAMBER_HEATING || heatingConfirmed;
           return (
             <div key={role} className={styles.summaryRow}>
-              <span>{role.replace(/_/g, " ")}</span>
+              <span>{roleLabel(role)}</span>
               <span>{included ? device.name : "left unmapped -- no heater confirmed"}</span>
             </div>
           );
@@ -1141,25 +1204,25 @@ export function HardwareWizard({ device, currentDraft, open, onCancel, onFinish 
         {devicePicks.chamberProbe && (
           <div className={styles.summaryRow}>
             <span>chamber probe</span>
-            <span>{devicePicks.chamberProbe.address}</span>
+            <span className={styles.summaryValueMono}>0x{devicePicks.chamberProbe.address}</span>
           </div>
         )}
         {devicePicks.beerProbe && (
           <div className={styles.summaryRow}>
             <span>beer probe</span>
-            <span>{devicePicks.beerProbe.address}</span>
+            <span className={styles.summaryValueMono}>0x{devicePicks.beerProbe.address}</span>
           </div>
         )}
         {devicePicks.cool && (
           <div className={styles.summaryRow}>
-            <span>cooling pin</span>
-            <span>pin {devicePicks.cool.pin}{devicePicks.cool.invert ? " (inverted)" : ""}</span>
+            <span>cooling outlet</span>
+            <span>outlet controller {outletLabel(devicePicks.cool.pin, devicePicks.cool.invert)}</span>
           </div>
         )}
         {devicePicks.heat && (
           <div className={styles.summaryRow}>
-            <span>heating pin</span>
-            <span>pin {devicePicks.heat.pin}{devicePicks.heat.invert ? " (inverted)" : ""}</span>
+            <span>heating outlet</span>
+            <span>outlet controller {outletLabel(devicePicks.heat.pin, devicePicks.heat.invert)}</span>
           </div>
         )}
       </div>

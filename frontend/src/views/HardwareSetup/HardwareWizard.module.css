@@ -1,7 +1,15 @@
 .dialogInner {
   display: flex;
   flex-direction: column;
-  max-height: 88vh;
+  /* Fixed box for every stage -- previously this only had a max-height,
+     so <dialog> (which has no explicit size of its own, just max-width/
+     max-height in Dialog.module.css) shrink-wrapped to each stage's
+     actual content, and the whole dialog visibly resized on every step
+     (including automatic ones, like deviceBootstrap -> deviceProbeId).
+     Width/height caps mirror Dialog.module.css's own max-width/
+     max-height formulas so this still fits small viewports. */
+  width: min(640px, calc(100vw - var(--kr-space-8)));
+  height: min(600px, calc(100vh - var(--kr-space-10)));
 }
 
 .header {
@@ -34,6 +42,14 @@
 }
 
 .content {
+  /* Takes up whatever's left of dialogInner's now-fixed height (instead
+     of sizing to its own content), so header/footer stay pinned to the
+     top/bottom of a constant-size box and this scrolls internally for
+     any stage tall enough to exceed it. min-height: 0 overrides flexbox's
+     default of never shrinking a flex item below its content's intrinsic
+     height, which would otherwise defeat overflow-y here. */
+  flex: 1 1 auto;
+  min-height: 0;
   padding: var(--kr-space-5);
   display: flex;
   flex-direction: column;
@@ -163,6 +179,69 @@
   margin-left: auto;
 }
 
+/* deviceProbeId's selectable probe cards -- a toggleable option (radio-
+   button semantics via a plain <button>, not a one-shot action like
+   .choiceButton), highlighted via .probeCardSelected the same way
+   .probeRowMoved highlights the auto-identified row above. */
+.probeCardList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-space-2);
+}
+.probeCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-space-3);
+  padding: var(--kr-space-3) var(--kr-space-4);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-md);
+  background: var(--kr-surface-sunken);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+.probeCard:hover {
+  border-color: var(--kr-border-strong);
+}
+.probeCardSelected {
+  border-color: var(--kr-accent);
+  background: var(--kr-accent-faint);
+}
+.probeCardMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.probeCardLabel {
+  font-weight: var(--kr-weight-bold);
+  font: var(--kr-type-body);
+  color: var(--kr-ink);
+}
+.probeCardAddr {
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-text-xs);
+  color: var(--kr-ink-muted);
+}
+.probeCardReading {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.probeCardValue {
+  font: var(--kr-type-h4);
+  font-weight: var(--kr-weight-bold);
+  font-variant-numeric: tabular-nums;
+  color: var(--kr-ink);
+  white-space: nowrap;
+}
+.probeCardDelta {
+  font: var(--kr-type-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--kr-ink-muted);
+}
+
 .summaryList {
   display: flex;
   flex-direction: column;
@@ -178,6 +257,12 @@
   font: var(--kr-type-small);
   color: var(--kr-ink-body);
   text-transform: capitalize;
+}
+/* Raw OneWire addresses (0x-prefixed, same convention as deviceProbeId's
+   .probeCardAddr) -- text-transform: capitalize above has no visible
+   effect on these since a hex string has no word breaks. */
+.summaryValueMono {
+  font-family: var(--kr-font-mono);
 }
 
 .footer {

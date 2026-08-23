@@ -1,3 +1,54 @@
+krauken (0.1.17) stable; urgency=medium
+
+  * Fix: the BrewPi setup wizard's probe-identification screen (deviceProbeId)
+    flashed a false "No {chamber|beer} probe detected" on every job-to-job
+    transition -- a freshly-started identify_onewire_probes job legitimately
+    reports state:"running", result:null for one or two polls (real serial
+    I/O latency, not a bug) before its first real reading lands, and the
+    render logic treated that null result as "zero probes found." Reproduced
+    live this session on entering the stage and again right after confirming
+    the chamber probe.
+  * Fix: the beer/chamber probe screen's Continue button waited out the
+    backend's fast-path settle loop (up to ~2s) after a reading had already
+    come back valid, purely because that loop only existed to eventually
+    flip the job to "completed" -- unrelated to whether the frontend already
+    knew enough to continue.
+  * Fix: the hardware setup wizard's dialog visibly resized on every stage
+    transition (including automatic ones) because its container only had a
+    max-height, so it shrink-wrapped to each stage's actual content. Given a
+    fixed width/height instead, with the content area taking the remaining
+    space and scrolling internally for any stage tall enough to exceed it.
+  * Redesigned deviceProbeId as a list of selectable probe cards instead of
+    separate zero/one/many-candidate branches: chamber phase requires an
+    explicit candidate (no probe found means Retry/Cancel, never a bare
+    Continue -- BrewPi cannot function without a chamber probe); a lone
+    candidate is auto-selected immediately (nothing to compare against);
+    multiple candidates auto-select on a real 3F warm-up but can also just
+    be tapped directly; beer phase adds an explicit "No beer probe" card
+    among the real candidates rather than a separate skip link, and its own
+    lone candidate is never auto-selected by presence alone (only by
+    actually warming it or tapping it), since a beer probe is optional and
+    genuinely may not exist. Removed the now-unreachable deviceNoProbe stage
+    that this replaces.
+  * Moved all probe warm-detection out of the backend and into the wizard:
+    identify_onewire_probes (device_config.py) no longer computes a delta or
+    an identified_address at all -- it only surfaces baseline_f/current_f/
+    readable on a fixed poll interval, and HardwareWizard.tsx does its own
+    delta-vs-threshold check against those same fields. This also lets a
+    single beer-phase candidate auto-select by warming, which the backend's
+    old single-candidate fast path never compared a delta for at all. Since
+    the job no longer self-terminates on a match, the wizard now explicitly
+    cancels it before advancing past this screen instead of relying on it
+    having already completed.
+  * Wizard copy pass across the BrewPi device-configuration flow: replaced
+    low-level "pin N" language with "outlet controller N+/-" (polarity
+    folded into the label, never shown without those words) throughout the
+    relay-identification sweep and the final summary; reworded the intro,
+    heat-sweep interstitial, no-cooling, and finalize screens toward plain,
+    outlet/probe-centric language instead of internal implementation detail.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 23 Aug 2026 12:57:07 -0400
+
 krauken (0.1.16) stable; urgency=high
 
   * Fix (safety): finalize_device_config could leave the heater genuinely

@@ -80,7 +80,6 @@ _ONEWIRE_HARDWARE = frozenset({DEVICE_HARDWARE_ONEWIRE_TEMP, DEVICE_HARDWARE_ONE
 MAX_DEVICE_SLOT = 16
 
 IDENTIFY_ONEWIRE_POLL_S = 1.0
-IDENTIFY_ONEWIRE_DELTA_F = 3.0
 # No user-facing timeout here -- probe identification should stay up until
 # the user warms a probe or explicitly cancels setup, not give up on a
 # fixed clock (there's no hardware reason it needs one, unlike the relay
@@ -417,12 +416,18 @@ async def _read_onewire_values(conn: Any, exclude: set[str]) -> dict[str, float 
 
 
 async def _run_identify_onewire_probes(ctx: Any, job: Any, device_id: str, params: dict[str, Any]) -> None:
-    """Generalizes daemon/tests_runtime.py's _run_identify_probes delta
-    logic to raw OneWire ROM addresses (before any role is assigned to
-    them at all), with one addition: "readable" is tracked explicitly per
-    address, since a detected-but-unreadable probe (v: null) is a real,
-    confirmed, ongoing state on real hardware this session -- not a
-    transient hiccup to silently retry into "reading..." forever.
+    """Surfaces live readings for raw OneWire ROM addresses (before any
+    role is assigned to them at all) -- nothing else. Which address (if
+    any) the human actually wants is entirely a frontend decision
+    (HardwareWizard.tsx computes its own delta against baseline_f and
+    applies its own warm-detection threshold, and lets the human tap a
+    candidate directly too), so this never inspects its own baseline/
+    current values to decide anything -- it just keeps them updated on a
+    fixed poll interval until cancelled or the backstop elapses. "readable"
+    is tracked explicitly per address, since a detected-but-unreadable
+    probe (v: null) is a real, confirmed, ongoing state on real hardware
+    this session -- not a transient hiccup to silently retry into
+    "reading..." forever.
 
     params:
       exclude_addresses: list[str] -- already-identified addresses to
@@ -444,53 +449,22 @@ async def _run_identify_onewire_probes(ctx: Any, job: Any, device_id: str, param
         baseline = await _read_onewire_values(conn, exclude)
         current = dict(baseline)
         readable = {addr: (v is not None) for addr, v in current.items()}
-        job.result = {"identified_address": None, "baseline_f": dict(baseline), "current_f": dict(current), "readable": dict(readable)}
+        job.result = {"baseline_f": dict(baseline), "current_f": dict(current), "readable": dict(readable)}
 
         if not baseline:
+            # Nothing wired at all -- no point polling for an hour.
             job.state = "completed"
-            job.result = {"identified_address": None, "baseline_f": {}, "current_f": {}, "readable": {}}
             return
 
-        if len(baseline) == 1:
-            # Nothing to compare against -- just confirm it responds, same
-            # fast-path shape as the existing identify_probes.
-            only_addr = next(iter(baseline))
-            fast_window_s = min(window_s, 2.0)
-            elapsed_s = 0.0
-            while elapsed_s < fast_window_s:
-                step_s = min(0.5, fast_window_s - elapsed_s)
-                await ctx.clock.sleep(step_s)
-                elapsed_s += step_s
-                current = await _read_onewire_values(conn, exclude)
-                readable = {addr: (v is not None) for addr, v in current.items()}
-                job.result = {"identified_address": None, "baseline_f": dict(baseline), "current_f": dict(current), "readable": dict(readable)}
-            job.state = "completed"
-            job.result = {
-                "identified_address": only_addr if current.get(only_addr) is not None else None,
-                "baseline_f": baseline,
-                "current_f": current,
-                "readable": readable,
-            }
-            return
-
-        identified: str | None = None
         elapsed_s = 0.0
         while elapsed_s < window_s:
             await ctx.clock.sleep(IDENTIFY_ONEWIRE_POLL_S)
             elapsed_s += IDENTIFY_ONEWIRE_POLL_S
             current = await _read_onewire_values(conn, exclude)
             readable = {addr: (v is not None) for addr, v in current.items()}
-            for addr, b in baseline.items():
-                c = current.get(addr)
-                if b is not None and c is not None and (c - b) >= IDENTIFY_ONEWIRE_DELTA_F:
-                    identified = addr
-                    break
-            job.result = {"identified_address": identified, "baseline_f": dict(baseline), "current_f": dict(current), "readable": dict(readable)}
-            if identified is not None:
-                break
+            job.result = {"baseline_f": dict(baseline), "current_f": dict(current), "readable": dict(readable)}
 
         job.state = "completed"
-        job.result = {"identified_address": identified, "baseline_f": baseline, "current_f": current, "readable": readable}
     except asyncio.CancelledError:
         job.state = "cancelled"
         raise
