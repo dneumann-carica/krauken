@@ -19,7 +19,11 @@ temperatures) -- confirmed with the real Arduino: `n` -> `N:{"v":"0.2.13",
 a relaxed/unquoted-key JS-object-literal body, not strict JSON --
 `j{mode:"f", fridgeSet:65.5}` / `j{mode:"o"}` -- matching the exact syntax
 BrewPi Remix's own brewpi.py sends in production against this same
-firmware, copied rather than guessed.
+firmware, copied rather than guessed. `j`'s reply is not one line but a
+variable-length burst (0+ D:/T: lines depending on which keys were sent,
+then always S: then always C: last) -- see set_fridge_target()'s
+_drain_until_locked() call for why that whole burst gets read and
+discarded before the write returns.
 
 Device-configuration commands (verified 2026-08-15 against the same real
 rig, plus reading brewpi-remix/brewpi-firmware-rmx's actual firmware
@@ -187,9 +191,18 @@ QUERY_TIMEOUT_S = 15.0
 # `D:{...}` fragment) into the MIDDLE of a 'd'/'h' device-list response,
 # splitting one logical JSON array across physical lines, e.g.
 # `d:[D:{"logType":"E","logID":10,"V":[10]}` followed by a second line
-# continuing the array. Stripped out before parsing by
-# _query_device_list_locked(); log payloads observed so far are flat
-# (no nested braces), so a non-greedy single-level match is sufficient.
+# continuing the array. Log payloads observed so far are flat (no nested
+# braces), so a non-greedy single-level match is sufficient.
+#
+# DELIBERATELY UNUSED right now (see _query_device_list_locked's own
+# docstring, and plans/i-do-want-the-mellow-sloth.md): this used to be
+# stripped out before parsing, but a live investigation into a real
+# multi-minute control-loop stall isn't confident this is even the right
+# diagnosis yet -- rather than keep quietly correcting/hiding this exact
+# wire behavior, it's left in place unstripped for now so the new serial
+# trace log can show it happening directly. Left defined, not deleted,
+# since it's very likely needed again (here and/or in _query_locked) once
+# the real mechanism is confirmed.
 _LOG_FRAGMENT_RE = re.compile(r"D:\{[^{}]*\}")
 
 # State codes from the classic BrewPi Arduino firmware (brewpi-firmware's
@@ -311,7 +324,16 @@ class BrewPiConnection:
         independent fridge target on top would be two controllers
         disagreeing about the same knob -- exactly what the design doc's
         "compressor protection lives exactly once, never stacked" rule
-        forbids one layer up."""
+        forbids one layer up.
+
+        Drains the resulting response burst (see _drain_until_locked())
+        before returning -- this used to write and return immediately,
+        leaving the Arduino's reply (D:/T: echoes, then always S: then
+        C:) sitting unread until some later, unrelated read happened to
+        drain past it and could mistake a stale line for its own fresh
+        answer. Still fire-and-forget in the sense that nothing here
+        parses or uses that reply -- draining it is purely so it can't
+        contaminate a later read, not because this method needs it."""
         body = 'j{mode:"o"}' if temp_f is None else f'j{{mode:"f", fridgeSet:{temp_f}}}'
         self.commanded_target_f = temp_f
         async with self._lock:
@@ -319,6 +341,7 @@ class BrewPiConnection:
                 return
             try:
                 await self._write_traced(f"{body}\n".encode("ascii"))
+                await self._drain_until_locked("C")
             except Exception:  # noqa: BLE001 -- best-effort; next read_temps() surfaces UNREACHABLE
                 log.warning("failed to write set_fridge_target(%r) to BrewPi", temp_f)
 
@@ -481,6 +504,43 @@ class BrewPiConnection:
         _serial_trace_log.info("READ %r", line if line else b"<timeout, no data>")
         return line
 
+    async def _drain_until_locked(self, terminal_prefix: str) -> None:
+        """Caller must hold self._lock, immediately after writing a
+        command whose reply is a variable-length BURST of lines rather
+        than one parseable payload -- specifically `j`. Confirmed live
+        2026-08-23 (see plans/i-do-want-the-mellow-sloth.md) via the new
+        serial trace log: set_fridge_target() used to write 'j{...}' and
+        return without reading anything back, but the real firmware's
+        PiLink::receiveJson() always answers a 'j' with a burst -- zero
+        or more D:/T: lines (one D: per settings key received, plus a
+        full extra T: line for each of 'mode'/'fridgeSet' that actually
+        triggered setMode()'s/setFridgeSetting()'s own annotation print,
+        e.g. `T:{...,"FridgeAnn":"Fridge set to 61.0 by web",...}`),
+        THEN unconditionally S: (sendControlSettings()) and C:
+        (sendControlConstants()) -- C: always last, even on an empty or
+        malformed body, since neither trailing call is gated on the
+        parse actually succeeding. Left unread, that whole burst just
+        sat in the OS-level serial buffer for whatever LATER, unrelated
+        _query_locked() call happened to run next -- which matches on
+        expect_prefix alone with no freshness check, so it could (and,
+        confirmed via the trace log, did) return a stale T: a 'j' had
+        queued up well before the 't' that "answered" it was ever sent.
+        Draining here, right after the write that caused the burst,
+        means nothing is left behind for a later read to misattribute.
+        Bounded by the same QUERY_TIMEOUT_S deadline as the query
+        methods below, as a backstop in case a byte gets dropped and
+        `terminal_prefix` never arrives -- content of every drained line
+        is discarded; nothing here is worth parsing since no caller of
+        set_fridge_target() currently wants the echoed settings back."""
+        deadline = time.monotonic() + QUERY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            line = await self._readline_traced()
+            if not line:
+                continue
+            text = line.decode("ascii", errors="replace").strip()
+            if text.startswith(f"{terminal_prefix}:"):
+                return
+
     async def _query_locked(self, command: str, expect_prefix: str) -> Any | None:
         """Caller must hold self._lock. Sends the command exactly ONCE,
         then reads until a line starting with `expect_prefix + ':'`
@@ -521,9 +581,20 @@ class BrewPiConnection:
         """Caller must hold self._lock. Like _query_locked (single write,
         no resend, one QUERY_TIMEOUT_S deadline), but for 'd'/'h'
         responses specifically: accumulates lines starting from the one
-        with the matching prefix (stripping any embedded log fragments --
-        see _LOG_FRAGMENT_RE) until the accumulated text parses as a JSON
-        array, or the timeout is exhausted."""
+        with the matching prefix until the accumulated text parses as a
+        JSON array, or the timeout is exhausted.
+
+        Deliberately NOT stripping embedded log fragments right now (see
+        _LOG_FRAGMENT_RE's own comment, and plans/i-do-want-the-mellow-
+        sloth.md) -- a real, confirmed-live failure mode this used to
+        paper over (an interleaved `D:{...}` fragment splitting one
+        logical response across physical lines) is temporarily left
+        unmitigated on purpose, so the new serial trace log
+        (_write_traced/_readline_traced) can show it happening
+        byte-for-byte instead of it being silently cleaned up here. This
+        genuinely reopens that old failure mode in the Hardware Setup
+        wizard's device-list reads until the actual stalling mechanism is
+        confirmed and a real fix (here and/or in _query_locked) lands."""
         if self._serial is None:
             return None
         try:
@@ -546,7 +617,7 @@ class BrewPiConnection:
                     continue
                 text = text[len(expect_prefix) + 1 :]
                 collecting = True
-            accumulated += _LOG_FRAGMENT_RE.sub("", text)
+            accumulated += text
             try:
                 parsed = json.loads(accumulated)
             except json.JSONDecodeError:

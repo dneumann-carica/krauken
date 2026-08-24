@@ -1,3 +1,26 @@
+krauken (0.1.22) stable; urgency=medium
+
+  * Fix: set_fridge_target() (every `j{...}` write to the BrewPi Arduino)
+    used to write and return without reading anything back. Confirmed via
+    the new serial trace log plus the real firmware source
+    (PiLink::receiveJson() in brewpi-remix/brewpi-firmware-rmx) that a
+    'j' write always answers with a variable-length burst -- 0+ D:/T:
+    lines (one D: per settings key, plus a full extra annotated T: line
+    for each of mode/fridgeSet that actually changed), then always S:
+    then always C: last, regardless of body validity. Left unread, that
+    burst sat in the serial buffer until whatever LATER, unrelated
+    _query_locked() call happened to run next -- which matches on prefix
+    alone with no freshness check, so it could (and did, confirmed live)
+    return a stale T: a 'j' had queued up well before the 't' that
+    "answered" it was ever sent. set_fridge_target() now drains and
+    discards the full burst (via a new _drain_until_locked() helper,
+    reading until a C: line arrives or QUERY_TIMEOUT_S elapses) before
+    returning, so nothing from a 'j' write can leak into and contaminate
+    a later, unrelated read. Purely this one write path for now -- the
+    still-open question of unrelated async D: messages splicing into the
+    MIDDLE of a response (separate from this) is intentionally left
+    unmitigated pending another look at the trace log with this fixed.
+
 krauken (0.1.21) stable; urgency=medium
 
   * Added a raw serial read/write trace log for the BrewPi connection

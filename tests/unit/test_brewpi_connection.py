@@ -116,13 +116,53 @@ async def test_set_fridge_target_none_sends_off_mode():
 
 
 async def test_commanded_target_f_is_recorded_even_though_it_is_never_acked():
-    # set_fridge_target() only records what was commanded, same convention
-    # as ManualChamberDriver -- there's no response to a 'j' command to
-    # wait for at all, real or fake.
+    # set_fridge_target() records what was commanded regardless of what
+    # (if anything) the Arduino sends back -- same convention as
+    # ManualChamberDriver. It does drain and discard the real firmware's
+    # burst reply now (see test_set_fridge_target_drains_the_full_response_
+    # burst_below); FakeSerial's `{}` here means "never answers", so this
+    # exercises set_fridge_target() timing out that drain rather than there
+    # being nothing to wait for at all.
     conn = _connected({})
     await conn.set_fridge_target(70.0)
     driver = BrewPiChamberDriver(conn)
     assert await driver.commanded_target() == 70.0
+
+
+async def test_set_fridge_target_drains_the_full_response_burst():
+    # Real, confirmed firmware behavior (see connection.py's
+    # _drain_until_locked() docstring): a 'j' write answers with a
+    # variable-length burst -- here two D: echoes and a T: annotation
+    # line, standing in for whatever mix a real body triggers -- always
+    # ending in S: then C:. Before this fix, set_fridge_target() never
+    # read any of this, so it sat unread until the NEXT unrelated query
+    # drained past it -- and that query's own _query_locked() call,
+    # matching on prefix alone with no freshness check, could return one
+    # of these stale lines as if it were its own fresh answer. Queuing a
+    # genuine 't'/'T:' response behind this burst and confirming
+    # read_temps() gets THAT, not a burst leftover, is the real
+    # regression test for the bug this fix closes.
+    conn = _connected(
+        {
+            "j": [
+                b'D:{"logType":"I","logID":12,"V":["mode","f"]}\r\n',
+                b'T:{"BeerTemp": 75.64,"BeerSet":null,"BeerAnn":null,"FridgeTemp": 75.20,'
+                b'"FridgeSet": 61.00,"FridgeAnn":"Mode set to f by web","State":0}\r\n',
+                b'D:{"logType":"I","logID":12,"V":["fridgeSet","61.0"]}\r\n',
+                b'S:{"mode":"f","beerSet":null,"fridgeSet": 61.00,"heatEst": 0.199,'
+                b'"coolEst": 5.000}\r\n',
+                b'C:{"tempFormat":"F","tempSetMin": 33.8,"tempSetMax": 86.0}\r\n',
+            ],
+            "t": REAL_T_RESPONSE,
+        }
+    )
+    await conn.set_fridge_target(61.0)
+    # The whole burst (2 D:, 1 T:, 1 S:, 1 C:) must be gone -- nothing left
+    # for the next read to misattribute.
+    assert conn._serial._pending == []
+    reading = await conn.read_temps()
+    assert reading is not None
+    assert reading.fridge_temp_f == 76.55  # REAL_T_RESPONSE's value, not the burst's stale 75.20
 
 
 async def test_chamber_driver_maps_the_real_response_to_a_reading():
@@ -252,17 +292,22 @@ async def test_list_available_devices_parses_the_real_captured_response():
     assert [d.pin for d in devices] == [2, 6, 19]
 
 
-async def test_list_available_devices_survives_an_interleaved_log_message():
+async def test_list_available_devices_currently_fails_on_an_interleaved_log_message():
     # This is the real, confirmed firmware behavior this session found --
     # not a hypothetical: a log message split a device-list response
-    # across two physical lines. Without _query_device_list_locked's
-    # log-stripping/accumulation, this would fail to parse entirely.
+    # across two physical lines. _query_device_list_locked USED to strip
+    # the fragment and recover cleanly; that stripping was deliberately
+    # (temporarily) removed -- see its own docstring and
+    # plans/i-do-want-the-mellow-sloth.md -- while a live investigation
+    # into a real multi-minute control-loop stall confirms whether this
+    # is even the right mechanism, using a new serial trace log instead
+    # of silently correcting it here. This test documents the resulting,
+    # deliberate regression rather than being left red or deleted --
+    # once stripping comes back, this should go back to asserting a
+    # successful parse (see git history for the old assertions).
     conn = _connected({"h": REAL_H_RESPONSE_WITH_INTERLEAVED_LOG})
     devices = await conn.list_available_devices()
-    assert len(devices) == 2
-    assert devices[0].address == "28FFBA8594160473"
-    assert devices[0].value is None  # the confirmed-flaky probe reads null
-    assert devices[1].pin == 2
+    assert devices == []
 
 
 async def test_list_all_devices_merges_installed_and_available():
@@ -398,9 +443,13 @@ async def test_query_locked_writes_exactly_once_when_the_arduino_never_answers()
 
 
 async def test_query_device_list_locked_never_resends_while_waiting_for_a_late_response():
+    # Parsing itself now fails on this fixture (log-fragment stripping is
+    # deliberately, temporarily removed -- see the test right above) --
+    # unrelated to what THIS test actually checks: that reading several
+    # non-matching/incomplete lines in a row never triggers a resend.
     conn = _connected({"h": REAL_H_RESPONSE_WITH_INTERLEAVED_LOG})
     devices = await conn.list_available_devices()
-    assert len(devices) == 2
+    assert devices == []
     assert len(conn._serial.written) == 1  # exactly one write -- no resend
 
 
