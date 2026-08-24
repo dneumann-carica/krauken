@@ -1,3 +1,20 @@
+krauken (0.1.27) stable; urgency=medium
+
+  * Dashboard: replaced the Setpoint tile's "±0.5°F" sublabel -- a
+    hardcoded literal never actually derived from anything the cascade
+    does, and actively misleading once the PI controller can legitimately
+    push the chamber far from the beer target on purpose (a ramping
+    stage's feedforward) -- with a projected time-to-target estimate
+    ("2h to target", "<1h to target", or "Won't reach target" when the
+    beer is projected to keep trailing a moving ramp target for the rest
+    of the stage). Reuses the existing forward-projection (already a full
+    PI-cascade re-simulation, not a naive "hold today's setpoint forever"
+    calc) -- same simulator-calibrated coefficients the chart's projection
+    has always used for real hardware, a prior, permanent decision, not a
+    new imprecision this introduces. Only shown for the live/current
+    state, not while scrubbing the chart through history (the projection
+    is anchored to "now").
+
 krauken (0.1.26) stable; urgency=medium
 
   * Round the chamber target to 1 decimal place before writing it to the

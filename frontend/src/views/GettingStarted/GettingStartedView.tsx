@@ -4,7 +4,7 @@ import { FermentationChart } from "../../chart/FermentationChart";
 import type { PillTone } from "../../design/primitives";
 import { Button, Card, Dialog, MetricStat, StatusPill, Tag } from "../../design/primitives";
 import { useAdvanceStage, useChamberStatus, useStopChamber, useTerminateFermentation, useUpdateStages } from "../../api/queries";
-import type { RoleStatus, StageResponse } from "../../api/types";
+import type { RoleStatus, SeriesResponse, StageResponse } from "../../api/types";
 import type { Role } from "../../hardware/resolve";
 import { ROLE_LABELS } from "../../hardware/roleLabels";
 import { BatchTitleMenu } from "./BatchTitleMenu";
@@ -62,6 +62,62 @@ function fmtDaysHours(hours: number): string {
   const rem = totalHours % 24;
   if (days === 0) return `${rem}h`;
   return rem === 0 ? `${days}d` : `${days}d ${rem}h`;
+}
+
+// Replaces a previous "±0.5°F" sublabel that was a hardcoded literal, not
+// derived from anything the PI cascade actually does -- misleading once
+// the cascade can legitimately push the chamber far from the beer target
+// on purpose (a ramping stage's feedforward). Reuses the existing forward-
+// projection (already a full re-simulation of the PI cascade, not a naive
+// "hold today's setpoint forever" extrapolation) rather than inventing a
+// separate physics calc -- same simulator-calibrated coefficients the
+// chart's projection has always used for real hardware too (a permanent,
+// prior decision, not a new imprecision this introduces).
+//
+// Finds the first projected point where beer_temp_f crosses
+// effective_target_f (a sign change in beer-minus-target between
+// consecutive points, checked rather than an exact-equality/proximity
+// test since PROJECTION_STEP_H=0.5h steps can jump straight past a close
+// crossing) and returns the elapsed time to it. Anchored to the series'
+// own last real sample timestamp -- same "now" reference the chart's own
+// NOW marker uses -- not the browser's clock, so this never drifts from
+// what the chart itself is showing.
+//
+// null means "not enough series data to say anything" (render nothing).
+// The empty string is used as a distinct sentinel for "computed, but
+// there's no crossing within the projected horizon" -- see
+// timeToTargetLabel below for why that's a real, not degenerate, case.
+export function projectedHoursToTarget(seriesData: SeriesResponse): number | null | "" {
+  const proj = seriesData.projection;
+  const lastRealIdx = seriesData.ts.length - 1;
+  if (!proj || proj.ts.length === 0 || lastRealIdx < 0) return null;
+  const nowMs = new Date(seriesData.ts[lastRealIdx]).getTime();
+
+  let prevBeer = seriesData.beer_temp_f[lastRealIdx];
+  let prevTarget = seriesData.effective_target_f[lastRealIdx];
+  if (prevBeer === null || prevTarget === null) return null;
+
+  for (let i = 0; i < proj.ts.length; i++) {
+    const beer = proj.beer_temp_f[i];
+    const target = proj.effective_target_f[i];
+    if (beer === null || target === null) continue;
+    const prevDiff = prevBeer - prevTarget;
+    const diff = beer - target;
+    if (prevDiff === 0 || diff === 0 || Math.sign(prevDiff) !== Math.sign(diff)) {
+      return (new Date(proj.ts[i]).getTime() - nowMs) / 3_600_000;
+    }
+    prevBeer = beer;
+    prevTarget = target;
+  }
+  return "";
+}
+
+export function timeToTargetLabel(seriesData: SeriesResponse): string | null {
+  const hours = projectedHoursToTarget(seriesData);
+  if (hours === null) return null;
+  if (hours === "") return "Won't reach target";
+  if (hours < 1) return "<1h to target";
+  return `${fmtDaysHours(hours)} to target`;
 }
 
 function modeLabelFor(mode: string): string {
@@ -346,7 +402,14 @@ export function GettingStartedView() {
               <MetricStat
                 value={fmtTemp(scrubbed.chamberTarget)}
                 label="Setpoint"
-                sublabel={`${displayStage?.name ?? ""} · ±0.5°F`}
+                // Only while viewing the live/current state -- the
+                // projection this is computed from is anchored to "now",
+                // not to an arbitrary scrubbed-to point in the past, so
+                // showing an ETA while scrubbing would pair a historical
+                // chamber target with a present-day forward estimate.
+                // Falls back to the stage name alone, same as this tile
+                // used to always show.
+                sublabel={scrubIndex === null && seriesData ? (timeToTargetLabel(seriesData) ?? displayStage?.name ?? "") : displayStage?.name ?? ""}
                 accent="gray"
               />
             </Card>
