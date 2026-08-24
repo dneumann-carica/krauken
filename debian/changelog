@@ -1,3 +1,18 @@
+krauken (0.1.24) stable; urgency=medium
+
+  * Hardware Setup: removed the standalone "Test heater" button
+    (confirm_heater) -- the guided wizard now discovers and installs the
+    heat pin itself (device_config.py's identify_relay_pin), so this
+    separate post-setup diagnostic was redundant and confusing next to it.
+  * Hardware Setup: finishing the wizard now triggers a real rescan
+    (the same job the mount effect and "Scan again" run) instead of just
+    invalidating the already-cached devices query -- that cached query
+    reflects whatever the LAST scan wrote, which predates whatever the
+    wizard just changed on real hardware. Fixes a real, confirmed bug: a
+    newly-installed beer_temp probe's "roles it plays" chip stayed
+    invisible until the next unrelated scan (a page reload, or a manual
+    "Scan again" click).
+
 krauken (0.1.23) stable; urgency=medium
 
   * Dedupe redundant BrewPi `j` writes: set_fridge_target() used to write

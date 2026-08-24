@@ -11,8 +11,6 @@ import {
   useSaveMapping,
   useScanStatus,
   useStartScan,
-  useStartTest,
-  useTestStatus,
 } from "../../api/queries";
 import type { DeviceResponse } from "../../api/types";
 import { ALL_ROLES, CHAMBER_BUNDLE, REQUIRED_ROLES, Role, resolve } from "../../hardware/resolve";
@@ -84,29 +82,33 @@ export function HardwareSetupView() {
   const [saveResult, setSaveResult] = useState<Awaited<ReturnType<typeof saveMapping.mutateAsync>>>();
   const [saveError, setSaveError] = useState<string>();
 
-  // Standalone post-setup diagnostic for an already-configured firmware-
-  // managed heater (BrewPi's confirm_heater) -- kept narrow and separate
-  // from the guided wizard on purpose: the wizard now discovers and
-  // installs the heat pin itself (device_config.py's identify_relay_pin),
-  // so confirm_heater's only remaining job is "did my already-configured
-  // heater stop responding," not configuring one. Only one can run at a
-  // time (matches the daemon's own one-test-per-device_id rule), so a
-  // single id pair is enough regardless of how many rows could show the
-  // button.
-  const [heaterTestDeviceId, setHeaterTestDeviceId] = useState<string>();
-  const [heaterTestId, setHeaterTestId] = useState<string>();
-  const startHeaterTest = useStartTest();
-  const heaterTestStatus = useTestStatus(heaterTestDeviceId, heaterTestId);
+
+  // Shared by the mount effect, the "Scan again" button, and
+  // handleWizardFinish below -- a real scan job, not just invalidating
+  // the "hardware","devices" query. That query reads whatever the last
+  // completed scan job already wrote to the devices table; invalidating
+  // it alone just refetches that same, unchanged, possibly-stale row.
+  // Confirmed live this session: finishing the BrewPi wizard correctly
+  // saved a new beer_temp role assignment, but the "roles it plays" chips
+  // still came from a scan that predated the wizard entirely -- the
+  // second OneWire probe it just installed was invisible to
+  // capabilities/probe_addresses until the next scan, whenever that
+  // happened to be (page reload, or a manual "Scan again" click).
+  function triggerScan() {
+    setScanStartError(undefined);
+    startScan.mutate(undefined, {
+      onSuccess: (r) => setScanId(r.scan_id),
+      onError: (e) => setScanStartError(apiErrorMessage(e, "Could not start a hardware scan.")),
+    });
+  }
 
   const scanStartedRef = useRef(false);
   useEffect(() => {
     if (scanStartedRef.current) return;
     scanStartedRef.current = true;
-    startScan.mutate(undefined, {
-      onSuccess: (r) => setScanId(r.scan_id),
-      onError: (e) => setScanStartError(apiErrorMessage(e, "Could not start a hardware scan.")),
-    });
-  }, [startScan]);
+    triggerScan();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const scanStatus = useScanStatus(scanId);
   const scanState = scanStatus.data?.state;
@@ -190,8 +192,15 @@ export function HardwareSetupView() {
     setWizardDeviceId(undefined);
     applySaveResult(result);
     queryClient.invalidateQueries({ queryKey: ["hardware", "mapping"] });
-    queryClient.invalidateQueries({ queryKey: ["hardware", "devices"] });
     queryClient.invalidateQueries({ queryKey: ["state"] });
+    // Not just invalidateQueries(["hardware","devices"]) -- that query
+    // reads whatever the last scan job already wrote, which predates
+    // whatever the wizard just changed on real hardware. A real rescan
+    // (same as the mount effect / "Scan again") is what actually picks
+    // up the new probe/relay this run just installed; its own
+    // scanState==="complete" effect below invalidates ["hardware",
+    // "devices"] once that fresh scan actually lands.
+    triggerScan();
   }
 
   if (mapping.isLoading || devices.isLoading) {
@@ -257,13 +266,7 @@ export function HardwareSetupView() {
             variant="secondary"
             size="sm"
             disabled={scanning}
-            onClick={() => {
-              setScanStartError(undefined);
-              startScan.mutate(undefined, {
-                onSuccess: (r) => setScanId(r.scan_id),
-                onError: (e) => setScanStartError(apiErrorMessage(e, "Could not start a hardware scan.")),
-              });
-            }}
+            onClick={triggerScan}
           >
             Scan again
           </Button>
@@ -310,15 +313,6 @@ export function HardwareSetupView() {
               (availableTests.includes("fire_outlet") ||
                 availableTests.includes("finalize_device_config") ||
                 availableTests.includes("identify_probes"));
-            // confirm_heater itself is deliberately NOT in any platform's
-            // available_tests (it's a fixed backend action string, not a
-            // discovered capability) -- gating the standalone "Test
-            // heater" button on canConfigureDevices instead restricts it
-            // to firmware-managed devices specifically (BrewPi), where
-            // there's no outlet-based "Reconfigure" flow to re-verify a
-            // heater through; Manual/Simulator already have that via
-            // their own guided wizard.
-            const canConfigureDevices = availableTests.includes("finalize_device_config");
             const ownsCore = roles.includes(Role.CHAMBER_TEMP) && roles.includes(Role.CHAMBER_COOLING);
             const ownsHeating = roles.includes(Role.CHAMBER_HEATING);
             const ownsBeerTemp = roles.includes(Role.BEER_TEMP);
@@ -372,19 +366,6 @@ export function HardwareSetupView() {
                 ? "Detected, not in use."
                 : "Each role is picked independently.";
 
-            const isHeaterTestDevice = heaterTestDeviceId === d.device_id;
-            const heaterTestRunning = isHeaterTestDevice && heaterTestStatus.data?.state === "running";
-            const heaterTestResult = isHeaterTestDevice
-              ? (heaterTestStatus.data?.result as { confirmed: boolean } | null | undefined)
-              : undefined;
-            const heaterTestLabel = heaterTestRunning
-              ? "Testing heater…"
-              : isHeaterTestDevice && heaterTestStatus.data?.state === "completed"
-                ? heaterTestResult?.confirmed
-                  ? "Heater confirmed"
-                  : "No heat seen"
-                : "Test heater";
-
             return (
               <div key={d.device_id} className={`${styles.deviceRow} ${unhealthy ? styles.deviceRowBad : ""}`}>
                 <div className={styles.deviceInfo}>
@@ -435,23 +416,6 @@ export function HardwareSetupView() {
                   {guided && (
                     <Button variant={roles.length > 0 ? "ghost" : "secondary"} size="sm" onClick={() => setWizardDeviceId(d.device_id)}>
                       {roles.length > 0 ? "Reconfigure" : "Set up"}
-                    </Button>
-                  )}
-                  {canConfigureDevices && ownsHeating && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={heaterTestRunning || startHeaterTest.isPending}
-                      onClick={() => {
-                        setHeaterTestDeviceId(d.device_id);
-                        setHeaterTestId(undefined);
-                        startHeaterTest.mutate(
-                          { deviceId: d.device_id, action: "confirm_heater", params: {} },
-                          { onSuccess: (r) => setHeaterTestId(r.test_id) },
-                        );
-                      }}
-                    >
-                      {heaterTestLabel}
                     </Button>
                   )}
                 </div>
