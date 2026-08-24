@@ -91,6 +91,10 @@ def project_forward(
     through the end of the last stage in `stages` (the current one, plus
     every pending one after it)."""
     params = plant.PlantParams()
+    # beer_error_integral starts at its dataclass default (0.0), not the
+    # real, currently-live ControlState.beer_error_integral -- this module
+    # has no access to that in-memory daemon value; see plant.step()'s own
+    # docstring for the disclosed tradeoff this accepts.
     state = plant.PlantState(t_h=0.0, beer_temp_f=beer_temp_f, chamber_temp_f=chamber_temp_f, gravity=gravity or 1.0, mode="idle")
 
     points: list[dict[str, Any]] = []

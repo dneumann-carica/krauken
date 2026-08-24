@@ -113,9 +113,11 @@ class GravityGate:
 class TempHoldGate:
     """Same shape as GravityGate: satisfied once the beer has sat within
     BEER_TRIGGER_BAND_F of hold_temp_f continuously for hold_hours. Reuses
-    the cascade's own trigger band as the tolerance rather than inventing a
-    separate one -- "at target" means the same thing here as it does to the
-    cascade that's driving toward it."""
+    the same tolerance the cascade used to trigger/release on (back when it
+    was a discrete hysteresis, before it became a continuous PI controller
+    with no discrete "at target" point of its own -- see contracts/
+    cascade.py) rather than inventing a separate "close enough" number for
+    what's conceptually the same idea: has the beer actually arrived."""
 
     stable_since_h: float | None = None
 

@@ -1,3 +1,31 @@
+krauken (0.1.25) stable; urgency=medium
+
+  * Replaced the beer-holding cascade's fixed-clamp bang-bang scheme with
+    a PI controller on beer-temp error (no gravity dependency). Confirmed
+    two real bugs the old scheme had via live fermentation data: (1) a
+    sustained deviation (beer running warm the whole 12h Primary stage)
+    never got more than the same fixed 5F cooling clamp, no matter how
+    long it persisted -- the "long idle then a spike" pattern that
+    originally motivated this; (2) a genuine, confirmed sign bug in the
+    old ramp-feedforward math (abs(ramp_rate)/coupling, widening whichever
+    discrete cool/heat/idle mode the hysteresis happened to be in, with no
+    check that the ramp's own direction agreed) caused chamber_target_f to
+    swing between ~53F and ~80F almost every tick during the Free Rise
+    stage's 66->70F ramp, exactly reproduced and confirmed from the real
+    samples table this session. The new controller has no discrete mode at
+    all: contracts/cascade.py's chamber_target_for()/
+    update_beer_error_integral() compute a continuous
+    beer_target + Kp*error + Ki*integral + signed_ramp_feedforward,
+    anti-windup clamped, replacing beer_relay_demand() entirely.
+  * New, dedicated test suite (test_cascade_setpoint_stability.py) proves
+    the fix directly against the real incident data: replays the exact
+    recorded sequence that broke the old cascade and confirms zero
+    cooling<->heating reversals under the new one (verified the metric
+    itself is meaningful by replaying the same data through the OLD
+    cascade logic and confirming it DOES flag a reversal there), plus
+    synthetic sensor-noise-chatter, dramatic-movement-is-fine, and
+    ramp-direction-consistency scenarios.
+
 krauken (0.1.24) stable; urgency=medium
 
   * Hardware Setup: removed the standalone "Test heater" button

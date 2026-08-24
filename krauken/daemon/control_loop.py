@@ -15,7 +15,7 @@ import logging
 from typing import Any
 
 from krauken.contracts import failsafe, og_detection, stages as stages_mod
-from krauken.contracts.cascade import beer_relay_demand, chamber_target_for
+from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral
 from krauken.daemon import drivers, fermentation
 from krauken.daemon.sampler import SampleCandidate, SamplingPolicy
 from krauken.daemon.timefmt import iso as _iso
@@ -35,6 +35,33 @@ _HEALTH_EVENT_NAMES = {
 
 def _parse_iso(s: str) -> float:
     return datetime.datetime.fromisoformat(s).timestamp()
+
+
+def _dt_h_since_last_tick(ctx: Any, now_mono: float) -> float:
+    """Real elapsed hours since the previous tick THIS PROCESS has seen
+    (ANY tick, fermentation active or not -- control_tick() runs every
+    scheduled tick regardless, per its own comment), for the beer-temp
+    PI's integral (contracts/cascade.py's update_beer_error_integral()).
+    Deliberately takes an already-fetched now_mono rather than calling
+    ctx.clock.monotonic() itself, so a caller that also needs `now` for
+    other purposes only reads the clock once per tick.
+
+    Monotonic, never wall-clock -- see contracts/clock.py's Clock.now()
+    docstring on why wall-clock time (which an NTP correction can step)
+    must never drive timer arithmetic. Returns 0.0 on the very first tick
+    this process has ever run (ctx.control_state.last_tick_monotonic is
+    still None), rather than fabricating/guessing an interval -- correct
+    both right after a fresh daemon start and right after ControlState.
+    reset() (a new fermentation), since both leave it None.
+
+    Updates ctx.control_state.last_tick_monotonic as a side effect --
+    unconditionally, every call, so a later tick always measures from
+    the most recent tick that actually ran, not from whenever the
+    integral itself last got to accumulate (see this function's own
+    caller for why that distinction matters during a beer-sensor outage)."""
+    last = ctx.control_state.last_tick_monotonic
+    ctx.control_state.last_tick_monotonic = now_mono
+    return (now_mono - last) / 3600.0 if last is not None else 0.0
 
 
 def _log_health_edge(ctx: Any, fermentation_id: int, field_name: str, ok: bool | None, now_iso: str) -> None:
@@ -197,6 +224,13 @@ async def _control_tick_locked(ctx: Any) -> None:
 
     now = ctx.clock.now()
     now_iso = _iso(now)
+    # dt_h for the PI integral -- see _dt_h_since_last_tick's own
+    # docstring. Computed unconditionally, even while beer_ok turns out
+    # False below, so a beer sensor dropping out for a while and then
+    # recovering doesn't hand the integral a huge one-shot "catch-up" dt_h
+    # once it's healthy again -- only the tick where the reading actually
+    # resumes contributes anything, and it contributes a normal-sized dt_h.
+    dt_h = _dt_h_since_last_tick(ctx, ctx.clock.monotonic())
     readings = await _read_all(d)
 
     health = failsafe.assess_health(
@@ -222,11 +256,14 @@ async def _control_tick_locked(ctx: Any) -> None:
 
     beer_ok = health.beer_temp_ok and readings.beer is not None and readings.beer.temp_f is not None
     if beer_ok:
-        mode = beer_relay_demand(readings.beer.temp_f, beer_target, ctx.control_state.last_relay_mode)
         ramp_rate = stages_mod.target_rate_f_per_h(current, elapsed_h)
-        chamber_target = chamber_target_for(mode, beer_target, ramp_rate)
+        ctx.control_state.beer_error_integral = update_beer_error_integral(
+            readings.beer.temp_f, beer_target, ctx.control_state.beer_error_integral, dt_h,
+        )
+        chamber_target = chamber_target_for(
+            readings.beer.temp_f, beer_target, ctx.control_state.beer_error_integral, ramp_rate,
+        )
         target_source = "profile"
-        ctx.control_state.last_relay_mode = mode
         ctx.control_state.last_chamber_target_f = chamber_target
     else:
         # Failsafe: beer temp is lost or absent -- hold the last commanded

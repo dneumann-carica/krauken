@@ -1,19 +1,25 @@
-"""A coupled thermal + gravity plant model. Used by the offline demo-batch
-generator (db/seed.py) and by the live SimPlant driver
-(platforms/simulator/live.py) that backs M2's real control loop in dev/test
-environments with no real hardware.
+"""A coupled thermal + gravity plant model. Used by the chart's forward-
+projection preview (platforms/simulator/projection.py's step() calls) and
+by the live SimPlant driver (platforms/simulator/live.py) that backs M2's
+real control loop in dev/test environments with no real hardware. NOT used
+by the demo-batch generator (db/seed.py) -- that runs a real daemon
+(build_scenario_daemon()) through the live driver instead, precisely so
+the shipped demo batch can never silently drift out of sync with whatever
+this module's physics actually are; see db/seed.py's own module docstring
+for the real incident that motivated dropping its own separate step()-
+driven loop.
 
 The chamber-control decision inside step() calls contracts.cascade directly
--- the same functions the real daemon control loop calls -- so this demo
-data and the live driver's own behavior are both an honest exercise of the
-real cascade rule, not a separately-invented approximation of it.
+-- the same functions the real daemon control loop calls -- so the chart
+preview and the live driver's own behavior are both an honest exercise of
+the real cascade rule, not a separately-invented approximation of it.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from krauken.contracts.cascade import beer_relay_demand, chamber_target_for
+from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +131,16 @@ class PlantState:
     # value (platforms/simulator/live.py) -- both are equally "the target
     # this step drove toward," just computed differently upstream.
     chamber_target_f: float | None = None
+    # step()'s own accumulated PI integral (contracts/cascade.py's
+    # update_beer_error_integral()) -- 0.0 on an initial/starting state,
+    # matching a fresh fermentation's own ControlState.beer_error_integral.
+    # NOT set by advance_physics() (unlike chamber_target_f above): the
+    # live SimPlant driver's own PlantState never uses this at all (it
+    # makes its relay decision via contracts.protection, not this
+    # cascade), so step() overlays it onto advance_physics()'s returned
+    # state itself via dataclasses.replace() rather than threading it
+    # through a function that has no reason to know about it.
+    beer_error_integral: float = 0.0
 
 
 def ambient_f(p: AmbientParams, t_h: float, total_h: float) -> float:
@@ -219,21 +235,43 @@ def step(
     state: PlantState, p: PlantParams, dt_h: float, beer_target_f: float, ramp_rate_f_per_h: float = 0.0
 ) -> PlantState:
     """Convenience entry point for the chart's forward-projection preview
-    (projection.py, this package's sibling module): makes its own cascade decision (no relay-
-    timing protection -- see advance_physics's docstring) and then
-    integrates. chamber_target_for() always returns a real target now,
-    never None (see its own docstring -- idle governs gently at the beer
-    target rather than de-energizing), so there's no ambient-fallback
-    branch to pick between here anymore.
+    (projection.py, this package's sibling module): runs the same PI
+    cascade the real control loop does (no relay-timing protection --
+    see advance_physics's docstring) and then integrates.
+
+    Updates state.beer_error_integral via contracts.cascade.
+    update_beer_error_integral() BEFORE computing this step's target, same
+    order control_loop.py uses -- so the projection's own integral
+    genuinely accumulates over projected time, not just applies a fixed
+    formula independently at each future point (which would understate
+    how a sustained disturbance's correction actually grows over the
+    preview horizon). Deliberately starts from 0.0 on the very first
+    PlantState (see that field's own comment) rather than the real,
+    live ControlState.beer_error_integral the daemon is actually
+    carrying right now -- queries.py's _compute_projection() is read-SQL-
+    only by its own module docstring and has no access to that in-memory
+    value, which isn't persisted (see daemon/control_state.py's own
+    disclosed-limitations docstring). Disclosed, accepted simplification:
+    the projected Setpoint line can show a small discontinuity right at
+    the real/projected boundary if the real integral wasn't already near
+    zero, rather than a fix worth a new persisted column for a chart
+    preview.
 
     ramp_rate_f_per_h passes through to chamber_target_for's feedforward --
     the caller supplies contracts.stages.target_rate_f_per_h(stage, t) so
     a projected cold-crash-style ramp gets the same more-aggressive chamber
-    push the real control loop now applies, not a stale fixed-clamp preview
-    of a lag the daemon no longer actually produces."""
-    mode = beer_relay_demand(state.beer_temp_f, beer_target_f, state.mode)
-    drive_to = chamber_target_for(mode, beer_target_f, ramp_rate_f_per_h)
-    return advance_physics(state, p, dt_h, drive_to, mode)
+    push the real control loop now applies.
+
+    `mode` on the returned state is cosmetic only here (see PlantState's
+    own comment) -- nothing downstream of this offline path reads it --
+    derived from which side of beer_target_f drive_to landed on, purely
+    so it's still a sensible human-readable label rather than something
+    arbitrary."""
+    new_integral = update_beer_error_integral(state.beer_temp_f, beer_target_f, state.beer_error_integral, dt_h)
+    drive_to = chamber_target_for(state.beer_temp_f, beer_target_f, new_integral, ramp_rate_f_per_h)
+    mode = "cool" if drive_to < beer_target_f else "heat" if drive_to > beer_target_f else "idle"
+    new_state = advance_physics(state, p, dt_h, drive_to, mode)
+    return replace(new_state, beer_error_integral=new_integral)
 
 
 # --- Independent per-role stepping, for the live SimPlantEngine ---------

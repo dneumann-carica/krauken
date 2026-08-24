@@ -31,10 +31,13 @@ def thermostat_demand(current_temp_f: float, target_temp_f: float, deadband_f: f
     last in the Hardware Supervisor's precedence chain -- hysteresis/
     deadband thermostat around the commanded chamber target
     (krauken-software-design.md Section 7), one tier below
-    contracts/cascade.py's beer_relay_demand() (same hysteresis shape, one
-    level up: that one decides what the CHAMBER should be commanded to do
-    based on BEER temp; this one decides what the RELAY should physically
-    do based on CHAMBER temp actually reaching that command).
+    contracts/cascade.py's chamber_target_for() (a continuous PI
+    controller now, not a hysteresis one -- see that module's own
+    docstring; this function is still exactly the discrete hysteresis
+    shape at the tier below it: that one decides what chamber TEMPERATURE
+    to command based on BEER temp error; this one decides what the RELAY
+    should physically do based on CHAMBER temp actually reaching that
+    commanded temperature).
 
     Fires cool/heat once the reading is `deadband_f` past the target in
     either direction; releases the moment it's back within the deadband --

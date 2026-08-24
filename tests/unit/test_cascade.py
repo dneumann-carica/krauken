@@ -1,76 +1,107 @@
 from __future__ import annotations
 
-from krauken.contracts.cascade import beer_relay_demand, chamber_target_for
+from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral
+
+# Gain values as of this writing (contracts/control_constants.py):
+# BEER_KP_F_PER_F=2.0, BEER_KI_F_PER_F_H=2.0, INTEGRAL_MAX_F_H=3.0,
+# RAMP_FEEDFORWARD_COUPLING_PER_H=0.05, CHAMBER_TARGET_MIN_F=28.0,
+# CHAMBER_TARGET_MAX_F=90.0 -- expected values below are computed directly
+# from these, spelled out in each test's own comment, deliberately NOT
+# imported symbolically: a test that recomputes its own expectation from
+# whatever the live constant happens to be can't catch a real regression
+# in the gain itself.
 
 
-def test_fires_cool_once_beer_exceeds_trigger_band_above_target():
-    assert beer_relay_demand(68.5, 68.0, "idle") == "cool"
+def test_holds_exactly_at_beer_target_with_zero_error_and_zero_integral():
+    assert chamber_target_for(68.0, 68.0, 0.0) == 68.0
 
 
-def test_fires_heat_once_beer_exceeds_trigger_band_below_target():
-    assert beer_relay_demand(67.5, 68.0, "idle") == "heat"
+def test_proportional_term_pushes_chamber_above_target_when_beer_runs_cold():
+    # error = 68.0 - 67.0 = 1.0 -> +2.0*1.0
+    assert chamber_target_for(67.0, 68.0, 0.0) == 70.0
 
 
-def test_stays_idle_within_trigger_band():
-    assert beer_relay_demand(68.3, 68.0, "idle") == "idle"
+def test_proportional_term_pushes_chamber_below_target_when_beer_runs_warm():
+    # error = 68.0 - 69.0 = -1.0 -> +2.0*(-1.0)
+    assert chamber_target_for(69.0, 68.0, 0.0) == 66.0
 
 
-def test_cooling_releases_only_once_beer_crosses_back_through_target():
-    assert beer_relay_demand(68.1, 68.0, "cool") == "cool"  # still above target -- keep cooling
-    assert beer_relay_demand(68.0, 68.0, "cool") == "idle"  # crossed through -- release
+def test_integral_term_alone_offsets_the_chamber_with_zero_instantaneous_error():
+    # Beer sitting exactly AT target right now, but with an accumulated
+    # history of having run warm (a negative integral) -- the correction
+    # persists even though there's nothing to react to this instant,
+    # exactly the property a pure P (or the old bang-bang) design lacked.
+    assert chamber_target_for(68.0, 68.0, -1.5) == 65.0  # +2.0*(-1.5)
 
 
-def test_heating_releases_only_once_beer_crosses_back_through_target():
-    assert beer_relay_demand(67.9, 68.0, "heat") == "heat"  # still below target -- keep heating
-    assert beer_relay_demand(68.0, 68.0, "heat") == "idle"  # crossed through -- release
+def test_update_beer_error_integral_accumulates_error_over_elapsed_time():
+    integral = update_beer_error_integral(69.0, 68.0, 0.0, dt_h=0.5)  # error=-1.0
+    assert integral == -0.5
+    integral = update_beer_error_integral(69.0, 68.0, integral, dt_h=0.5)
+    assert integral == -1.0
 
 
-def test_chamber_target_clamps_cool_below_beer_target():
-    assert chamber_target_for("cool", 68.0) == 63.0
+def test_update_beer_error_integral_anti_windup_clamps_the_positive_side():
+    # 2.9 + (68.0-67.0)*1.0 = 3.9, clamped to the 3.0 ceiling.
+    assert update_beer_error_integral(67.0, 68.0, 2.9, dt_h=1.0) == 3.0
 
 
-def test_chamber_target_clamps_heat_above_beer_target():
-    assert chamber_target_for("heat", 68.0) == 72.0
+def test_update_beer_error_integral_anti_windup_clamps_the_negative_side():
+    # -2.9 + (68.0-69.0)*1.0 = -3.9, clamped to the -3.0 floor.
+    assert update_beer_error_integral(69.0, 68.0, -2.9, dt_h=1.0) == -3.0
 
 
-def test_chamber_target_holds_at_beer_target_when_idle():
-    # Not None -- idle no longer means "no target, de-energize." It means
-    # "govern gently right at the beer's own target," not the aggressive
-    # +/-CLAMP_F overshoot cool/heat use. See chamber_target_for's
-    # docstring for why de-energizing produced a long-idle-then-spike
-    # pattern in a real run.
-    assert chamber_target_for("idle", 68.0) == 68.0
+def test_ramp_feedforward_leaves_a_held_target_unchanged():
+    # rate 0 (the default, and what a "constant" stage always has) -- no
+    # feedforward contribution, same as a plain PI response.
+    assert chamber_target_for(68.0, 68.0, 0.0, ramp_rate_f_per_h=0.0) == 68.0
 
 
-def test_chamber_target_ramp_feedforward_leaves_a_held_target_unchanged():
-    # rate 0 (the default, and what a "constant" stage always has) -- same
-    # plain clamp as before, no behavior change for the common case.
-    assert chamber_target_for("cool", 68.0, ramp_rate_f_per_h=0.0) == 63.0
-    assert chamber_target_for("heat", 68.0, ramp_rate_f_per_h=0.0) == 72.0
+def test_ramp_feedforward_pushes_the_chamber_further_below_a_downward_ramp():
+    # A cold-crash-style ramp (68->38F over 96h -> -0.3125F/h) needs the
+    # chamber running continuously below the MOVING target just to keep
+    # the beer tracking it, on top of whatever the PI terms are doing
+    # about present error (here, none -- beer sitting exactly at target,
+    # zero integral). -0.3125 / 0.05 = -6.25.
+    assert chamber_target_for(68.0, 68.0, 0.0, ramp_rate_f_per_h=-0.3125) == 68.0 - 6.25
 
 
-def test_chamber_target_ramp_feedforward_widens_the_clamp_for_a_fast_ramp():
-    # A cold-crash-style ramp (68->38F over 96h -> -0.3125F/h) needs more
-    # than the plain 5F clamp to keep the beer from permanently lagging the
-    # moving target -- see the module docstring's derivation. -0.3125/0.05
-    # = 6.25, so the chamber should be pushed 6.25F below the target here,
-    # not just 5F.
-    assert chamber_target_for("cool", 68.0, ramp_rate_f_per_h=-0.3125) == 68.0 - 6.25
+def test_ramp_feedforward_is_symmetric_for_an_upward_ramp():
+    assert chamber_target_for(68.0, 68.0, 0.0, ramp_rate_f_per_h=0.3125) == 68.0 + 6.25
 
 
-def test_chamber_target_ramp_feedforward_never_narrows_a_slow_ramps_clamp():
-    # A slow ramp (rate/coupling < the plain clamp) shouldn't get LESS
-    # aggressive than today's plain-clamp behavior -- max(), not replace.
-    assert chamber_target_for("cool", 68.0, ramp_rate_f_per_h=-0.01) == 63.0
+def test_ramp_feedforward_stacks_additively_with_the_proportional_term():
+    # error=+1.0 (beer running cold) -> +2.0, PLUS the same -6.25 ramp
+    # feedforward as above -- additive, not a max()/replace() choice like
+    # the old fixed-clamp design needed.
+    assert chamber_target_for(67.0, 68.0, 0.0, ramp_rate_f_per_h=-0.3125) == 68.0 + 2.0 - 6.25
 
 
-def test_chamber_target_ramp_feedforward_is_symmetric_for_heating():
-    assert chamber_target_for("heat", 68.0, ramp_rate_f_per_h=0.3125) == 68.0 + 6.25
+def test_clamps_to_the_absolute_safety_envelope():
+    # An extreme combination -- max negative integral plus a huge,
+    # badly-authored ramp -- must never ask real equipment for an absurd
+    # target: 40.0 + 2.0*0 + 2.0*(-3.0) + (-5.0/0.05) = 40 - 6 - 100 = -66,
+    # clamped to the 28.0 floor.
+    assert chamber_target_for(40.0, 40.0, -3.0, ramp_rate_f_per_h=-5.0) == 28.0
 
 
-def test_chamber_target_clamps_to_the_absolute_safety_envelope():
-    # An extreme, badly-authored ramp (e.g. a huge drop over very few
-    # hours) shouldn't ask real equipment for an absurd target -- the
-    # feedforward is bounded by the same absolute envelope the rest of the
-    # control stack assumes.
-    assert chamber_target_for("cool", 40.0, ramp_rate_f_per_h=-5.0) == 28.0
+def test_sustained_one_directional_error_drives_a_growing_correction_via_the_integral():
+    # The property that motivated replacing the old bang-bang cascade: a
+    # disturbance that never lets the error clear on its own (e.g. a
+    # sustained fermentation exotherm) should get a progressively
+    # stronger correction over time, not repeatedly bang-bang between a
+    # fixed clamp and a full release back to zero -- see cascade.py's own
+    # module docstring. A small, persistent residual warmth (0.3F) that
+    # a modest proportional gain alone can't fully cancel.
+    beer_target, beer_temp = 68.0, 68.3
+    integral = 0.0
+    targets = []
+    for _ in range(10):  # 10 * 0.5h = 5 simulated hours, well short of the anti-windup clamp
+        integral = update_beer_error_integral(beer_temp, beer_target, integral, dt_h=0.5)
+        targets.append(chamber_target_for(beer_temp, beer_target, integral))
+
+    assert all(earlier > later for earlier, later in zip(targets, targets[1:])), (
+        "each successive target should be strictly more aggressive (lower) than the last"
+    )
+    p_only = beer_target + 2.0 * (beer_target - beer_temp)  # what pure P alone would produce: 67.4
+    assert targets[-1] < p_only - 1.0, "the integral should meaningfully out-correct P alone given enough time"
