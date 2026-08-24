@@ -344,7 +344,7 @@ export function GettingStartedView() {
             )}
             <Card padding="sm">
               <MetricStat
-                value={fmtTemp(scrubbed.target)}
+                value={fmtTemp(scrubbed.chamberTarget)}
                 label="Setpoint"
                 sublabel={`${displayStage?.name ?? ""} · ±0.5°F`}
                 accent="gray"

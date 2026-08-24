@@ -269,7 +269,7 @@ async def _control_tick_locked(ctx: Any) -> None:
             chamber_temp_f=candidate.chamber_temp_f, gravity=candidate.gravity, chamber_mode=candidate.chamber_mode,
             effective_target_f=beer_target, target_source=target_source, beer_temp_ok=health.beer_temp_ok,
             chamber_temp_ok=health.chamber_temp_ok, gravity_ok=health.gravity_ok, stage_id=current["id"],
-            write_reason=write_reason,
+            write_reason=write_reason, chamber_target_f=chamber_target,
         )
         ctx.control_state.last_sample = candidate
 
@@ -285,6 +285,7 @@ async def _control_tick_locked(ctx: Any) -> None:
             "gravity": candidate.gravity,
             "chamber_mode": candidate.chamber_mode,
             "effective_target_f": beer_target,
+            "chamber_target_f": chamber_target,
             "target_source": target_source,
             "beer_temp_ok": health.beer_temp_ok,
             "chamber_temp_ok": health.chamber_temp_ok,

@@ -241,7 +241,7 @@ def fermentation_series(
     # Same reused-id guard as latest_sample() above -- excludes any sample
     # stamped before this fermentation's own started_at.
     rows = conn.execute(
-        "SELECT ts, beer_temp_f, chamber_temp_f, gravity, effective_target_f, chamber_mode, "
+        "SELECT ts, beer_temp_f, chamber_temp_f, gravity, effective_target_f, chamber_target_f, chamber_mode, "
         "beer_temp_ok, target_source FROM samples WHERE fermentation_id = ? "
         "AND ts >= (SELECT started_at FROM fermentations WHERE id = ?) ORDER BY ts",
         (fermentation_id, fermentation_id),
@@ -250,7 +250,8 @@ def fermentation_series(
     if not rows:
         return {
             "fermentation_id": fermentation_id, "point_count": 0, "ts": [], "beer_temp_f": [],
-            "chamber_temp_f": [], "gravity": [], "effective_target_f": [], "chamber_mode": [],
+            "chamber_temp_f": [], "gravity": [], "effective_target_f": [], "chamber_target_f": [],
+            "chamber_mode": [],
             "beer_temp_ok": [], "target_source": [], "projection": _compute_projection(conn, fermentation_id),
             "duty": {"window_hours": 0.0, "cool_pct": 0.0, "heat_pct": 0.0, "idle_pct": 0.0},
             "gaps": [],
@@ -280,6 +281,7 @@ def fermentation_series(
         "chamber_temp_f": [r["chamber_temp_f"] for r in rows],
         "gravity": [r["gravity"] for r in rows],
         "effective_target_f": [r["effective_target_f"] for r in rows],
+        "chamber_target_f": [r["chamber_target_f"] for r in rows],
         "chamber_mode": [r["chamber_mode"] for r in rows],
         "beer_temp_ok": [bool(r["beer_temp_ok"]) for r in rows],
         "target_source": [r["target_source"] for r in rows],

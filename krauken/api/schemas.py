@@ -335,6 +335,7 @@ class ProjectionResponse(BaseModel):
     chamber_temp_f: list[float | None]
     gravity: list[float | None]
     effective_target_f: list[float | None]
+    chamber_target_f: list[float | None]
 
 
 class SeriesResponse(BaseModel):
@@ -345,6 +346,7 @@ class SeriesResponse(BaseModel):
     chamber_temp_f: list[float | None]
     gravity: list[float | None]
     effective_target_f: list[float | None]
+    chamber_target_f: list[float | None]
     chamber_mode: list[str]
     beer_temp_ok: list[bool]
     target_source: list[str]

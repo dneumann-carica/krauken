@@ -82,6 +82,27 @@ def test_elapsed_time_into_the_current_stage_shortens_the_remaining_horizon():
     assert _horizon_h(stage, elapsed_h_into_current=4.0) == 6.0
 
 
+def test_projected_points_carry_a_distinct_chamber_target_f():
+    # Before this, project_forward()'s points had no chamber-side value at
+    # all -- plant.step() computed one internally (chamber_target_for())
+    # purely to drive its own physics, then discarded it. Beer starts well
+    # above its held target, so the cascade should be actively cooling --
+    # chamber_target_f must show up distinctly below effective_target_f
+    # (the beer target), not silently equal to or absent from it.
+    stage = {
+        "seq": 1, "id": 1, "temp_mode": "constant", "temp_f": 66.0,
+        "end_mode": "time", "end_hours": 10.0, "max_hours": None, "advance_mode": "auto",
+    }
+    points = project_forward(
+        beer_temp_f=74.0, chamber_temp_f=74.0, gravity=1.050,
+        stages=[stage], current_stage_seq=1, elapsed_h_into_current=0.0, step_h=_STEP_H,
+    )
+    first = points[0]
+    assert first["effective_target_f"] == 66.0
+    assert first["chamber_target_f"] is not None
+    assert first["chamber_target_f"] < first["effective_target_f"]
+
+
 def _two_stage_points(current_advance_mode: str, elapsed_h_into_current: float = 0.0) -> list[dict]:
     current = {
         "seq": 1, "id": 1, "temp_mode": "constant", "temp_f": 66.0,

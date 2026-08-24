@@ -223,6 +223,7 @@ export interface ProjectionResponse {
   chamber_temp_f: (number | null)[];
   gravity: (number | null)[];
   effective_target_f: (number | null)[];
+  chamber_target_f: (number | null)[];
 }
 
 export interface SeriesResponse {
@@ -233,6 +234,7 @@ export interface SeriesResponse {
   chamber_temp_f: (number | null)[];
   gravity: (number | null)[];
   effective_target_f: (number | null)[];
+  chamber_target_f: (number | null)[];
   chamber_mode: string[];
   beer_temp_ok: boolean[];
   target_source: string[];

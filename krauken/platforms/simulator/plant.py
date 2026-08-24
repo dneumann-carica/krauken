@@ -116,6 +116,15 @@ class PlantState:
     chamber_temp_f: float
     gravity: float
     mode: str  # cool | heat | idle
+    # The chamber temperature this step was actually driven toward -- None
+    # on an initial/starting state (nothing has been driven toward yet).
+    # Set by advance_physics() from its own drive_to argument, so this is
+    # correct for BOTH of its callers: step()'s own chamber_target_for()
+    # value (the offline chart-projection path this was added for -- see
+    # projection.py) and the live SimPlant driver's protection-adjusted
+    # value (platforms/simulator/live.py) -- both are equally "the target
+    # this step drove toward," just computed differently upstream.
+    chamber_target_f: float | None = None
 
 
 def ambient_f(p: AmbientParams, t_h: float, total_h: float) -> float:
@@ -200,7 +209,10 @@ def advance_physics(state: PlantState, p: PlantParams, dt_h: float, drive_to: fl
     )
     new_gravity = gravity_at(p.gravity, state.t_h + dt_h)
 
-    return PlantState(t_h=state.t_h + dt_h, beer_temp_f=new_beer, chamber_temp_f=new_chamber, gravity=new_gravity, mode=mode)
+    return PlantState(
+        t_h=state.t_h + dt_h, beer_temp_f=new_beer, chamber_temp_f=new_chamber, gravity=new_gravity, mode=mode,
+        chamber_target_f=drive_to,
+    )
 
 
 def step(

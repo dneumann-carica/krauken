@@ -47,6 +47,7 @@ function series(overrides: Partial<SeriesResponse> = {}): SeriesResponse {
     chamber_temp_f: [64, 64.5, 65.5, 65.8],
     gravity: [1.05, null, null, 1.012],
     effective_target_f: [66, 66, 66, 66],
+    chamber_target_f: [63, 62, 62, 66],
     chamber_mode: ["idle", "cool", "cool", "idle"],
     beer_temp_ok: [true, true, true, false],
     target_source: ["profile", "profile", "profile", "profile"],
@@ -82,7 +83,7 @@ describe("FermentationChart", () => {
   it("renders nothing but the legend for an empty series without crashing", () => {
     render(
       <FermentationChart
-        series={series({ point_count: 0, ts: [], beer_temp_f: [], chamber_temp_f: [], gravity: [], effective_target_f: [], chamber_mode: [], beer_temp_ok: [], target_source: [] })}
+        series={series({ point_count: 0, ts: [], beer_temp_f: [], chamber_temp_f: [], gravity: [], effective_target_f: [], chamber_target_f: [], chamber_mode: [], beer_temp_ok: [], target_source: [] })}
         stages={[]}
       />,
     );
@@ -99,6 +100,7 @@ describe("FermentationChart", () => {
             chamber_temp_f: [64.0, 63.0],
             gravity: [1.012, 1.012],
             effective_target_f: [66, 66],
+            chamber_target_f: [62, 62],
           },
         })}
         stages={[stage({})]}
@@ -136,6 +138,32 @@ describe("FermentationChart", () => {
     const gapPaths = Array.from(container.getElementsByClassName(styles.gapPath));
     expect(gapPaths).toHaveLength(4);
     expect(gapPaths.some((p) => /^M[\d.]+,[\d.]+ L[\d.]+,[\d.]+$/.test(p.getAttribute("d") ?? ""))).toBe(true);
+  });
+
+  it("draws the Setpoint line from chamber_target_f, not the beer target (effective_target_f)", () => {
+    // Before this, the Setpoint line plotted effective_target_f (the beer
+    // target) -- the same value already shown as the Beer temp tile's
+    // "Target" sublabel, just under a different label. Holding
+    // effective_target_f fixed while varying only chamber_target_f must
+    // still change the rendered line -- proof the line is wired to the
+    // right field, not a stale/unrelated one that happens to look right in
+    // the default fixture above.
+    const targetPathD = (container: HTMLElement) =>
+      container.querySelector("path[stroke='var(--kr-plan)'][stroke-dasharray='4 3']")?.getAttribute("d");
+
+    const { container: distinct } = render(
+      <FermentationChart
+        series={series({ chamber_target_f: [60, 60, 60, 60], effective_target_f: [66, 66, 66, 66] })}
+        stages={[stage({})]}
+      />,
+    );
+    const { container: matchingBeerTarget } = render(
+      <FermentationChart
+        series={series({ chamber_target_f: [66, 66, 66, 66], effective_target_f: [66, 66, 66, 66] })}
+        stages={[stage({})]}
+      />,
+    );
+    expect(targetPathD(distinct)).not.toEqual(targetPathD(matchingBeerTarget));
   });
 
   it("draws no gap-bridge path (empty d) when the series has no reported gaps", () => {

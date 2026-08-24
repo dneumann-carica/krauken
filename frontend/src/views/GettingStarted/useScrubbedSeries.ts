@@ -14,6 +14,12 @@ export interface ScrubbedSeries {
   chamber: number | null;
   gravity: number | null;
   target: number | null;
+  /** The real chamber target the control loop is driving toward
+   * (chamber_target_f) -- distinct from `target` above (effective_target_f,
+   * the beer target). The Setpoint tile/chart should read THIS, not
+   * `target` -- `target` stays correct as-is for the Beer temp tile's own
+   * "Target X" sublabel. */
+  chamberTarget: number | null;
   mode: string;
   /** Whether this batch has EVER reported a gravity reading -- independent
    * of the current scrub position, unlike `gravity` above. Whether the
@@ -42,6 +48,11 @@ export function useScrubbedSeries(series: SeriesResponse | undefined, scrubIndex
     chamber: scrubbing ? series!.chamber_temp_f[scrubIndex!] : series ? lastDefined(series.chamber_temp_f) : null,
     gravity: scrubbing ? series!.gravity[scrubIndex!] : lastGravity,
     target: scrubbing ? series!.effective_target_f[scrubIndex!] : series ? lastDefined(series.effective_target_f) : null,
+    chamberTarget: scrubbing
+      ? series!.chamber_target_f[scrubIndex!]
+      : series
+        ? lastDefined(series.chamber_target_f)
+        : null,
     mode: scrubbing ? series!.chamber_mode[scrubIndex!] : lastMode,
     hasGravity: lastGravity !== null,
   };

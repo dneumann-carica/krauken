@@ -23,7 +23,17 @@ firmware, copied rather than guessed. `j`'s reply is not one line but a
 variable-length burst (0+ D:/T: lines depending on which keys were sent,
 then always S: then always C: last) -- see set_fridge_target()'s
 _drain_until_locked() call for why that whole burst gets read and
-discarded before the write returns.
+discarded before the write returns. Unlike the IPC-backed drivers
+(platforms/ipc_driver.py's module docstring: resend every tick
+regardless of change, cheap and self-healing over an in-process/socket
+call), a `j` write here is a real serial round-trip plus a burst-drain,
+so set_fridge_target() skips it when unchanged from the Arduino's own
+last-reported FridgeSet -- see that method's own docstring and
+BrewPiConnection._last_reported_fridge_set_f for why comparing against a
+real read (not a locally-cached "what we last sent") is what keeps this
+safe across a reset_brewpi (a wizard safety-net action deliberately
+allowed to run even during an active fermentation, per
+contracts/interfaces.py's requires_no_active_fermentation handling).
 
 Device-configuration commands (verified 2026-08-15 against the same real
 rig, plus reading brewpi-remix/brewpi-firmware-rmx's actual firmware
@@ -205,6 +215,13 @@ QUERY_TIMEOUT_S = 15.0
 # the real mechanism is confirmed.
 _LOG_FRAGMENT_RE = re.compile(r"D:\{[^{}]*\}")
 
+# Sentinel for BrewPiConnection._last_reported_fridge_set_f's initial value --
+# see that field's own comment. Deliberately not None: a real FridgeSet can
+# legitimately BE None (mode "o"/off reports FridgeSet:null), so a sentinel
+# that can never equal a real float or None is needed to distinguish "we
+# have genuinely never read one yet" from "we read one and it was null."
+_UNKNOWN_FRIDGE_SET: Any = object()
+
 # State codes from the classic BrewPi Arduino firmware (brewpi-firmware's
 # TemperatureControl.h) -- only naming what read_chamber()'s ChamberMode
 # mapping actually consumes, not the full enum.
@@ -251,6 +268,24 @@ class BrewPiConnection:
         # instance-local to the driver survives between calls; only state
         # on this shared connection object does.
         self.commanded_target_f: float | None = None
+        # What the Arduino ITSELF most recently reported as its own
+        # FridgeSet, from a real T: response's "FridgeSet" field -- NOT a
+        # locally-tracked assumption about what set_fridge_target() last
+        # sent (that's commanded_target_f above, which keeps its own
+        # "last requested, for display, regardless of outcome" meaning
+        # unchanged). set_fridge_target() dedupes against THIS field, not
+        # commanded_target_f, specifically so the dedupe stays correct
+        # across any reset/reconnect with no separate invalidation logic:
+        # whatever the Arduino's real FridgeSet becomes after a reset (a
+        # real AVR watchdog reset via reset_and_reconnect(), or any fresh
+        # port open, which DTR-resets it), the very next read_temps() call
+        # reports it here, and that's what the next set_fridge_target()
+        # call compares against -- see connection.py's own module docstring
+        # and set_fridge_target()'s docstring for the full reasoning.
+        # Starts at _UNKNOWN_FRIDGE_SET (not None) so the very first
+        # set_fridge_target() call -- even set_fridge_target(None) -- always
+        # writes rather than coincidentally matching an unset None.
+        self._last_reported_fridge_set_f: Any = _UNKNOWN_FRIDGE_SET
         self._lock = asyncio.Lock()
         self._connect_task: asyncio.Task | None = None
 
@@ -301,9 +336,16 @@ class BrewPiConnection:
         convention every other driver in this codebase follows for
         "hardware exists but isn't answering right now" (PlatformUnavailable
         is reserved for "the platform can't be used at all", e.g. no
-        adapter, no dependency -- not a single missed poll)."""
+        adapter, no dependency -- not a single missed poll). Also records
+        the response's "FridgeSet" into _last_reported_fridge_set_f (see
+        that field's own comment) -- set_fridge_target()'s dedupe is
+        grounded in this, so every successful read keeps it fresh whether
+        or not the caller cares about fridge_set_f on the returned
+        BrewPiReading itself."""
         async with self._lock:
             data = await self._query_locked("t", "T")
+            if data is not None:
+                self._last_reported_fridge_set_f = data.get("FridgeSet")
         if data is None:
             return None
         return BrewPiReading(
@@ -333,11 +375,32 @@ class BrewPiConnection:
         drain past it and could mistake a stale line for its own fresh
         answer. Still fire-and-forget in the sense that nothing here
         parses or uses that reply -- draining it is purely so it can't
-        contaminate a later read, not because this method needs it."""
+        contaminate a later read, not because this method needs it.
+
+        Skips the write entirely (no serial round-trip, no burst to
+        drain) when temp_f already matches _last_reported_fridge_set_f --
+        confirmed live that the daemon's control loop calls this every
+        ~30s tick even when the target hasn't moved (a held/constant
+        fermentation stage), which used to mean a real j write plus a
+        full burst-drain every tick for nothing. Deliberately dedupes
+        against _last_reported_fridge_set_f (a real read), never against
+        commanded_target_f (what we last asked for) -- see that field's
+        own comment for why: this makes the dedupe self-healing across
+        any reset without separate invalidation bookkeeping, since a
+        reset changes what the Arduino reports on the next read_temps()
+        before it changes what we'd next command. This is why the dedupe
+        is only effective for a caller that reads before it writes every
+        cycle, true of control_loop.py's real per-tick pattern (the
+        actual target of this) -- a caller that writes repeatedly with no
+        interleaved read (e.g. device_config.py's identify_relay_pin
+        sweep) simply keeps writing every time, unchanged, which is safe,
+        just not optimized."""
         body = 'j{mode:"o"}' if temp_f is None else f'j{{mode:"f", fridgeSet:{temp_f}}}'
         self.commanded_target_f = temp_f
         async with self._lock:
             if self._serial is None:
+                return
+            if temp_f == self._last_reported_fridge_set_f:
                 return
             try:
                 await self._write_traced(f"{body}\n".encode("ascii"))

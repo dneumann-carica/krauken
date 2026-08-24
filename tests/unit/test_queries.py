@@ -48,11 +48,15 @@ def _make_active_fermentation(conn, *, started_at: str) -> tuple[int, int]:
     return fermentation_id, stage_id
 
 
-def _sample(conn, *, fermentation_id: int, ts: str, stage_id: int, beer=68.0, chamber=68.0, gravity=1.050):
+def _sample(
+    conn, *, fermentation_id: int, ts: str, stage_id: int, beer=68.0, chamber=68.0, gravity=1.050,
+    chamber_target_f=None,
+):
     writes.insert_sample(
         conn, fermentation_id=fermentation_id, ts=ts, beer_temp_f=beer, chamber_temp_f=chamber, gravity=gravity,
         chamber_mode="idle", effective_target_f=66.0, target_source="profile", beer_temp_ok=True,
         chamber_temp_ok=True, gravity_ok=True, stage_id=stage_id, write_reason="change",
+        chamber_target_f=chamber_target_f,
     )
 
 
@@ -78,6 +82,33 @@ def test_series_excludes_samples_from_before_started_at(conn):
     assert series["point_count"] == 2
     assert series["ts"] == ["2026-08-05T01:00:00+00:00", "2026-08-05T02:00:00+00:00"]
     assert series["gravity"] == [1.048, 1.047]
+
+
+def test_series_carries_chamber_target_f_separately_from_the_beer_target(conn):
+    # The dashboard's "Setpoint" tile/chart used to show effective_target_f
+    # (the beer target) a second time under a different label -- there was
+    # no distinct chamber-side value anywhere past control_loop.py. This
+    # confirms the new column round-trips through insert_sample() and
+    # fermentation_series(), and that it can genuinely differ from
+    # effective_target_f (a chamber actively cooling toward a held beer
+    # target would show a lower chamber_target_f, not the same number).
+    fermentation_id, stage_id = _make_active_fermentation(conn, started_at="2026-08-05T00:00:00+00:00")
+    _sample(
+        conn, fermentation_id=fermentation_id, ts="2026-08-05T01:00:00+00:00", stage_id=stage_id,
+        chamber_target_f=61.0,
+    )
+
+    series = queries.fermentation_series(conn, fermentation_id)
+    assert series["chamber_target_f"] == [61.0]
+    assert series["effective_target_f"] == [66.0]  # STAGE's held beer target -- genuinely different
+
+
+def test_series_chamber_target_f_defaults_to_null_when_not_supplied(conn):
+    fermentation_id, stage_id = _make_active_fermentation(conn, started_at="2026-08-05T00:00:00+00:00")
+    _sample(conn, fermentation_id=fermentation_id, ts="2026-08-05T01:00:00+00:00", stage_id=stage_id)
+
+    series = queries.fermentation_series(conn, fermentation_id)
+    assert series["chamber_target_f"] == [None]
 
 
 def test_projection_anchors_to_the_last_sample_ts_not_wall_clock(conn):

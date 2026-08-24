@@ -297,10 +297,11 @@ def _copy_into(scratch_db: Path, target_db_path: Path, fermentation_id: int) -> 
             dst.execute(
                 "INSERT INTO samples (id, fermentation_id, ts, beer_temp_f, chamber_temp_f, gravity, chamber_mode, "
                 "effective_target_f, target_source, beer_temp_ok, chamber_temp_ok, gravity_ok, stage_id, "
-                "write_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "write_reason, chamber_target_f) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (next_sample_id, new_fermentation_id, shifted(s["ts"]), s["beer_temp_f"], s["chamber_temp_f"],
                  s["gravity"], s["chamber_mode"], s["effective_target_f"], s["target_source"], s["beer_temp_ok"],
-                 s["chamber_temp_ok"], s["gravity_ok"], stage_id_map.get(s["stage_id"]), s["write_reason"]),
+                 s["chamber_temp_ok"], s["gravity_ok"], stage_id_map.get(s["stage_id"]), s["write_reason"],
+                 s["chamber_target_f"]),
             )
             next_sample_id += 1
         for e in events:

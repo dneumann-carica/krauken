@@ -87,9 +87,9 @@ def project_forward(
     step_h: float = PROJECTION_STEP_H,
 ) -> list[dict[str, Any]]:
     """Returns points {t_h_from_now, beer_temp_f, chamber_temp_f, gravity,
-    effective_target_f} stepping forward from "now" through the end of the
-    last stage in `stages` (the current one, plus every pending one after
-    it)."""
+    effective_target_f, chamber_target_f} stepping forward from "now"
+    through the end of the last stage in `stages` (the current one, plus
+    every pending one after it)."""
     params = plant.PlantParams()
     state = plant.PlantState(t_h=0.0, beer_temp_f=beer_temp_f, chamber_temp_f=chamber_temp_f, gravity=gravity or 1.0, mode="idle")
 
@@ -122,6 +122,7 @@ def project_forward(
                     "chamber_temp_f": state.chamber_temp_f,
                     "gravity": gravity,  # held flat -- see module docstring
                     "effective_target_f": target,
+                    "chamber_target_f": state.chamber_target_f,
                 }
             )
     return points
@@ -152,4 +153,5 @@ def project_forward_response(
         "chamber_temp_f": [p["chamber_temp_f"] for p in points],
         "gravity": [p["gravity"] for p in points],
         "effective_target_f": [p["effective_target_f"] for p in points],
+        "chamber_target_f": [p["chamber_target_f"] for p in points],
     }

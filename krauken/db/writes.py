@@ -202,15 +202,16 @@ def insert_sample(
     conn: sqlite3.Connection, *, fermentation_id: int, ts: str, beer_temp_f: float | None,
     chamber_temp_f: float | None, gravity: float | None, chamber_mode: str, effective_target_f: float | None,
     target_source: str, beer_temp_ok: bool, chamber_temp_ok: bool, gravity_ok: bool | None, stage_id: int | None,
-    write_reason: str,
+    write_reason: str, chamber_target_f: float | None = None,
 ) -> None:
     conn.execute(
         "INSERT INTO samples (fermentation_id, ts, beer_temp_f, chamber_temp_f, gravity, chamber_mode, "
-        "effective_target_f, target_source, beer_temp_ok, chamber_temp_ok, gravity_ok, stage_id, write_reason) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "effective_target_f, target_source, beer_temp_ok, chamber_temp_ok, gravity_ok, stage_id, write_reason, "
+        "chamber_target_f) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             fermentation_id, ts, beer_temp_f, chamber_temp_f, gravity, chamber_mode, effective_target_f,
             target_source, int(beer_temp_ok), int(chamber_temp_ok), None if gravity_ok is None else int(gravity_ok),
-            stage_id, write_reason,
+            stage_id, write_reason, chamber_target_f,
         ),
     )

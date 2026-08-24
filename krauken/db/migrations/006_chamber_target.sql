@@ -1,0 +1,12 @@
+-- Persists the real chamber target the control loop is actually driving
+-- toward (chamber_target_for()'s output in control_loop.py), separate from
+-- effective_target_f (the beer target). Before this, the dashboard's
+-- "Setpoint" tile and chart both showed the beer target a second time under
+-- a different label -- there was no distinct chamber-side value anywhere
+-- past control_loop.py, even though it's computed every tick and simply
+-- discarded after being handed to the chamber driver.
+--
+-- Plain ADD COLUMN, nullable (matches chamber_temp_f/gravity's existing
+-- nullable convention for this table) -- no CHECK constraint involves it,
+-- no rebuild-and-swap needed.
+ALTER TABLE samples ADD COLUMN chamber_target_f REAL;

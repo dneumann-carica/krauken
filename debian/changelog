@@ -1,3 +1,27 @@
+krauken (0.1.23) stable; urgency=medium
+
+  * Dedupe redundant BrewPi `j` writes: set_fridge_target() used to write
+    and burst-drain a real serial `j{...}` command every ~30s control-loop
+    tick even when the target hadn't changed (a held/constant fermentation
+    stage keeps it bit-identical tick to tick). It now skips the write
+    entirely when the requested temp already matches the Arduino's own
+    most-recently-reported FridgeSet (from a real `T:` response) --
+    grounded in a live read rather than a locally-cached assumption, so
+    it stays correct across any reset (including `reset_brewpi`, which is
+    deliberately allowed to run during an active fermentation) with no
+    separate invalidation bookkeeping: whatever the Arduino reports after
+    a reset is exactly what the next comparison uses.
+  * Persist & display the real chamber target, not the beer target: the
+    dashboard's "Setpoint" tile and the chart's "Setpoint" line both used
+    to show effective_target_f (the beer target) a second time under a
+    different label -- there was no distinct chamber-side value flowing
+    anywhere past control_loop.py, even though it's computed every tick
+    (chamber_target_for()) and simply discarded after being handed to the
+    chamber driver. New `samples.chamber_target_f` column, threaded through
+    the control loop, live-state payload, series/projection API responses,
+    and the simulator's forward-projection preview; the frontend now reads
+    this distinct value for the Setpoint tile and chart line.
+
 krauken (0.1.22) stable; urgency=medium
 
   * Fix: set_fridge_target() (every `j{...}` write to the BrewPi Arduino)

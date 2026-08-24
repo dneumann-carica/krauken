@@ -215,6 +215,18 @@ async def test_control_tick_writes_rich_live_state_telemetry(tmp_path: Path, mon
         assert payload["stage_name"] == "Primary"
         assert payload["target_source"] == "profile"
         assert payload["beer_temp_ok"] is True
+        # The real chamber target the control loop is actually driving
+        # toward (contracts.cascade.chamber_target_for()'s output) -- used
+        # to be computed and discarded, never reaching live_state at all;
+        # the dashboard's Setpoint tile showed effective_target_f (the beer
+        # target) a second time instead. Exact-equality with the beer
+        # target here is a valid outcome too (idle governs gently at the
+        # beer target itself, no offset) -- what this end-to-end wiring
+        # test needs is confirmation the value actually reaches live_state
+        # as a real, computed float, which test_projection.py's dedicated
+        # unit test confirms genuinely diverges from the beer target while
+        # actively cooling/heating.
+        assert isinstance(payload["chamber_target_f"], float)
     finally:
         await daemon.stop()
         await simulator_service.stop()

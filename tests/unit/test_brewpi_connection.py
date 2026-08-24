@@ -115,6 +115,67 @@ async def test_set_fridge_target_none_sends_off_mode():
     assert conn.commanded_target_f is None
 
 
+# FridgeSet values distinct from any temp used elsewhere in this file, so a
+# mismatched dedupe comparison would be obvious rather than coincidentally
+# passing.
+T_RESPONSE_FRIDGE_SET_65_5 = (
+    b'T:{"BeerTemp": 70.0,"BeerSet":null,"BeerAnn":null,"FridgeTemp": 68.0,'
+    b'"FridgeSet": 65.5,"FridgeAnn":null,"State":0}\r\n'
+)
+T_RESPONSE_FRIDGE_SET_NULL = (
+    b'T:{"BeerTemp": 70.0,"BeerSet":null,"BeerAnn":null,"FridgeTemp": 68.0,'
+    b'"FridgeSet":null,"FridgeAnn":null,"State":0}\r\n'
+)
+
+
+async def test_set_fridge_target_skips_the_write_when_it_matches_the_last_reported_fridge_set():
+    # Real, confirmed behavior this closes: the daemon's control loop calls
+    # set_fridge_target() every ~30s tick regardless of whether the target
+    # changed -- fine for the IPC-backed drivers, but a real serial
+    # round-trip + burst-drain for BrewPi. Grounded in a real read
+    # (read_temps()'s FridgeSet), not a locally-cached "what we last sent".
+    conn = _connected({"t": T_RESPONSE_FRIDGE_SET_65_5})
+    await conn.read_temps()  # establishes _last_reported_fridge_set_f == 65.5
+    await conn.set_fridge_target(65.5)
+    assert conn._serial.written == [b"t\n"]  # no 'j' write at all
+    assert conn.commanded_target_f == 65.5  # display semantics still update
+
+
+async def test_set_fridge_target_writes_when_it_differs_from_the_last_reported_fridge_set():
+    conn = _connected({"t": T_RESPONSE_FRIDGE_SET_65_5})
+    await conn.read_temps()
+    await conn.set_fridge_target(61.0)
+    assert conn._serial.written[-1] == b'j{mode:"f", fridgeSet:61.0}\n'
+
+
+async def test_set_fridge_target_always_writes_before_any_fridge_set_has_ever_been_read():
+    # _last_reported_fridge_set_f starts at a sentinel (_UNKNOWN_FRIDGE_SET),
+    # not None -- proving that matters: a naive None initial value would
+    # coincidentally equal this very first set_fridge_target(None) call and
+    # wrongly skip it.
+    conn = _connected({})
+    await conn.set_fridge_target(None)
+    assert conn._serial.written == [b'j{mode:"o"}\n']
+
+
+async def test_set_fridge_target_resends_after_a_reset_changes_the_reported_fridge_set():
+    # The critical regression test: a real reset_brewpi (or any reconnect)
+    # can wipe the Arduino's RAM-held target while the control loop is
+    # mid-stream commanding an unchanging held value. Dedupe must not
+    # permanently skip re-asserting it. Simulates the reset by changing what
+    # the FakeSerial reports for 't' between the two reads, standing in for
+    # the Arduino's own FridgeSet genuinely changing underneath us.
+    conn = _connected({"t": T_RESPONSE_FRIDGE_SET_65_5})
+    await conn.read_temps()
+    await conn.set_fridge_target(65.5)
+    assert conn._serial.written == [b"t\n"]  # skipped, as in the dedupe test above
+
+    conn._serial.responses["t"] = T_RESPONSE_FRIDGE_SET_NULL
+    await conn.read_temps()
+    await conn.set_fridge_target(65.5)  # same old value -- but the Arduino now reports null
+    assert conn._serial.written[-1] == b'j{mode:"f", fridgeSet:65.5}\n'
+
+
 async def test_commanded_target_f_is_recorded_even_though_it_is_never_acked():
     # set_fridge_target() records what was commanded regardless of what
     # (if anything) the Arduino sends back -- same convention as

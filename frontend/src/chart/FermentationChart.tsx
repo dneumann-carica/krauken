@@ -162,15 +162,15 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
     }
     const toX = timeScale(allTs, plotWidth);
     const xs = series.ts.map(toX);
-    const allTemps = [...series.beer_temp_f, ...series.chamber_temp_f, ...series.effective_target_f];
-    if (hasProjection) allTemps.push(...proj!.beer_temp_f, ...proj!.chamber_temp_f, ...proj!.effective_target_f);
+    const allTemps = [...series.beer_temp_f, ...series.chamber_temp_f, ...series.chamber_target_f];
+    if (hasProjection) allTemps.push(...proj!.beer_temp_f, ...proj!.chamber_temp_f, ...proj!.chamber_target_f);
     const temp = tempScale(allTemps, PLOT_HEIGHT);
     const toGravityY = gravityScale(PLOT_HEIGHT);
     const breaks = gapBreakIndices(series.ts, series.gaps);
 
     const beerPath = buildLinePath(xs, series.beer_temp_f, temp.toY, breaks);
     const chamberPath = buildLinePath(xs, series.chamber_temp_f, temp.toY, breaks);
-    const targetPath = buildLinePath(xs, series.effective_target_f, temp.toY, breaks);
+    const targetPath = buildLinePath(xs, series.chamber_target_f, temp.toY, breaks);
     const gravityPath = hasGravity ? buildLinePath(xs, series.gravity, toGravityY, breaks) : "";
 
     // Dotted bridges across the same gaps that just broke the lines above --
@@ -179,7 +179,7 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
     // data or the projected preview.
     const beerGapPath = buildGapPaths(xs, series.beer_temp_f, temp.toY, series.ts, series.gaps);
     const chamberGapPath = buildGapPaths(xs, series.chamber_temp_f, temp.toY, series.ts, series.gaps);
-    const targetGapPath = buildGapPaths(xs, series.effective_target_f, temp.toY, series.ts, series.gaps);
+    const targetGapPath = buildGapPaths(xs, series.chamber_target_f, temp.toY, series.ts, series.gaps);
     const gravityGapPath = hasGravity ? buildGapPaths(xs, series.gravity, toGravityY, series.ts, series.gaps) : "";
 
     let beerProjPath = "";
@@ -190,7 +190,7 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
       const projXs = proj!.ts.map(toX);
       beerProjPath = buildLinePath(projXs, proj!.beer_temp_f, temp.toY);
       chamberProjPath = buildLinePath(projXs, proj!.chamber_temp_f, temp.toY);
-      targetProjPath = buildLinePath(projXs, proj!.effective_target_f, temp.toY);
+      targetProjPath = buildLinePath(projXs, proj!.chamber_target_f, temp.toY);
       // Gravity is deliberately NOT projected forward -- contracts/
       // projection.py holds it flat at its last known value (there's no
       // honest way to extrapolate a real fermentation's actual curve), and
