@@ -394,7 +394,23 @@ class BrewPiConnection:
         actual target of this) -- a caller that writes repeatedly with no
         interleaved read (e.g. device_config.py's identify_relay_pin
         sweep) simply keeps writing every time, unchanged, which is safe,
-        just not optimized."""
+        just not optimized.
+
+        Rounds temp_f to 1 decimal place before doing anything else with
+        it -- confirmed live via the serial trace log that the PI
+        cascade's raw float output (e.g. 52.672244164987845, carrying the
+        full accumulated-integral precision) was going out over the wire
+        verbatim, bloating every `j` write for digits the Arduino's own
+        temperature resolution can't meaningfully use. Rounding here,
+        before the dedupe check below, is a double win rather than just a
+        smaller payload: the PI integral nudges its raw output by a tiny
+        fraction every tick even while genuinely holding steady (see a
+        real recorded sequence: 52.672, 52.681, 52.686, ... -- all
+        different bit-for-bit, all the literal same 52.7 once rounded),
+        so rounding first also means the dedupe check actually matches
+        far more often, cutting real j writes, not just their length."""
+        if temp_f is not None:
+            temp_f = round(temp_f, 1)
         body = 'j{mode:"o"}' if temp_f is None else f'j{{mode:"f", fridgeSet:{temp_f}}}'
         self.commanded_target_f = temp_f
         async with self._lock:

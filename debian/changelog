@@ -1,3 +1,17 @@
+krauken (0.1.26) stable; urgency=medium
+
+  * Round the chamber target to 1 decimal place before writing it to the
+    BrewPi Arduino -- confirmed live via the serial trace log that the PI
+    cascade's raw output (the full accumulated-integral float, e.g.
+    52.672244164987845) was going out over the wire verbatim every tick,
+    bloating each `j` write for digits the Arduino's own temperature
+    resolution can't meaningfully use. Rounding before the existing
+    dedupe check (v0.1.23) is a double win, not just a smaller payload:
+    the PI integral nudges its raw output by a tiny fraction almost every
+    tick even while genuinely holding steady, so rounding first also
+    means the dedupe matches far more often, cutting real `j` writes
+    outright, not just their length.
+
 krauken (0.1.25) stable; urgency=medium
 
   * Replaced the beer-holding cascade's fixed-clamp bang-bang scheme with

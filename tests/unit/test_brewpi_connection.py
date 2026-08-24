@@ -128,6 +128,29 @@ T_RESPONSE_FRIDGE_SET_NULL = (
 )
 
 
+async def test_set_fridge_target_rounds_to_one_decimal_place_before_writing():
+    # Real, confirmed traffic bloat: the PI cascade's raw output (the full
+    # accumulated-integral float, e.g. 52.672244164987845) was going out
+    # over the wire verbatim.
+    conn = _connected({})
+    await conn.set_fridge_target(52.672244164987845)
+    assert conn._serial.written[-1] == b'j{mode:"f", fridgeSet:52.7}\n'
+    assert conn.commanded_target_f == 52.7
+
+
+async def test_set_fridge_target_rounding_increases_the_dedupe_hit_rate():
+    # The double win this rounding is for: the PI integral nudges its raw
+    # output by a tiny fraction almost every tick even while genuinely
+    # holding steady (a real recorded sequence: 52.672, 52.681, 52.686),
+    # all bit-for-bit different, all the same 52.7 once rounded -- so
+    # rounding BEFORE the dedupe check means these no longer write at all.
+    conn = _connected({"t": T_RESPONSE_FRIDGE_SET_65_5})
+    await conn.read_temps()  # _last_reported_fridge_set_f == 65.5, see fixture above
+    for raw in (65.5, 65.5432, 65.46, 65.5001):  # all round to 65.5
+        await conn.set_fridge_target(raw)
+    assert conn._serial.written == [b"t\n"]  # every set_fridge_target() call above was deduped
+
+
 async def test_set_fridge_target_skips_the_write_when_it_matches_the_last_reported_fridge_set():
     # Real, confirmed behavior this closes: the daemon's control loop calls
     # set_fridge_target() every ~30s tick regardless of whether the target
