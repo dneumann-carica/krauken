@@ -117,6 +117,38 @@ describe("FermentationChart", () => {
     expect(container.querySelector("path[stroke='var(--kr-gravity)'][stroke-dasharray='2 3']")).not.toBeInTheDocument();
   });
 
+  it("bridges each projected path to start exactly where its solid line ends, no gap", () => {
+    // The projection's own first point is t_h_from_now = one
+    // PROJECTION_STEP_H into the future (never a t=0 point) -- before this
+    // fix, the dashed line started there, leaving a visible gap (in both
+    // x and y) at "NOW" between where the solid line stopped and where the
+    // dashed one began. The bridge means the two must share one exact
+    // coordinate, not just look close.
+    const { container } = render(
+      <FermentationChart
+        series={series({
+          gaps: [], // isolates this test from the fixture's default gap-break, which otherwise
+          // starts a fresh "M" mid-line and complicates finding the solid path's true last point
+          projection: {
+            ts: ["2026-01-04T06:00:00Z", "2026-01-04T12:00:00Z"],
+            beer_temp_f: [65.5, 65.0],
+            chamber_temp_f: [64.0, 63.0],
+            gravity: [1.012, 1.012],
+            effective_target_f: [66, 66],
+            chamber_target_f: [60, 62], // deliberately far from the real last value (66) so a gap would be obvious
+          },
+        })}
+        stages={[stage({})]}
+      />,
+    );
+    const dashedTarget = container.querySelector("path[stroke='var(--kr-plan)'][stroke-dasharray='2 3']");
+    const solidTarget = container.querySelector("path[stroke='var(--kr-plan)'][stroke-dasharray='4 3']");
+    const firstDashedPoint = dashedTarget?.getAttribute("d")?.match(/^M([\d.]+,[\d.]+)/)?.[1];
+    const lastSolidPoint = solidTarget?.getAttribute("d")?.trim().split(" ").pop()?.replace(/^[ML]/, "");
+    expect(firstDashedPoint).toBeTruthy();
+    expect(firstDashedPoint).toBe(lastSolidPoint);
+  });
+
   it("renders no NOW marker when the series has no projection (a completed batch)", () => {
     render(<FermentationChart series={series()} stages={[stage({})]} />);
     expect(screen.queryByText("NOW")).not.toBeInTheDocument();

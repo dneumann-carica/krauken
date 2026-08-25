@@ -110,6 +110,43 @@
   cursor: crosshair;
 }
 
+/* Grid with everything in the same single cell -- a plain overlay stack,
+   not a layout grid. Lets the axis-label overlays below render ON TOP of
+   the (possibly zoom-widened) plot svg while still living inside
+   .plotWrap's own scrolling viewport, which position:sticky needs to
+   find as its nearest scrolling ancestor. */
+.svgStack {
+  display: grid;
+}
+.svgStackItem {
+  grid-area: 1 / 1;
+}
+/* Sticky, not absolute: the plot svg can be up to 10x .plotWrap's own
+   width (MAX_ZOOM) and scrolls horizontally inside it -- an axis label
+   drawn as part of that same wide svg scrolls away with the data the
+   instant the user pans right, which is exactly the bug this fixes
+   (confirmed live: zooming in loses the left/right scale entirely, not
+   just makes it small). Sticky keeps each overlay pinned to its own edge
+   of .plotWrap's VIEWPORT regardless of scroll/zoom, the same way a
+   frozen header/column would in a spreadsheet. justifySelf shrinks each
+   one to its own content width (not the full grid cell) so it only
+   claims the strip it actually needs; pointer-events:none so this
+   thin decorative strip never steals the scrub-drag gesture meant for
+   the plot beneath it. */
+.axisOverlayLeft {
+  justify-self: start;
+  position: sticky;
+  left: 0;
+  pointer-events: none;
+}
+.axisOverlayRight {
+  justify-self: end;
+  position: sticky;
+  right: 0;
+  pointer-events: none;
+}
+.axisOverlayBg { fill: var(--kr-plot-bg); }
+
 .axisLine { stroke: var(--kr-border); stroke-width: 1; }
 .axisLabel { font: var(--kr-type-caption); fill: var(--kr-ink-muted); }
 .gridLine { stroke: var(--kr-border); stroke-width: 1; stroke-dasharray: 2 3; }

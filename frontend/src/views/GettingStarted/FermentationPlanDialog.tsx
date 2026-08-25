@@ -280,7 +280,16 @@ function StageEditor({ stage: s, onChange, onToggle, onRemove, onMoveUp, onMoveD
           )}
           {s.locked ? (
             <Tag tone="navy" size="sm">
-              Required
+              {/* locked is true for two different reasons (see StageForm's
+                  own doc comment above) -- rawState is what actually tells
+                  them apart: "running" only ever happens on an existing,
+                  already-started fermentation's current stage (fromStageResponse),
+                  never on a new plan's first stage (fromStageInput always
+                  stamps "pending" there, even though it's locked too). Says
+                  "Active" so it reads as "can't remove this, it's currently
+                  executing" rather than the generic "Required" a first-time
+                  planner sees before anything's even started. */}
+              {s.rawState === "running" ? "Active" : "Required"}
             </Tag>
           ) : s.disabled ? (
             <Tag tone="gray" size="sm">

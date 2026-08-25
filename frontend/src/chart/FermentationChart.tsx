@@ -187,17 +187,29 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
     let targetProjPath = "";
     let nowX = 0;
     if (hasProjection) {
-      const projXs = proj!.ts.map(toX);
-      beerProjPath = buildLinePath(projXs, proj!.beer_temp_f, temp.toY);
-      chamberProjPath = buildLinePath(projXs, proj!.chamber_temp_f, temp.toY);
-      targetProjPath = buildLinePath(projXs, proj!.chamber_target_f, temp.toY);
+      // The projection's own first point is t_h_from_now = one
+      // PROJECTION_STEP_H into the future (contracts/projection.py's
+      // project_forward() appends AFTER stepping, never a t=0 point) --
+      // used to leave a real, visible gap (in both x and y) between where
+      // each solid line ends and where its dashed continuation began.
+      // Bridging with the real series' own last point here makes each
+      // dashed path start exactly where its solid counterpart stops,
+      // rather than jumping to wherever the physics already reached half
+      // a step later.
+      const lastRealIdx = series.ts.length - 1;
+      nowX = toX(series.ts[lastRealIdx]);
+      const projXs = [nowX, ...proj!.ts.map(toX)];
+      beerProjPath = buildLinePath(projXs, [series.beer_temp_f[lastRealIdx], ...proj!.beer_temp_f], temp.toY);
+      chamberProjPath = buildLinePath(projXs, [series.chamber_temp_f[lastRealIdx], ...proj!.chamber_temp_f], temp.toY);
+      targetProjPath = buildLinePath(
+        projXs, [series.chamber_target_f[lastRealIdx], ...proj!.chamber_target_f], temp.toY,
+      );
       // Gravity is deliberately NOT projected forward -- contracts/
       // projection.py holds it flat at its last known value (there's no
       // honest way to extrapolate a real fermentation's actual curve), and
       // a flat dashed line reads as a genuine "gravity is about to stop
       // moving" prediction rather than the "we simply don't know" it
       // actually is. See that module's docstring.
-      nowX = toX(series.ts[series.ts.length - 1]);
     }
 
     const duty = dutyColumns(xs, series.chamber_mode, plotWidth);
@@ -336,163 +348,204 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
             ))}
           </div>
         )}
-        <svg
-          ref={svgRef}
-          className={styles.plot}
-          width={outerWidth}
-          height={insets.top + PLOT_HEIGHT + insets.bottom}
-          role="img"
-          aria-label="Fermentation temperature and gravity over time"
-          // "pan-y", not "none" -- the scrub gesture only ever reads
-          // clientX (horizontal position along the timeline), so a
-          // near-vertical swipe should still scroll the page natively.
-          // "none" would claim the WHOLE gesture the instant it starts on
-          // the chart -- touch-action is decided once at gesture start and
-          // then governs it for its full duration, even after the finger
-          // moves well outside the chart's bounds -- which is exactly why
-          // a swipe that merely started on/near a chart occupying a third
-          // of a phone screen could freeze page-scroll entirely, even
-          // though the drag was clearly headed elsewhere.
-          style={{ touchAction: "pan-y" }}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={endPointer}
-          onPointerCancel={endPointer}
-          // A touch-and-hold is indistinguishable from the start of a
-          // scrub until it's already underway, so the browser's native
-          // long-press context menu (Chrome/Android) needs suppressing
-          // directly -- touch-action alone doesn't cover it, that's a
-          // separate default action tied to the 'contextmenu' event.
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          {model && (
-            <g transform={`translate(${insets.left},${insets.top})`}>
-              {/* future region -- shaded so the projected half of the plot reads as "preview" */}
-              {hasProjection && (
-                <rect x={model.nowX} y={0} width={plotWidth - model.nowX} height={PLOT_HEIGHT} className={styles.futureRegion} />
-              )}
+        <div className={styles.svgStack}>
+          <svg
+            ref={svgRef}
+            className={`${styles.plot} ${styles.svgStackItem}`}
+            width={outerWidth}
+            height={insets.top + PLOT_HEIGHT + insets.bottom}
+            role="img"
+            aria-label="Fermentation temperature and gravity over time"
+            // "pan-y", not "none" -- the scrub gesture only ever reads
+            // clientX (horizontal position along the timeline), so a
+            // near-vertical swipe should still scroll the page natively.
+            // "none" would claim the WHOLE gesture the instant it starts on
+            // the chart -- touch-action is decided once at gesture start and
+            // then governs it for its full duration, even after the finger
+            // moves well outside the chart's bounds -- which is exactly why
+            // a swipe that merely started on/near a chart occupying a third
+            // of a phone screen could freeze page-scroll entirely, even
+            // though the drag was clearly headed elsewhere.
+            style={{ touchAction: "pan-y" }}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={endPointer}
+            onPointerCancel={endPointer}
+            // A touch-and-hold is indistinguishable from the start of a
+            // scrub until it's already underway, so the browser's native
+            // long-press context menu (Chrome/Android) needs suppressing
+            // directly -- touch-action alone doesn't cover it, that's a
+            // separate default action tied to the 'contextmenu' event.
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {model && (
+              <g transform={`translate(${insets.left},${insets.top})`}>
+                {/* future region -- shaded so the projected half of the plot reads as "preview" */}
+                {hasProjection && (
+                  <rect x={model.nowX} y={0} width={plotWidth - model.nowX} height={PLOT_HEIGHT} className={styles.futureRegion} />
+                )}
 
-              {/* duty-cycle wash */}
-              {model.duty.map((c, i) =>
-                c.hasData ? (
-                  <rect
-                    key={i}
-                    x={c.x}
-                    y={0}
-                    width={c.width}
-                    height={PLOT_HEIGHT}
-                    fill={
-                      // rgba(var(--triple), alpha) mixes the space-separated
-                      // custom-property expansion with a comma before alpha,
-                      // which isn't valid CSS color syntax -- the browser
-                      // rejects the whole value and SVG's fill falls back to
-                      // its initial black, painting over the whole plot.
-                      // rgb(var(--triple) / alpha) is the modern form that
-                      // actually accepts a space-separated triple.
-                      c.coolFrac >= c.heatFrac
-                        ? `rgb(var(--kr-wash-cool-rgb) / ${(c.coolFrac * 0.24).toFixed(3)})`
-                        : `rgb(var(--kr-wash-heat-rgb) / ${(c.heatFrac * 0.24).toFixed(3)})`
-                    }
+                {/* duty-cycle wash */}
+                {model.duty.map((c, i) =>
+                  c.hasData ? (
+                    <rect
+                      key={i}
+                      x={c.x}
+                      y={0}
+                      width={c.width}
+                      height={PLOT_HEIGHT}
+                      fill={
+                        // rgba(var(--triple), alpha) mixes the space-separated
+                        // custom-property expansion with a comma before alpha,
+                        // which isn't valid CSS color syntax -- the browser
+                        // rejects the whole value and SVG's fill falls back to
+                        // its initial black, painting over the whole plot.
+                        // rgb(var(--triple) / alpha) is the modern form that
+                        // actually accepts a space-separated triple.
+                        c.coolFrac >= c.heatFrac
+                          ? `rgb(var(--kr-wash-cool-rgb) / ${(c.coolFrac * 0.24).toFixed(3)})`
+                          : `rgb(var(--kr-wash-heat-rgb) / ${(c.heatFrac * 0.24).toFixed(3)})`
+                      }
+                    />
+                  ) : null,
+                )}
+
+                {/* y gridlines (temp axis) -- the labels themselves live in the
+                    sticky overlay svgs below .plot, not here: see this
+                    component's own top-level return for why. */}
+                {tempTicks(model.temp.min, model.temp.max, model.temp.tickStep).map((t) => (
+                  <line
+                    key={t} x1={0} x2={plotWidth} y1={model.temp.toY(t)} y2={model.temp.toY(t)}
+                    className={styles.gridLine}
                   />
-                ) : null,
-              )}
+                ))}
 
-              {/* y gridlines + labels (temp axis) */}
-              {tempTicks(model.temp.min, model.temp.max, model.temp.tickStep).map((t) => (
-                <g key={t}>
-                  <line x1={0} x2={plotWidth} y1={model.temp.toY(t)} y2={model.temp.toY(t)} className={styles.gridLine} />
-                  <text x={-8} y={model.temp.toY(t)} dy="0.32em" textAnchor="end" className={styles.axisLabel}>
+                {/* x axis ticks */}
+                {model.xTicks.map((t, i) => (
+                  <text key={i} x={t.x} y={PLOT_HEIGHT + 18} textAnchor="middle" className={styles.axisLabel}>
+                    {t.label}
+                  </text>
+                ))}
+                <line x1={0} x2={plotWidth} y1={PLOT_HEIGHT} y2={PLOT_HEIGHT} className={styles.axisLine} />
+
+                {/* dashed stage-boundary lines, pixel-aligned to the ribbon above */}
+                {model.stageLines.map((x, i) => (
+                  <line key={i} x1={x} x2={x} y1={0} y2={PLOT_HEIGHT} className={styles.stageLine} />
+                ))}
+
+                {/* series */}
+                <path d={model.targetPath} fill="none" stroke="var(--kr-plan)" strokeWidth={1.5} strokeDasharray="4 3" />
+                {hasGravity && <path d={model.gravityPath} fill="none" stroke="var(--kr-gravity)" strokeWidth={1.5} strokeDasharray="3 2" />}
+                <path d={model.chamberPath} fill="none" stroke="var(--kr-cool)" strokeWidth={1.75} />
+                <path d={model.beerPath} fill="none" stroke="var(--kr-accent)" strokeWidth={2} />
+
+                {/* gap bridges -- deliberately NOT drawn in each series' own color, unlike the
+                    projection below. A projection is a preview of the same series continuing
+                    (color/identity carries forward, just faded+dashed); a gap is the opposite --
+                    we don't know what this series actually did here, so it gets no identity at
+                    all: one neutral ink, large sparse round dots, never a per-series hue. That
+                    keeps it from ever reading as "a paler version of the real or projected line"
+                    even at a glance. Drawn over the breaks buildLinePath just made, so a gap
+                    never reads as simply missing/blank either. */}
+                <path d={model.targetGapPath} fill="none" className={styles.gapPath} />
+                {hasGravity && <path d={model.gravityGapPath} fill="none" className={styles.gapPath} />}
+                <path d={model.chamberGapPath} fill="none" className={styles.gapPath} />
+                <path d={model.beerGapPath} fill="none" className={styles.gapPath} />
+
+                {/* forward projection -- dashed continuation, a preview not a prediction (see contracts/projection.py) */}
+                {hasProjection && (
+                  <>
+                    <path d={model.targetProjPath} fill="none" stroke="var(--kr-plan)" strokeWidth={1.5} strokeDasharray="2 3" opacity={0.6} />
+                    <path d={model.chamberProjPath} fill="none" stroke="var(--kr-cool)" strokeWidth={1.75} strokeDasharray="2 3" opacity={0.6} />
+                    <path d={model.beerProjPath} fill="none" stroke="var(--kr-accent)" strokeWidth={2} strokeDasharray="2 3" opacity={0.6} />
+                    <line x1={model.nowX} x2={model.nowX} y1={0} y2={PLOT_HEIGHT} className={styles.nowLine} />
+                    {/* Suppressed while scrubbing -- the scrub label below sits in this exact
+                        spot, and with the now-line usually close to the scrubbed point the two
+                        texts would overlap. The line itself stays put as an "as of now" anchor. */}
+                    {scrubIndex === null && (
+                      <text x={model.nowX} y={-4} textAnchor="middle" className={styles.nowLabel}>
+                        NOW
+                      </text>
+                    )}
+                  </>
+                )}
+
+                {/* scrub crosshair -- mouse-down/touch-down-and-drag preview, see onScrub above.
+                    Label sits in the exact same spot the "NOW" label uses (so there's one
+                    consistent "this is what moment in time you're looking at" convention, not a
+                    second competing indicator), with an adaptive anchor near either edge so a
+                    longer date/time string never runs off the plot the way a centered-only anchor
+                    would. */}
+                {scrubIndex !== null && (
+                  <>
+                    <line
+                      x1={model.xs[scrubIndex]}
+                      x2={model.xs[scrubIndex]}
+                      y1={0}
+                      y2={PLOT_HEIGHT}
+                      className={styles.scrubLine}
+                    />
+                    <text
+                      x={model.xs[scrubIndex]}
+                      y={-4}
+                      textAnchor={model.xs[scrubIndex] < 60 ? "start" : model.xs[scrubIndex] > plotWidth - 60 ? "end" : "middle"}
+                      className={styles.scrubLabel}
+                    >
+                      {formatDateTime(new Date(series.ts[scrubIndex]))}
+                    </text>
+                  </>
+                )}
+              </g>
+            )}
+          </svg>
+
+          {/* Sticky axis-label overlays -- see FermentationChart.module.css's
+              .axisOverlayLeft/.axisOverlayRight for why these are separate
+              elements rather than <text> inside .plot itself: that svg can be
+              up to 10x .plotWrap's own width once zoomed, and scrolls
+              horizontally inside it, so a label drawn as part of it scrolls
+              away with the data the instant the plot is panned -- confirmed
+              live, not hypothetical (zooming in loses the scale entirely).
+              Each one is its own tiny svg, same height as .plot and the exact
+              same insets.left/insets.right width, so its content is
+              positioned identically to how it always was (same toY()/
+              toGravityY() functions, same x offsets from the plot edge) --
+              only which svg it's drawn into changes. */}
+          {model && (
+            <svg
+              className={`${styles.axisOverlayLeft} ${styles.svgStackItem}`}
+              width={insets.left}
+              height={insets.top + PLOT_HEIGHT + insets.bottom}
+              aria-hidden="true"
+            >
+              <rect x={0} y={0} width="100%" height="100%" className={styles.axisOverlayBg} />
+              <g transform={`translate(${insets.left},${insets.top})`}>
+                {tempTicks(model.temp.min, model.temp.max, model.temp.tickStep).map((t) => (
+                  <text key={t} x={-8} y={model.temp.toY(t)} dy="0.32em" textAnchor="end" className={styles.axisLabel}>
                     {t}°
                   </text>
-                </g>
-              ))}
-
-              {/* gravity axis labels, right side */}
-              {hasGravity &&
-                gravityTicks().map((g) => (
-                  <text key={g} x={plotWidth + 8} y={model.toGravityY(g)} dy="0.32em" className={styles.axisLabel}>
+                ))}
+              </g>
+            </svg>
+          )}
+          {model && hasGravity && (
+            <svg
+              className={`${styles.axisOverlayRight} ${styles.svgStackItem}`}
+              width={insets.right}
+              height={insets.top + PLOT_HEIGHT + insets.bottom}
+              aria-hidden="true"
+            >
+              <rect x={0} y={0} width="100%" height="100%" className={styles.axisOverlayBg} />
+              <g transform={`translate(0,${insets.top})`}>
+                {gravityTicks().map((g) => (
+                  <text key={g} x={8} y={model.toGravityY(g)} dy="0.32em" className={styles.axisLabel}>
                     {g.toFixed(3)}
                   </text>
                 ))}
-
-              {/* x axis ticks */}
-              {model.xTicks.map((t, i) => (
-                <text key={i} x={t.x} y={PLOT_HEIGHT + 18} textAnchor="middle" className={styles.axisLabel}>
-                  {t.label}
-                </text>
-              ))}
-              <line x1={0} x2={plotWidth} y1={PLOT_HEIGHT} y2={PLOT_HEIGHT} className={styles.axisLine} />
-
-              {/* dashed stage-boundary lines, pixel-aligned to the ribbon above */}
-              {model.stageLines.map((x, i) => (
-                <line key={i} x1={x} x2={x} y1={0} y2={PLOT_HEIGHT} className={styles.stageLine} />
-              ))}
-
-              {/* series */}
-              <path d={model.targetPath} fill="none" stroke="var(--kr-plan)" strokeWidth={1.5} strokeDasharray="4 3" />
-              {hasGravity && <path d={model.gravityPath} fill="none" stroke="var(--kr-gravity)" strokeWidth={1.5} strokeDasharray="3 2" />}
-              <path d={model.chamberPath} fill="none" stroke="var(--kr-cool)" strokeWidth={1.75} />
-              <path d={model.beerPath} fill="none" stroke="var(--kr-accent)" strokeWidth={2} />
-
-              {/* gap bridges -- deliberately NOT drawn in each series' own color, unlike the
-                  projection below. A projection is a preview of the same series continuing
-                  (color/identity carries forward, just faded+dashed); a gap is the opposite --
-                  we don't know what this series actually did here, so it gets no identity at
-                  all: one neutral ink, large sparse round dots, never a per-series hue. That
-                  keeps it from ever reading as "a paler version of the real or projected line"
-                  even at a glance. Drawn over the breaks buildLinePath just made, so a gap
-                  never reads as simply missing/blank either. */}
-              <path d={model.targetGapPath} fill="none" className={styles.gapPath} />
-              {hasGravity && <path d={model.gravityGapPath} fill="none" className={styles.gapPath} />}
-              <path d={model.chamberGapPath} fill="none" className={styles.gapPath} />
-              <path d={model.beerGapPath} fill="none" className={styles.gapPath} />
-
-              {/* forward projection -- dashed continuation, a preview not a prediction (see contracts/projection.py) */}
-              {hasProjection && (
-                <>
-                  <path d={model.targetProjPath} fill="none" stroke="var(--kr-plan)" strokeWidth={1.5} strokeDasharray="2 3" opacity={0.6} />
-                  <path d={model.chamberProjPath} fill="none" stroke="var(--kr-cool)" strokeWidth={1.75} strokeDasharray="2 3" opacity={0.6} />
-                  <path d={model.beerProjPath} fill="none" stroke="var(--kr-accent)" strokeWidth={2} strokeDasharray="2 3" opacity={0.6} />
-                  <line x1={model.nowX} x2={model.nowX} y1={0} y2={PLOT_HEIGHT} className={styles.nowLine} />
-                  {/* Suppressed while scrubbing -- the scrub label below sits in this exact
-                      spot, and with the now-line usually close to the scrubbed point the two
-                      texts would overlap. The line itself stays put as an "as of now" anchor. */}
-                  {scrubIndex === null && (
-                    <text x={model.nowX} y={-4} textAnchor="middle" className={styles.nowLabel}>
-                      NOW
-                    </text>
-                  )}
-                </>
-              )}
-
-              {/* scrub crosshair -- mouse-down/touch-down-and-drag preview, see onScrub above.
-                  Label sits in the exact same spot the "NOW" label uses (so there's one
-                  consistent "this is what moment in time you're looking at" convention, not a
-                  second competing indicator), with an adaptive anchor near either edge so a
-                  longer date/time string never runs off the plot the way a centered-only anchor
-                  would. */}
-              {scrubIndex !== null && (
-                <>
-                  <line
-                    x1={model.xs[scrubIndex]}
-                    x2={model.xs[scrubIndex]}
-                    y1={0}
-                    y2={PLOT_HEIGHT}
-                    className={styles.scrubLine}
-                  />
-                  <text
-                    x={model.xs[scrubIndex]}
-                    y={-4}
-                    textAnchor={model.xs[scrubIndex] < 60 ? "start" : model.xs[scrubIndex] > plotWidth - 60 ? "end" : "middle"}
-                    className={styles.scrubLabel}
-                  >
-                    {formatDateTime(new Date(series.ts[scrubIndex]))}
-                  </text>
-                </>
-              )}
-            </g>
+              </g>
+            </svg>
           )}
-        </svg>
+        </div>
       </div>
     </div>
   );

@@ -1,3 +1,26 @@
+krauken (0.1.29) stable; urgency=medium
+
+  * Fix: the fermentation chart's forward-projection (dashed) line started
+    a visible gap after the real (solid) line's last point instead of
+    continuing from it -- buildLinePath() never bridged the two, so the
+    preview looked disconnected from "now" instead of a continuation of
+    it. Fixed by prepending the real series' own last (ts, value) point
+    to each projected path's input before building it.
+  * Fix: zooming into the chart or scrolling it horizontally scrolled the
+    left (temperature) and right (gravity) axis labels off-screen along
+    with the data, since they lived as <text> elements inside the same
+    wide, horizontally-scrolling SVG as the zoomed plot. Moved them into
+    two small `position: sticky` overlay SVGs (via a CSS Grid single-cell
+    stack) pinned to the plot area's own left/right edges, so they stay
+    visible regardless of zoom or pan.
+  * Fix: the "Required" badge on a fermentation profile's currently-
+    executing stage read the same as a new plan's locked-by-design first
+    stage, giving no indication of *why* it can't be deleted. Now reads
+    "Active" specifically for a running stage on an existing
+    fermentation, while a new plan's first stage still reads "Required".
+
+ -- The Krauken Project <dneumann@arpio.io>  Tue, 25 Aug 2026 06:59:00 -0400
+
 krauken (0.1.28) stable; urgency=medium
 
   * Removed the cascade's ramp-feedforward term entirely -- confirmed
@@ -23,6 +46,8 @@ krauken (0.1.28) stable; urgency=medium
     dashboard's "won't reach target" state rather than silently blown
     through.
   * Removed contracts/stages.py's now-fully-unused target_rate_f_per_h().
+
+ -- The Krauken Project <dneumann@arpio.io>  Mon, 24 Aug 2026 21:54:51 -0400
 
 krauken (0.1.27) stable; urgency=medium
 
