@@ -51,22 +51,6 @@ def target_temp_f(stage: Mapping[str, Any], elapsed_h: float) -> float:
     return stage["temp_from_f"] + (stage["temp_to_f"] - stage["temp_from_f"]) * frac
 
 
-def target_rate_f_per_h(stage: Mapping[str, Any], elapsed_h: float) -> float:
-    """The stage's own authored target's instantaneous rate of change --
-    zero for a constant-mode stage, and zero for a stepped one too once
-    elapsed_h has passed ramp_hours (the target has arrived and holds, per
-    target_temp_f's own clamp above). Feeds the cascade's ramp feedforward
-    (contracts.cascade.chamber_target_for) -- entirely separate from
-    stage_finished's own completion criteria, which don't care how fast
-    the target itself is moving."""
-    if stage["temp_mode"] != "stepped":
-        return 0.0
-    ramp_hours = stage["ramp_hours"]
-    if not ramp_hours or ramp_hours <= 0 or elapsed_h >= ramp_hours:
-        return 0.0
-    return (stage["temp_to_f"] - stage["temp_from_f"]) / ramp_hours
-
-
 @dataclass
 class GravityGate:
     """Satisfied once gravity has gone FLAT -- self-relative, stopped

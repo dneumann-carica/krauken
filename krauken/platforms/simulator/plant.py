@@ -231,13 +231,16 @@ def advance_physics(state: PlantState, p: PlantParams, dt_h: float, drive_to: fl
     )
 
 
-def step(
-    state: PlantState, p: PlantParams, dt_h: float, beer_target_f: float, ramp_rate_f_per_h: float = 0.0
-) -> PlantState:
+def step(state: PlantState, p: PlantParams, dt_h: float, beer_target_f: float) -> PlantState:
     """Convenience entry point for the chart's forward-projection preview
     (projection.py, this package's sibling module): runs the same PI
     cascade the real control loop does (no relay-timing protection --
     see advance_physics's docstring) and then integrates.
+
+    No ramp-rate parameter -- chamber_target_for() is deliberately ramp-
+    agnostic (see its own docstring); the caller just supplies whatever
+    contracts.stages.target_temp_f() says the target is at this point in
+    projected time, held or ramping alike, same as the real control loop.
 
     Updates state.beer_error_integral via contracts.cascade.
     update_beer_error_integral() BEFORE computing this step's target, same
@@ -257,18 +260,13 @@ def step(
     zero, rather than a fix worth a new persisted column for a chart
     preview.
 
-    ramp_rate_f_per_h passes through to chamber_target_for's feedforward --
-    the caller supplies contracts.stages.target_rate_f_per_h(stage, t) so
-    a projected cold-crash-style ramp gets the same more-aggressive chamber
-    push the real control loop now applies.
-
     `mode` on the returned state is cosmetic only here (see PlantState's
     own comment) -- nothing downstream of this offline path reads it --
     derived from which side of beer_target_f drive_to landed on, purely
     so it's still a sensible human-readable label rather than something
     arbitrary."""
     new_integral = update_beer_error_integral(state.beer_temp_f, beer_target_f, state.beer_error_integral, dt_h)
-    drive_to = chamber_target_for(state.beer_temp_f, beer_target_f, new_integral, ramp_rate_f_per_h)
+    drive_to = chamber_target_for(state.beer_temp_f, beer_target_f, new_integral)
     mode = "cool" if drive_to < beer_target_f else "heat" if drive_to > beer_target_f else "idle"
     new_state = advance_physics(state, p, dt_h, drive_to, mode)
     return replace(new_state, beer_error_integral=new_integral)

@@ -22,6 +22,33 @@ without ever needing to fully release. See control_constants.py's
 BEER_KP_F_PER_F/BEER_KI_F_PER_F_H/INTEGRAL_MAX_F_H for the gain values and
 how they're grounded against the simulator's own documented exotherm.
 
+The algorithm is deliberately ramp-agnostic: chamber_target_for() takes no
+ramp-rate input at all, constant-target stage or ramping one alike. An
+earlier version of this PI rewrite added a separate ramp-feedforward term
+(rate/RAMP_FEEDFORWARD_COUPLING_PER_H, carried over from the old bang-bang
+cascade, which had no integral state at all and genuinely needed a manual
+substitute for one). That's redundant with a real PI controller, and
+confirmed live to be actively harmful: standard control theory says a
+PI's own integral term settles, on its own, at exactly the value needed
+to sustain zero steady-state error against a constant-rate ramp
+(I_ss = rate / (coupling * Ki)) -- no separate term required, held stage
+or ramping one, treated identically. The removed feedforward term instead
+added a second, UNBOUNDED source of the same kind of offset on top of the
+already-anti-windup-clamped integral, and for Free Rise's real authored
+rate (1.5F/h) it alone exceeded the entire chamber safety envelope,
+pinning chamber_target_f at CHAMBER_TARGET_MAX_F for over 3 of the stage's
+~4 hours (confirmed directly from that fermentation's own samples) while
+beer overshot the ramp's own end target by 3F.
+
+Removing it means a sufficiently fast ramp can still legitimately outpace
+what INTEGRAL_MAX_F_H allows the integral to sustain -- but that now shows
+up as a bounded, safe lag (surfaced honestly to the user as "won't reach
+target" rather than silently saturating the envelope for hours), not as
+a second uncapped mechanism that can blow through it. See
+INTEGRAL_MAX_F_H's own comment in control_constants.py for how its sizing
+was reconsidered now that it's the only thing governing both exotherm
+cancellation and ramp-tracking.
+
 No chamber-side deadband is added here on purpose, even though a
 continuous P term will produce continuous small target wiggles as beer
 temp noise moves: the Hardware Supervisor's own actuator-level
@@ -45,7 +72,6 @@ from krauken.contracts.control_constants import (
     CHAMBER_TARGET_MAX_F,
     CHAMBER_TARGET_MIN_F,
     INTEGRAL_MAX_F_H,
-    RAMP_FEEDFORWARD_COUPLING_PER_H,
 )
 
 
@@ -70,9 +96,7 @@ def update_beer_error_integral(
     return max(-INTEGRAL_MAX_F_H, min(INTEGRAL_MAX_F_H, new_integral))
 
 
-def chamber_target_for(
-    beer_temp_f: float, beer_target_f: float, beer_error_integral_f_h: float, ramp_rate_f_per_h: float = 0.0,
-) -> float:
+def chamber_target_for(beer_temp_f: float, beer_target_f: float, beer_error_integral_f_h: float) -> float:
     """PI on beer-temp error (error = beer_target_f - beer_temp_f),
     beer_error_integral_f_h already updated for this tick by
     update_beer_error_integral() -- this function itself does no
@@ -80,30 +104,21 @@ def chamber_target_for(
     to call as many times as needed (e.g. the chart's forward-projection
     preview) without side effects.
 
-    ramp_rate_f_per_h is the beer's OWN authored target's current rate of
-    change (contracts.stages.target_rate_f_per_h) -- zero for a held
-    setpoint, nonzero (signed: negative while ramping down, e.g. a cold
-    crash) while a stepped stage is actively ramping. Reacting only to
-    PRESENT error isn't enough once the target itself keeps moving out
-    from under the chamber: the beer would settle into a permanent lag
-    behind the ramp instead of ever closing the gap (confirmed against
-    real cold-crash sample data from the old cascade -- the beer/target
-    gap grew smoothly and never closed). Adding rate/
-    RAMP_FEEDFORWARD_COUPLING_PER_H directly (same sign as the rate
-    itself) cancels that steady-state lag for whatever rate the stage is
-    actually ramping at, on top of whatever the PI terms are separately
-    doing about present error.
+    Deliberately takes no ramp-rate input -- beer_target_f already reflects
+    wherever contracts.stages.target_temp_f() says the authored target is
+    RIGHT NOW, held or ramping, and that's all this needs: the integral
+    term above naturally supplies whatever sustained offset is needed to
+    track a moving target, exactly the way it supplies one to counter a
+    sustained disturbance like fermentation's own exothermic heat -- see
+    this module's own docstring for why an earlier, separate ramp-
+    feedforward term here was both redundant and confirmed live to be
+    actively harmful.
 
     Clamped to the absolute safety envelope since a large combination of
-    error, accumulated integral, and ramp feedforward -- or a badly-
-    authored stage (a huge ramp over very few hours) -- could otherwise
-    ask for a chamber target no real equipment could or should attempt."""
+    error and accumulated integral -- or a badly-authored stage (a huge
+    ramp over very few hours, far faster than INTEGRAL_MAX_F_H's own
+    sizing assumes) -- could otherwise ask for a chamber target no real
+    equipment could or should attempt."""
     error = beer_target_f - beer_temp_f
-    ramp_feedforward_f = ramp_rate_f_per_h / RAMP_FEEDFORWARD_COUPLING_PER_H
-    target = (
-        beer_target_f
-        + BEER_KP_F_PER_F * error
-        + BEER_KI_F_PER_F_H * beer_error_integral_f_h
-        + ramp_feedforward_f
-    )
+    target = beer_target_f + BEER_KP_F_PER_F * error + BEER_KI_F_PER_F_H * beer_error_integral_f_h
     return max(CHAMBER_TARGET_MIN_F, min(CHAMBER_TARGET_MAX_F, target))

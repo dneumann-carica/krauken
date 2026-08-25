@@ -256,13 +256,10 @@ async def _control_tick_locked(ctx: Any) -> None:
 
     beer_ok = health.beer_temp_ok and readings.beer is not None and readings.beer.temp_f is not None
     if beer_ok:
-        ramp_rate = stages_mod.target_rate_f_per_h(current, elapsed_h)
         ctx.control_state.beer_error_integral = update_beer_error_integral(
             readings.beer.temp_f, beer_target, ctx.control_state.beer_error_integral, dt_h,
         )
-        chamber_target = chamber_target_for(
-            readings.beer.temp_f, beer_target, ctx.control_state.beer_error_integral, ramp_rate,
-        )
+        chamber_target = chamber_target_for(readings.beer.temp_f, beer_target, ctx.control_state.beer_error_integral)
         target_source = "profile"
         ctx.control_state.last_chamber_target_f = chamber_target
     else:

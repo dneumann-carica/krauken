@@ -41,7 +41,7 @@ from __future__ import annotations
 import datetime
 from typing import Any
 
-from krauken.contracts.stages import target_rate_f_per_h, target_temp_f
+from krauken.contracts.stages import target_temp_f
 from krauken.platforms.simulator import plant
 
 PROJECTION_STEP_H = 0.5
@@ -116,8 +116,7 @@ def project_forward(
         # "now" the same way, so the two stay aligned.
         while t_in_stage < horizon_h:
             target = target_temp_f(stage, t_in_stage)
-            rate = target_rate_f_per_h(stage, t_in_stage)
-            state = plant.step(state, params, step_h, target, rate)
+            state = plant.step(state, params, step_h, target)
             t_in_stage += step_h
             points.append(
                 {

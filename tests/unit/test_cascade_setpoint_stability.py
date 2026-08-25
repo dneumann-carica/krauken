@@ -8,17 +8,23 @@ OLD bang-bang cascade did.
 
 Confirmed real-world motivation, not hypothetical: on 2026-08-24, the
 currently-deployed OLD cascade (fixed-clamp bang-bang, since replaced --
-see contracts/cascade.py's module docstring) was observed live on fermentation
-2's Free Rise stage (a 66->70F ramp over 6h) swinging chamber_target_f
-between ~53F ("cool" mode, the ramp's abs(rate)-derived push applied in
-the WRONG direction) and ~80F ("heat" mode, same push now right-signed)
-on almost every tick, as the beer probe read 66/67 right at the ramp's
-current value. Test A below replays that exact recorded sequence through
-the new PI functions.
+see contracts/cascade.py's module docstring) was observed live on
+fermentation 2's Free Rise stage (a 66->70F ramp over 6h) swinging
+chamber_target_f between ~53F ("cool" mode, the ramp's abs(rate)-derived
+push applied in the WRONG direction) and ~80F ("heat" mode, same push now
+right-signed) on almost every tick, as the beer probe read 66/67 right at
+the ramp's current value. Test A below replays that exact recorded
+sequence through the new PI functions.
+
+chamber_target_for() takes no ramp-rate input at all (a later revision of
+this same PI rewrite removed a separate ramp-feedforward term entirely --
+see cascade.py's own module docstring for why: redundant with, and later
+confirmed live to be actively harmful alongside, the integral term, which
+already supplies whatever sustained offset a ramping target needs on its
+own). A ramping scenario here is just beer_target_f moving tick to tick,
+exactly like control_loop.py feeds it -- no separate mechanism to test.
 """
 from __future__ import annotations
-
-import pytest
 
 from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral
 from krauken.contracts.control_constants import CHAMBER_TARGET_MAX_F, CHAMBER_TARGET_MIN_F
@@ -27,7 +33,7 @@ from krauken.contracts.control_constants import CHAMBER_TARGET_MAX_F, CHAMBER_TA
 def _direction(chamber_target_f: float, beer_target_f: float, threshold_f: float = 1.0) -> int:
     """-1 (cooling demand), +1 (heating demand), 0 (holding) -- compares
     the cascade's own output against the beer target, its natural zero-
-    reference (error=0, integral=0, ramp=0 gives chamber_target_f ==
+    reference (error=0, integral=0 gives chamber_target_f ==
     beer_target_f exactly). threshold_f excludes trivial near-zero
     crossings from counting as a real demand in either direction."""
     diff = chamber_target_f - beer_target_f
@@ -48,16 +54,16 @@ def _count_reversals(directions: list[int]) -> int:
     return sum(1 for a, b in zip(nonzero, nonzero[1:]) if a != b)
 
 
-def _replay(ticks: list[tuple[float, float, float, float]]) -> list[float]:
+def _replay(ticks: list[tuple[float, float, float]]) -> list[float]:
     """Threads update_beer_error_integral() -> chamber_target_for() across
-    a sequence of (beer_temp_f, beer_target_f, ramp_rate_f_per_h, dt_h)
-    ticks, integral starting at 0.0 (matching a fresh ControlState) --
-    the shared engine every scenario test in this file drives."""
+    a sequence of (beer_temp_f, beer_target_f, dt_h) ticks, integral
+    starting at 0.0 (matching a fresh ControlState) -- the shared engine
+    every scenario test in this file drives."""
     integral = 0.0
     outputs = []
-    for beer_temp_f, beer_target_f, ramp_rate_f_per_h, dt_h in ticks:
+    for beer_temp_f, beer_target_f, dt_h in ticks:
         integral = update_beer_error_integral(beer_temp_f, beer_target_f, integral, dt_h)
-        outputs.append(chamber_target_for(beer_temp_f, beer_target_f, integral, ramp_rate_f_per_h))
+        outputs.append(chamber_target_for(beer_temp_f, beer_target_f, integral))
     return outputs
 
 
@@ -66,10 +72,7 @@ def _replay(ticks: list[tuple[float, float, float, float]]) -> list[float]:
 # Exact (beer_temp_f, effective_target_f, dt_h) pulled directly from the
 # real fermentation's `samples` table, 2026-08-24T08:28:17Z through
 # 09:16:18Z -- the precise sequence that made the OLD cascade flip
-# cooling<->heating repeatedly. ramp_rate is Free Rise's own authored rate,
-# (70.0 - 66.0) / 6.0 -- constant for a "stepped" stage's whole duration.
-FREE_RISE_RATE_F_PER_H = (70.0 - 66.0) / 6.0
-
+# cooling<->heating repeatedly.
 REAL_INCIDENT_TICKS = [
     (67.0, 66.005577, 0.0),
     (67.0, 66.01403, 0.012678),
@@ -137,8 +140,7 @@ REAL_INCIDENT_TICKS = [
 
 
 def _replay_real_incident() -> tuple[list[float], list[float]]:
-    ticks = [(beer, target, FREE_RISE_RATE_F_PER_H, dt_h) for beer, target, dt_h in REAL_INCIDENT_TICKS]
-    outputs = _replay(ticks)
+    outputs = _replay(REAL_INCIDENT_TICKS)
     targets = [target for _, target, _ in REAL_INCIDENT_TICKS]
     return outputs, targets
 
@@ -167,11 +169,14 @@ def test_real_incident_replay_stays_within_the_safety_envelope():
 
 # --- B. Synthetic sensor-noise chatter (generalizes A) -------------------
 
-def _warm_up_then_alternate(warm_up_tick: tuple[float, float, float, float], noise_pair: tuple[float, float], beer_target: float, rate: float, n_noise_ticks: int = 20) -> list[int]:
+def _warm_up_then_alternate(
+    warm_up_tick: tuple[float, float, float], noise_pair: tuple[float, float], beer_target: float,
+    n_noise_ticks: int = 20,
+) -> list[int]:
     warm_up = [warm_up_tick] * 6  # ~a few hours of sustained real disturbance -> a genuine, nonzero integral bias
-    noise = [(noise_pair[i % 2], beer_target, rate, 0.0083) for i in range(n_noise_ticks)]
+    noise = [(noise_pair[i % 2], beer_target, 0.0083) for i in range(n_noise_ticks)]
     outputs = _replay(warm_up + noise)
-    targets = [beer_target] * len(warm_up) + [beer_target] * len(noise)
+    targets = [beer_target] * (len(warm_up) + len(noise))
     return [_direction(o, t) for o, t in zip(outputs, targets)]
 
 
@@ -181,34 +186,33 @@ def test_noise_alone_does_not_flip_direction_under_a_held_target_with_an_existin
     # alternating 66/67F (quantization noise) around the still-held
     # target. Noise alone must not flip the demand direction.
     directions = _warm_up_then_alternate(
-        warm_up_tick=(69.0, 66.0, 0.0, 0.5), noise_pair=(66.0, 67.0), beer_target=66.0, rate=0.0,
+        warm_up_tick=(69.0, 66.0, 0.5), noise_pair=(66.0, 67.0), beer_target=66.0,
     )
     assert _count_reversals(directions) == 0
 
 
-def test_noise_alone_does_not_flip_direction_under_a_rising_ramp():
-    # Beer lagging behind a rising ramp for a while (needs heat), then
-    # probe noise on top -- same target throughout warm-up and noise (see
-    # the falling-ramp test's own comment on why that isolation matters).
-    directions = _warm_up_then_alternate(
-        warm_up_tick=(63.0, 66.0, FREE_RISE_RATE_F_PER_H, 0.5),
-        noise_pair=(65.0, 66.0), beer_target=66.0, rate=FREE_RISE_RATE_F_PER_H,
-    )
-    assert _count_reversals(directions) == 0
-
-
-def test_noise_alone_does_not_flip_direction_under_a_falling_ramp():
-    # Beer running above a falling ramp's current value for a while
-    # (needs cooling), then probe noise on top -- same target throughout,
-    # unlike the rising-ramp test above (which legitimately advances the
-    # target between warm-up and noise since it's modeling "beer still
-    # catching up to a moving target" rather than "noise around a fixed
-    # point" -- here we hold the target fixed to isolate noise alone).
-    cold_crash_rate = (38.0 - 68.0) / 96.0
-    directions = _warm_up_then_alternate(
-        warm_up_tick=(63.0, 60.0, cold_crash_rate, 0.5),
-        noise_pair=(59.0, 60.0), beer_target=60.0, rate=cold_crash_rate,
-    )
+def test_noise_alone_does_not_flip_direction_while_beer_lags_a_moving_target():
+    # Beer lagging behind a continuously-rising target for a while (needs
+    # heat), then probe noise on top -- the ramp itself is just
+    # beer_target_f moving tick to tick, same as control_loop.py feeds it.
+    rate = (70.0 - 66.0) / 6.0  # Free Rise's own real rate
+    integral = 0.0
+    directions = []
+    t_h = 0.0
+    beer_target = 63.0
+    # Warm-up: beer trailing a rising target for a few hours -- a real,
+    # nonzero heating bias in the integral.
+    for _ in range(6):
+        beer_target += rate * 0.5
+        beer_temp = beer_target - 3.0
+        integral = update_beer_error_integral(beer_temp, beer_target, integral, dt_h=0.5)
+        directions.append(_direction(chamber_target_for(beer_temp, beer_target, integral), beer_target))
+    # Noise: probe alternating +/-0.5F around the still-moving target.
+    for i in range(20):
+        beer_target += rate * 0.0083
+        beer_temp = beer_target - 3.0 + (0.5 if i % 2 == 0 else -0.5)
+        integral = update_beer_error_integral(beer_temp, beer_target, integral, dt_h=0.0083)
+        directions.append(_direction(chamber_target_for(beer_temp, beer_target, integral), beer_target))
     assert _count_reversals(directions) == 0
 
 
@@ -221,7 +225,7 @@ def test_larger_deviations_produce_proportionally_larger_corrections_not_capped(
     beer_target = 66.0
     offsets = []
     for beer_temp in (66.0, 68.0, 71.0, 76.0):  # 0, 2, 5, 10 degrees off
-        target = chamber_target_for(beer_temp, beer_target, 0.0, 0.0)
+        target = chamber_target_for(beer_temp, beer_target, 0.0)
         offsets.append(beer_target - target)  # how hard we're pushing to cool
     assert offsets == sorted(offsets), "correction should grow monotonically with the deviation"
     assert offsets[-1] > offsets[0] + 5, "a 10F deviation must produce a meaningfully bigger correction than a 0F one"
@@ -231,55 +235,46 @@ def test_a_large_sustained_disturbance_is_not_artificially_damped_by_chatter_pre
     # Nothing in this file's chatter-prevention properties should come at
     # the cost of timidity -- a real, large, sustained error should still
     # drive the chamber meaningfully far from the beer target.
-    outputs = _replay([(72.0, 66.0, 0.0, 0.5)] * 10)  # 5h sustained 6F error
+    outputs = _replay([(72.0, 66.0, 0.5)] * 10)  # 5h sustained 6F error
     assert outputs[-1] < 66.0 - 8.0, "a sustained 6F error for 5h should produce well over 8F of correction"
 
 
-# --- D. Ramp direction consistency (the actual root-cause fix) -----------
+# --- D. Full-ramp scenario, beer perpetually lagging ---------------------
 
-@pytest.mark.parametrize("rate", [FREE_RISE_RATE_F_PER_H, (38.0 - 68.0) / 96.0])
-def test_ramp_feedforward_sign_matches_ramp_direction_regardless_of_instantaneous_error_sign(rate: float):
-    # The OLD bug: ramp_push_f = abs(rate)/COUPLING, applied to whichever
-    # discrete mode the instantaneous error happened to select -- so a
-    # rising ramp's push could get applied in the COOLING direction if
-    # beer momentarily read above target. The new additive term must be
-    # identical regardless of the instantaneous error's own sign.
-    beer_target = 66.0
-    ramp_component_beer_above = (
-        chamber_target_for(67.0, beer_target, 0.0, rate) - chamber_target_for(67.0, beer_target, 0.0, 0.0)
-    )
-    ramp_component_beer_below = (
-        chamber_target_for(65.0, beer_target, 0.0, rate) - chamber_target_for(65.0, beer_target, 0.0, 0.0)
-    )
-    assert ramp_component_beer_above == pytest.approx(ramp_component_beer_below)
-    expected_positive = rate > 0
-    assert (ramp_component_beer_above > 0) == expected_positive
-
-
-# --- E. Parameterized full-ramp scenario ---------------------------------
-
-@pytest.mark.parametrize(
-    "rate_f_per_h,lag_f",
-    [
-        (FREE_RISE_RATE_F_PER_H, 1.0),  # Free Rise's own real rate
-        ((38.0 - 68.0) / 96.0, -1.0),  # Cold Crash's own real rate
-        (1.0, 1.0),  # steeper than either real stage, still plausible
-    ],
-)
-def test_a_beer_lagging_a_moving_target_never_chatters_across_the_whole_ramp(rate_f_per_h: float, lag_f: float):
-    # Beer held at a constant, realistic lag behind a continuously moving
-    # ramp target (never fully catching up, the common real case for a
-    # fast ramp) -- simulated over the full stage, checked for chatter,
-    # not exact physics (that's plant.py/projection.py's job).
-    beer_target_start = 66.0
+def test_a_beer_lagging_a_gentle_moving_target_never_chatters_across_the_whole_ramp():
+    # Cold Crash's own real rate -- INTEGRAL_MAX_F_H is sized to let the
+    # integral fully track this one (see that constant's own comment) --
+    # beer should smoothly close in on a small, stable lag, no chatter.
+    rate_f_per_h = (38.0 - 68.0) / 96.0
+    beer_target = 68.0
     dt_h = 0.1
-    directions = []
     integral = 0.0
-    for i in range(60):  # 6 simulated hours
-        t_h = i * dt_h
-        beer_target = beer_target_start + rate_f_per_h * t_h
-        beer_temp = beer_target - lag_f  # lag_f>0: beer trailing a rising ramp; <0: trailing a falling one
+    directions = []
+    for _ in range(60):  # 6 simulated hours
+        beer_target += rate_f_per_h * dt_h
+        beer_temp = beer_target - (-1.0)  # trailing a falling ramp: beer stays slightly above it
         integral = update_beer_error_integral(beer_temp, beer_target, integral, dt_h)
-        target = chamber_target_for(beer_temp, beer_target, integral, rate_f_per_h)
+        target = chamber_target_for(beer_temp, beer_target, integral)
+        directions.append(_direction(target, beer_target))
+    assert _count_reversals(directions) == 0
+
+
+def test_a_beer_lagging_a_steep_moving_target_saturates_smoothly_not_via_chatter():
+    # Free Rise's own real rate (1.5F/h as configured live) is steeper
+    # than INTEGRAL_MAX_F_H can fully track (see that constant's own
+    # comment) -- beer legitimately, permanently lags this ramp. The
+    # requirement this test protects isn't "catches up" (it structurally
+    # can't, and shouldn't be forced to), it's "still never chatters" even
+    # while saturated at the envelope.
+    rate_f_per_h = (75.0 - 66.0) / 6.0
+    beer_target = 66.0
+    dt_h = 0.1
+    integral = 0.0
+    directions = []
+    for _ in range(60):  # 6 simulated hours
+        beer_target += rate_f_per_h * dt_h
+        beer_temp = beer_target - 1.0  # a real, sustained lag behind the ramp
+        integral = update_beer_error_integral(beer_temp, beer_target, integral, dt_h)
+        target = chamber_target_for(beer_temp, beer_target, integral)
         directions.append(_direction(target, beer_target))
     assert _count_reversals(directions) == 0

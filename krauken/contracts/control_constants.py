@@ -62,31 +62,37 @@ BEER_KP_F_PER_F: Final[float] = 2.0
 # real fermentation data may move this once this ships.
 BEER_KI_F_PER_F_H: Final[float] = 2.0
 # INTEGRAL_MAX_F_H: anti-windup ceiling on the raw accumulated integral
-# (F-hours) itself, NOT on its output contribution -- clamping
-# beer_error_integral to +/-3.0 caps its output contribution
-# (BEER_KI_F_PER_F_H * integral) at +/-6.0F: comfortably above the 4.4F
-# needed to fully cancel the documented peak exotherm (headroom for a real
-# disturbance running hotter than the simulator's own documented peak),
-# but bounded so a prolonged real deviation (a stuck sensor, an
-# authored stage that's simply wrong) can't let the integral accumulate
-# without limit and cause a dangerous overshoot once whatever caused it
-# finally clears.
-INTEGRAL_MAX_F_H: Final[float] = 3.0
-# Assumed beer<->chamber thermal responsiveness, used ONLY to size how much
-# extra offset the cascade needs to add while the beer's OWN target is
-# actively ramping (see cascade.chamber_target_for's docstring) -- PI
-# alone corrects a deviation from a HELD setpoint just fine, but a target
-# that's ramping down (e.g. a cold crash) keeps moving out from under a
-# chamber that's only reacting to present error, so the beer settles into
-# a permanent lag behind it instead of ever closing the gap. Expressed the
-# same way plant.py's own beer_chamber_coupling is (the fraction of the
-# beer/chamber gap the beer closes per hour) so the parallel reads
-# directly, but this is a control-side ASSUMPTION about a typical
-# fermenter's thermal mass, not a physics measurement pulled from the
-# simulator -- real hardware has no such constant to read, so the cascade
-# has to assume one, exactly the way the PI gains above already are
-# assumed/tuned rather than derived.
-RAMP_FEEDFORWARD_COUPLING_PER_H: Final[float] = 0.05
+# (F-hours) itself, NOT on its output contribution. Now the ONLY thing
+# governing both exotherm cancellation AND ramp-tracking (an earlier,
+# separate ramp-feedforward term was removed -- see cascade.py's own
+# module docstring for why it was both redundant with a real PI's
+# integral and confirmed live to be actively harmful, saturating the
+# entire chamber safety envelope for hours on a real fermentation's
+# Free Rise stage). Standard control theory: a PI's integral settles on
+# its own, with no separate term needed, at whatever value sustains zero
+# steady-state error against a constant-rate ramp --
+# I_ss = rate / (coupling * BEER_KI_F_PER_F_H), using the same assumed
+# beer<->chamber coupling (0.05/h) platforms/simulator/plant.py's
+# PlantParams.beer_chamber_coupling documents.
+#
+# Sized with comfortable margin over the two REAL, already-authored
+# disturbances confirmed to matter -- not the largest ramp rate anyone
+# could ever author, which would require growing this ceiling large
+# enough to reproduce the same saturation risk the feedforward term had,
+# just relocated:
+#   - the simulator's documented peak exotherm (0.22F/h) needs
+#     0.22 / (0.05 * 2.0) = 2.2 F-h.
+#   - Cold Crash's own authored ramp (-0.3125F/h) needs
+#     0.3125 / (0.05 * 2.0) = 3.125 F-h.
+# 4.0 F-h covers both with margin (output contribution capped at
+# BEER_KI_F_PER_F_H * 4.0 = 8.0F). A stage ramping meaningfully faster
+# than that (Free Rise's own 1.5F/h would need 15 F-h) will legitimately,
+# safely lag the ramp instead -- a bounded outcome, surfaced honestly to
+# the user (the dashboard's "won't reach target" state) rather than
+# silently blowing through the envelope for hours. That's a property of
+# the authored stage, not something worth widening this ceiling to paper
+# over.
+INTEGRAL_MAX_F_H: Final[float] = 4.0
 
 # --- chamber/actuator side (enforced in the Hardware Supervisor) ---
 CHAMBER_DEADBAND_F: Final[float] = 0.5  # NOT from the mock -- see module docstring; the

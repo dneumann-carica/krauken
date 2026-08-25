@@ -3,13 +3,18 @@ from __future__ import annotations
 from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral
 
 # Gain values as of this writing (contracts/control_constants.py):
-# BEER_KP_F_PER_F=2.0, BEER_KI_F_PER_F_H=2.0, INTEGRAL_MAX_F_H=3.0,
-# RAMP_FEEDFORWARD_COUPLING_PER_H=0.05, CHAMBER_TARGET_MIN_F=28.0,
-# CHAMBER_TARGET_MAX_F=90.0 -- expected values below are computed directly
-# from these, spelled out in each test's own comment, deliberately NOT
-# imported symbolically: a test that recomputes its own expectation from
-# whatever the live constant happens to be can't catch a real regression
-# in the gain itself.
+# BEER_KP_F_PER_F=2.0, BEER_KI_F_PER_F_H=2.0, INTEGRAL_MAX_F_H=4.0,
+# CHAMBER_TARGET_MIN_F=28.0, CHAMBER_TARGET_MAX_F=90.0 -- expected values
+# below are computed directly from these, spelled out in each test's own
+# comment, deliberately NOT imported symbolically: a test that recomputes
+# its own expectation from whatever the live constant happens to be can't
+# catch a real regression in the gain itself.
+#
+# No ramp-rate tests here -- chamber_target_for() takes no ramp input at
+# all (see its own docstring for why a separate ramp-feedforward term was
+# removed: redundant with, and confirmed live to be actively harmful
+# alongside, the integral term above, which already supplies whatever
+# sustained offset a ramping target needs on its own).
 
 
 def test_holds_exactly_at_beer_target_with_zero_error_and_zero_integral():
@@ -42,47 +47,21 @@ def test_update_beer_error_integral_accumulates_error_over_elapsed_time():
 
 
 def test_update_beer_error_integral_anti_windup_clamps_the_positive_side():
-    # 2.9 + (68.0-67.0)*1.0 = 3.9, clamped to the 3.0 ceiling.
-    assert update_beer_error_integral(67.0, 68.0, 2.9, dt_h=1.0) == 3.0
+    # 3.9 + (68.0-67.0)*1.0 = 4.9, clamped to the 4.0 ceiling.
+    assert update_beer_error_integral(67.0, 68.0, 3.9, dt_h=1.0) == 4.0
 
 
 def test_update_beer_error_integral_anti_windup_clamps_the_negative_side():
-    # -2.9 + (68.0-69.0)*1.0 = -3.9, clamped to the -3.0 floor.
-    assert update_beer_error_integral(69.0, 68.0, -2.9, dt_h=1.0) == -3.0
-
-
-def test_ramp_feedforward_leaves_a_held_target_unchanged():
-    # rate 0 (the default, and what a "constant" stage always has) -- no
-    # feedforward contribution, same as a plain PI response.
-    assert chamber_target_for(68.0, 68.0, 0.0, ramp_rate_f_per_h=0.0) == 68.0
-
-
-def test_ramp_feedforward_pushes_the_chamber_further_below_a_downward_ramp():
-    # A cold-crash-style ramp (68->38F over 96h -> -0.3125F/h) needs the
-    # chamber running continuously below the MOVING target just to keep
-    # the beer tracking it, on top of whatever the PI terms are doing
-    # about present error (here, none -- beer sitting exactly at target,
-    # zero integral). -0.3125 / 0.05 = -6.25.
-    assert chamber_target_for(68.0, 68.0, 0.0, ramp_rate_f_per_h=-0.3125) == 68.0 - 6.25
-
-
-def test_ramp_feedforward_is_symmetric_for_an_upward_ramp():
-    assert chamber_target_for(68.0, 68.0, 0.0, ramp_rate_f_per_h=0.3125) == 68.0 + 6.25
-
-
-def test_ramp_feedforward_stacks_additively_with_the_proportional_term():
-    # error=+1.0 (beer running cold) -> +2.0, PLUS the same -6.25 ramp
-    # feedforward as above -- additive, not a max()/replace() choice like
-    # the old fixed-clamp design needed.
-    assert chamber_target_for(67.0, 68.0, 0.0, ramp_rate_f_per_h=-0.3125) == 68.0 + 2.0 - 6.25
+    # -3.9 + (68.0-69.0)*1.0 = -4.9, clamped to the -4.0 floor.
+    assert update_beer_error_integral(69.0, 68.0, -3.9, dt_h=1.0) == -4.0
 
 
 def test_clamps_to_the_absolute_safety_envelope():
-    # An extreme combination -- max negative integral plus a huge,
-    # badly-authored ramp -- must never ask real equipment for an absurd
-    # target: 40.0 + 2.0*0 + 2.0*(-3.0) + (-5.0/0.05) = 40 - 6 - 100 = -66,
+    # An extreme combination -- max negative integral plus a huge
+    # instantaneous error -- must never ask real equipment for an absurd
+    # target: 40.0 + 2.0*(40.0-80.0) + 2.0*(-4.0) = 40 - 80 - 8 = -48,
     # clamped to the 28.0 floor.
-    assert chamber_target_for(40.0, 40.0, -3.0, ramp_rate_f_per_h=-5.0) == 28.0
+    assert chamber_target_for(80.0, 40.0, -4.0) == 28.0
 
 
 def test_sustained_one_directional_error_drives_a_growing_correction_via_the_integral():

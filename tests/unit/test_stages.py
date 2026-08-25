@@ -5,7 +5,6 @@ from krauken.contracts.stages import (
     GravityGate,
     TempHoldGate,
     stage_finished,
-    target_rate_f_per_h,
     target_temp_f,
 )
 
@@ -20,23 +19,6 @@ def test_target_temp_ramps_linearly_then_clamps_at_the_end():
     assert target_temp_f(stage, elapsed_h=0.0) == 66.0
     assert target_temp_f(stage, elapsed_h=12.0) == 68.0
     assert target_temp_f(stage, elapsed_h=100.0) == 70.0  # past ramp_hours -- clamped, not extrapolated
-
-
-def test_target_rate_is_zero_for_a_constant_stage():
-    stage = {"temp_mode": "constant", "temp_f": 66.0}
-    assert target_rate_f_per_h(stage, elapsed_h=5.0) == 0.0
-
-
-def test_target_rate_is_the_ramps_slope_while_still_ramping():
-    stage = {"temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0}
-    assert target_rate_f_per_h(stage, elapsed_h=0.0) == -0.3125
-    assert target_rate_f_per_h(stage, elapsed_h=50.0) == -0.3125
-
-
-def test_target_rate_is_zero_once_the_ramp_has_arrived():
-    stage = {"temp_mode": "stepped", "temp_from_f": 68.0, "temp_to_f": 38.0, "ramp_hours": 96.0}
-    assert target_rate_f_per_h(stage, elapsed_h=96.0) == 0.0
-    assert target_rate_f_per_h(stage, elapsed_h=200.0) == 0.0
 
 
 def test_time_end_mode():

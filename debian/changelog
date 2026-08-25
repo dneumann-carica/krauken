@@ -1,3 +1,29 @@
+krauken (0.1.28) stable; urgency=medium
+
+  * Removed the cascade's ramp-feedforward term entirely -- confirmed
+    live to be a real bug, not just a tuning nuisance: for Free Rise's
+    authored rate (1.5F/h), the feedforward term alone exceeded the
+    entire chamber safety envelope, pinning chamber_target_f at 90F for
+    over 3 of the stage's ~4 hours while beer overshot the ramp's own end
+    target by 3F. The term was carried over from the old bang-bang
+    cascade, which had no integral state at all and genuinely needed a
+    manual substitute for one -- with a real PI controller, it's
+    redundant: standard control theory says the integral term settles,
+    on its own, at exactly the value needed to sustain zero steady-state
+    error against a constant-rate ramp, no separate term required, held
+    stage or ramping one, treated identically. chamber_target_for() now
+    takes no ramp-rate input at all.
+  * Re-derived INTEGRAL_MAX_F_H (3.0 -> 4.0 F-h) now that it's the only
+    thing governing both exotherm cancellation and ramp-tracking --
+    sized with margin over the two real, already-authored disturbances
+    that matter (the documented peak exotherm, and Cold Crash's own
+    ramp), not the largest rate anyone could ever author. A ramp faster
+    than that (Free Rise's own 1.5F/h) now legitimately, safely lags
+    instead of saturating the envelope -- surfaced honestly via the
+    dashboard's "won't reach target" state rather than silently blown
+    through.
+  * Removed contracts/stages.py's now-fully-unused target_rate_f_per_h().
+
 krauken (0.1.27) stable; urgency=medium
 
   * Dashboard: replaced the Setpoint tile's "±0.5°F" sublabel -- a
