@@ -44,6 +44,18 @@ class ControlState:
     # F-hours, already anti-windup-clamped to +/-INTEGRAL_MAX_F_H by
     # update_beer_error_integral() itself.
     beer_error_integral: float = 0.0
+    # The derivative term's own filtered state (contracts/cascade.py's
+    # update_closing_rate_filter()/chamber_target_for()) -- same
+    # fermentation-scoped reset semantics as beer_error_integral above,
+    # for the same reason (a stage transition within one fermentation
+    # carries whatever the controller was already doing into the next
+    # stage; see this class's own module docstring). prev_beer_temp_f/
+    # prev_beer_target_f are None until the first tick with a healthy
+    # beer reading has run once -- update_closing_rate_filter() treats
+    # that as "no rate available yet" rather than fabricating one.
+    closing_rate_filtered_f_per_h: float = 0.0
+    prev_beer_temp_f: float | None = None
+    prev_beer_target_f: float | None = None
     # ctx.clock.monotonic() as of the last tick (ANY tick, fermentation
     # active or not -- see control_loop.py's control_tick(), which runs
     # every scheduled tick regardless), so update_beer_error_integral()
@@ -68,6 +80,9 @@ class ControlState:
     def reset(self) -> None:
         self.last_chamber_target_f = None
         self.beer_error_integral = 0.0
+        self.closing_rate_filtered_f_per_h = 0.0
+        self.prev_beer_temp_f = None
+        self.prev_beer_target_f = None
         self.last_tick_monotonic = None
         self.gates = {}
         self.last_sample = None

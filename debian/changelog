@@ -1,3 +1,40 @@
+krauken (0.1.30) stable; urgency=medium
+
+  * Added a derivative term to the beer-temp cascade -- genuinely PID now,
+    not PI. Confirmed live (fermentation 3's Free Rise stage) that P+I
+    alone leaves real ramp-tracking headroom unused once
+    INTEGRAL_MAX_F_H saturates on a fast-moving ramp target (beer lagging
+    3.5F behind, chamber pinned well short of the safety envelope). Two
+    alternatives were tried first and rejected by direct simulation, not
+    assumption: back-calculation anti-windup against the internal ceiling
+    actually recovers SLOWER than the existing plain clamp; dropping that
+    ceiling for textbook conditional-integration against the real
+    actuator envelope is correct and safe but makes a realistic transient
+    WORSE (more overshoot), since the real envelope is far wider than the
+    disturbance-sized internal ceiling.
+  * The derivative term reacts to beer's own closing rate relative to the
+    TARGET's own observed rate of change (not raw d(beer)/dt, which would
+    permanently brake throughout any real ramp) -- verified this leaves
+    sustained-disturbance steady-state tracking essentially untouched
+    (exotherm/Cold Crash: ~0F error, same as before) while cutting
+    Free Rise-style ramp lag by roughly 25% and reducing a real startup
+    transient's overshoot by roughly 44%, both confirmed by simulation
+    against real recorded data before shipping.
+  * Required two additional pieces, each verified necessary by direct
+    testing against a real recorded sensor-settling artifact from this
+    exact fermentation (a 5.75F swing in under 2 minutes): the raw
+    closing-rate signal is clamped to a physically-plausible maximum
+    before it's ever filtered (no real beer thermal mass could produce
+    what that artifact implied), and the low-pass filter itself uses a
+    multi-hour time constant, not the minutes typical PID tutorials use --
+    both were independently confirmed necessary; neither alone was
+    sufficient to keep the artifact from slamming the commanded chamber
+    target toward the safety envelope.
+  * New constants: BEER_KD_F_PER_F_PER_H, CLOSING_RATE_FILTER_TAU_H,
+    MAX_PLAUSIBLE_BEER_RATE_F_PER_H (contracts/control_constants.py).
+
+ -- The Krauken Project <dneumann@arpio.io>  Wed, 26 Aug 2026 03:35:00 -0400
+
 krauken (0.1.29) stable; urgency=medium
 
   * Fix: the fermentation chart's forward-projection (dashed) line started

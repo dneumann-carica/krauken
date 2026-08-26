@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, replace
 
-from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral
+from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral, update_closing_rate_filter
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +141,13 @@ class PlantState:
     # state itself via dataclasses.replace() rather than threading it
     # through a function that has no reason to know about it.
     beer_error_integral: float = 0.0
+    # step()'s own derivative-filter state (contracts/cascade.py's
+    # update_closing_rate_filter()) -- same overlay-via-replace() pattern
+    # and same "0.0/None on a fresh state, live driver never touches this"
+    # reasoning as beer_error_integral above.
+    closing_rate_filtered_f_per_h: float = 0.0
+    prev_beer_temp_f: float | None = None
+    prev_beer_target_f: float | None = None
 
 
 def ambient_f(p: AmbientParams, t_h: float, total_h: float) -> float:
@@ -264,12 +271,28 @@ def step(state: PlantState, p: PlantParams, dt_h: float, beer_target_f: float) -
     own comment) -- nothing downstream of this offline path reads it --
     derived from which side of beer_target_f drive_to landed on, purely
     so it's still a sensible human-readable label rather than something
-    arbitrary."""
+    arbitrary.
+
+    Updates the derivative filter (update_closing_rate_filter()) the same
+    way and for the same reason as the integral above -- the projection's
+    own closing-rate signal accumulates real filtered history over
+    projected time rather than restarting cold at every point."""
     new_integral = update_beer_error_integral(state.beer_temp_f, beer_target_f, state.beer_error_integral, dt_h)
-    drive_to = chamber_target_for(state.beer_temp_f, beer_target_f, new_integral)
+    new_closing_rate = update_closing_rate_filter(
+        state.beer_temp_f, beer_target_f,
+        state.prev_beer_temp_f, state.prev_beer_target_f,
+        state.closing_rate_filtered_f_per_h, dt_h,
+    )
+    drive_to = chamber_target_for(state.beer_temp_f, beer_target_f, new_integral, new_closing_rate)
     mode = "cool" if drive_to < beer_target_f else "heat" if drive_to > beer_target_f else "idle"
     new_state = advance_physics(state, p, dt_h, drive_to, mode)
-    return replace(new_state, beer_error_integral=new_integral)
+    return replace(
+        new_state,
+        beer_error_integral=new_integral,
+        closing_rate_filtered_f_per_h=new_closing_rate,
+        prev_beer_temp_f=state.beer_temp_f,
+        prev_beer_target_f=beer_target_f,
+    )
 
 
 # --- Independent per-role stepping, for the live SimPlantEngine ---------

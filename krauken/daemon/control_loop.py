@@ -15,7 +15,7 @@ import logging
 from typing import Any
 
 from krauken.contracts import failsafe, og_detection, stages as stages_mod
-from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral
+from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral, update_closing_rate_filter
 from krauken.daemon import drivers, fermentation
 from krauken.daemon.sampler import SampleCandidate, SamplingPolicy
 from krauken.daemon.timefmt import iso as _iso
@@ -259,7 +259,17 @@ async def _control_tick_locked(ctx: Any) -> None:
         ctx.control_state.beer_error_integral = update_beer_error_integral(
             readings.beer.temp_f, beer_target, ctx.control_state.beer_error_integral, dt_h,
         )
-        chamber_target = chamber_target_for(readings.beer.temp_f, beer_target, ctx.control_state.beer_error_integral)
+        ctx.control_state.closing_rate_filtered_f_per_h = update_closing_rate_filter(
+            readings.beer.temp_f, beer_target,
+            ctx.control_state.prev_beer_temp_f, ctx.control_state.prev_beer_target_f,
+            ctx.control_state.closing_rate_filtered_f_per_h, dt_h,
+        )
+        chamber_target = chamber_target_for(
+            readings.beer.temp_f, beer_target,
+            ctx.control_state.beer_error_integral, ctx.control_state.closing_rate_filtered_f_per_h,
+        )
+        ctx.control_state.prev_beer_temp_f = readings.beer.temp_f
+        ctx.control_state.prev_beer_target_f = beer_target
         target_source = "profile"
         ctx.control_state.last_chamber_target_f = chamber_target
     else:

@@ -94,6 +94,59 @@ BEER_KI_F_PER_F_H: Final[float] = 2.0
 # over.
 INTEGRAL_MAX_F_H: Final[float] = 4.0
 
+# BEER_KD_F_PER_F_PER_H / CLOSING_RATE_FILTER_TAU_H /
+# MAX_PLAUSIBLE_BEER_RATE_F_PER_H: the derivative term (contracts/
+# cascade.py's chamber_target_for()/update_closing_rate_filter()), added
+# after real live data (fermentation 3's Free Rise stage) showed P+I
+# alone leaves real headroom unused once INTEGRAL_MAX_F_H saturates on a
+# fast-moving ramp target -- see cascade.py's own module docstring for the
+# two alternatives (back-calculation anti-windup; dropping the internal
+# ceiling for the real envelope) that were tried and rejected first, each
+# by direct simulation, not assumption.
+#
+# BEER_KD_F_PER_F_PER_H: chamber-target offset (F) per (F/h) of filtered
+# closing rate. Chosen by sweeping Kd against CLOSING_RATE_FILTER_TAU_H
+# together (a bigger Kd needs a longer filter to stay noise-safe) across
+# four scenarios simulated together, not tuned against any one alone:
+#   - the real observed transient (a ~4F startup gap): overshoot improves
+#     from today's P+I-only +0.91F to +0.51F.
+#   - Free Rise-style ramp tracking (1.5F/h, matching the live batch):
+#     mid-ramp lag improves from +3.32F to +2.48F (~25%).
+#   - sustained disturbance steady state (documented exotherm 0.22F/h,
+#     Cold Crash's own -0.3125F/h): steady-state error stays ~0
+#     (-0.0009F / -0.0013F), matching P+I alone -- the derivative doesn't
+#     compete with the integral's job.
+#   - realistic sensor noise (sigma=0.03F/tick): zero heat/cool demand
+#     reversals over a simulated 24h, across two random seeds.
+# 24.0 was the smallest value in that sweep clearing all four cleanly;
+# higher values keep improving overshoot/lag further with diminishing
+# returns (both are bounded by CHAMBER_TARGET_MAX_F itself, not by Kd) at
+# the cost of needing an even longer filter to stay noise-clean.
+BEER_KD_F_PER_F_PER_H: Final[float] = 24.0
+# CLOSING_RATE_FILTER_TAU_H: low-pass time constant (hours) on the
+# closing-rate signal Kd multiplies. Long by ordinary PID standards
+# (minutes, not hours) because BEER_KD_F_PER_F_PER_H is large enough that
+# even ordinary per-tick sensor noise would otherwise get amplified into
+# real relay chatter -- verified directly: at this tau, realistic noise
+# (sigma=0.03F/tick) produces zero demand reversals over 24h; shorter
+# taus (0.25h) produced hundreds at the same Kd.
+CLOSING_RATE_FILTER_TAU_H: Final[float] = 4.0
+# MAX_PLAUSIBLE_BEER_RATE_F_PER_H: hard clamp on the RAW (pre-filter)
+# closing-rate signal -- no real beer thermal mass can plausibly change
+# faster than this, so anything beyond it is a sensor artifact, not
+# physics. Necessary ALONGSIDE the long filter above, not redundant with
+# it: a single large glitch has no filter history to be averaged against
+# yet, so even CLOSING_RATE_FILTER_TAU_H's 4 hours barely dents it in the
+# first few ticks. Confirmed against this exact fermentation's own
+# recorded probe-settling artifact (a real 5.75F swing in under 2
+# minutes, implying a momentary rate of -159F/h): without this clamp, that
+# glitch alone slammed the commanded chamber target straight to
+# CHAMBER_TARGET_MAX_F on tick one, even at a 4-hour filter. 5.0F/h is
+# comfortably above the fastest genuine rate this session has ever
+# observed (Free Rise's own ~1.2-1.3F/h during real tracking) while still
+# well below the artifact's implied rate.
+MAX_PLAUSIBLE_BEER_RATE_F_PER_H: Final[float] = 5.0
+
 # --- chamber/actuator side (enforced in the Hardware Supervisor) ---
 CHAMBER_DEADBAND_F: Final[float] = 0.5  # NOT from the mock -- see module docstring; the
 # mock's simulated fridge asymptotically approaches the clamp and never arrives, so it
