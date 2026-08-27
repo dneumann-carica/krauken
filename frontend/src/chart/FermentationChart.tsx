@@ -162,7 +162,9 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
     }
     const toX = timeScale(allTs, plotWidth);
     const xs = series.ts.map(toX);
-    const allTemps = [...series.beer_temp_f, ...series.chamber_temp_f, ...series.chamber_target_f];
+    const allTemps = [
+      ...series.beer_temp_f, ...series.chamber_temp_f, ...series.chamber_target_f, ...series.effective_target_f,
+    ];
     if (hasProjection) allTemps.push(...proj!.beer_temp_f, ...proj!.chamber_temp_f, ...proj!.chamber_target_f);
     const temp = tempScale(allTemps, PLOT_HEIGHT);
     const toGravityY = gravityScale(PLOT_HEIGHT);
@@ -171,6 +173,15 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
     const beerPath = buildLinePath(xs, series.beer_temp_f, temp.toY, breaks);
     const chamberPath = buildLinePath(xs, series.chamber_temp_f, temp.toY, breaks);
     const targetPath = buildLinePath(xs, series.chamber_target_f, temp.toY, breaks);
+    // Beer target -- the beer-side equivalent of the Setpoint line above,
+    // real data only: deliberately no forward-projection continuation (see
+    // where hasProjection is handled below), unlike every other series
+    // here. It's already exactly what target_temp_f() says the authored
+    // stage wants RIGHT NOW, current stage or a future one alike, so
+    // projecting it forward would just be re-deriving the ribbon's own
+    // stage schedule a second time in a different visual form -- the
+    // ribbon already shows that.
+    const beerTargetPath = buildLinePath(xs, series.effective_target_f, temp.toY, breaks);
     const gravityPath = hasGravity ? buildLinePath(xs, series.gravity, toGravityY, breaks) : "";
 
     // Dotted bridges across the same gaps that just broke the lines above --
@@ -180,6 +191,7 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
     const beerGapPath = buildGapPaths(xs, series.beer_temp_f, temp.toY, series.ts, series.gaps);
     const chamberGapPath = buildGapPaths(xs, series.chamber_temp_f, temp.toY, series.ts, series.gaps);
     const targetGapPath = buildGapPaths(xs, series.chamber_target_f, temp.toY, series.ts, series.gaps);
+    const beerTargetGapPath = buildGapPaths(xs, series.effective_target_f, temp.toY, series.ts, series.gaps);
     const gravityGapPath = hasGravity ? buildGapPaths(xs, series.gravity, toGravityY, series.ts, series.gaps) : "";
 
     let beerProjPath = "";
@@ -228,8 +240,8 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
     }
 
     return {
-      xs, temp, toGravityY, beerPath, chamberPath, targetPath, gravityPath, duty, ribbon, stageLines, xTicks,
-      beerGapPath, chamberGapPath, targetGapPath, gravityGapPath,
+      xs, temp, toGravityY, beerPath, chamberPath, targetPath, beerTargetPath, gravityPath, duty, ribbon, stageLines, xTicks,
+      beerGapPath, chamberGapPath, targetGapPath, beerTargetGapPath, gravityGapPath,
       beerProjPath, chamberProjPath, targetProjPath, nowX,
     };
   }, [series, stages, plotWidth, hasGravity, hasProjection, proj, complete]);
@@ -435,6 +447,12 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
 
                 {/* series */}
                 <path d={model.targetPath} fill="none" stroke="var(--kr-plan)" strokeWidth={1.5} strokeDasharray="4 3" />
+                {/* Beer target -- same dashed rhythm/weight as Setpoint above (its beer-side
+                    equivalent), but tinted with the beer series' own accent color (at reduced
+                    opacity, same fade technique the forward-projection lines below use) rather
+                    than the chamber-family's neutral gray, so it reads as paired with the beer
+                    temp line at a glance instead of looking like a second chamber setpoint. */}
+                <path d={model.beerTargetPath} fill="none" stroke="var(--kr-accent)" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.45} />
                 {hasGravity && <path d={model.gravityPath} fill="none" stroke="var(--kr-gravity)" strokeWidth={1.5} strokeDasharray="3 2" />}
                 <path d={model.chamberPath} fill="none" stroke="var(--kr-cool)" strokeWidth={1.75} />
                 <path d={model.beerPath} fill="none" stroke="var(--kr-accent)" strokeWidth={2} />
@@ -448,6 +466,7 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
                     even at a glance. Drawn over the breaks buildLinePath just made, so a gap
                     never reads as simply missing/blank either. */}
                 <path d={model.targetGapPath} fill="none" className={styles.gapPath} />
+                <path d={model.beerTargetGapPath} fill="none" className={styles.gapPath} />
                 {hasGravity && <path d={model.gravityGapPath} fill="none" className={styles.gapPath} />}
                 <path d={model.chamberGapPath} fill="none" className={styles.gapPath} />
                 <path d={model.beerGapPath} fill="none" className={styles.gapPath} />
@@ -555,9 +574,10 @@ function Legend({ hasGravity, hasGaps }: { hasGravity: boolean; hasGaps: boolean
   return (
     <div className={styles.legend}>
       <LegendItem color="var(--kr-accent)" label="Beer temp" />
+      <LegendItem color="var(--kr-accent)" label="Beer target" dashed opacity={0.45} />
       <LegendItem color="var(--kr-cool)" label="Chamber temp" />
-      {hasGravity && <LegendItem color="var(--kr-gravity)" label="Gravity" dashed />}
       <LegendItem color="var(--kr-plan)" label="Setpoint" dashed />
+      {hasGravity && <LegendItem color="var(--kr-gravity)" label="Gravity" dashed />}
       {hasGaps && <LegendItem color="var(--kr-ink-muted)" label="Gap (daemon down)" dotted />}
     </div>
   );
@@ -568,16 +588,22 @@ function LegendItem({
   label,
   dashed = false,
   dotted = false,
+  opacity,
 }: {
   color: string;
   label: string;
   dashed?: boolean;
   dotted?: boolean;
+  /** Matches a series line drawn at reduced opacity (e.g. Beer target) so
+   * the legend swatch reads at the same visual weight as the line it
+   * keys, instead of a full-strength swatch promising a bolder line than
+   * the chart actually draws. */
+  opacity?: number;
 }) {
   const swatchClass = dotted ? styles.swatchDotted : dashed ? styles.swatchDashed : styles.swatch;
   return (
     <span className={styles.legendItem}>
-      <span className={swatchClass} style={{ background: dashed || dotted ? undefined : color, color }} />
+      <span className={swatchClass} style={{ background: dashed || dotted ? undefined : color, color, opacity }} />
       {label}
     </span>
   );

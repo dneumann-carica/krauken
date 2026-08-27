@@ -115,6 +115,17 @@ describe("FermentationChart", () => {
     // contracts/projection.py's module docstring.
     expect(container.querySelectorAll("path[stroke-dasharray='2 3']")).toHaveLength(3);
     expect(container.querySelector("path[stroke='var(--kr-gravity)'][stroke-dasharray='2 3']")).not.toBeInTheDocument();
+    // Beer target deliberately has no projected continuation either -- it's
+    // already exactly what target_temp_f() says the authored stage wants
+    // right now (current stage or a future one), so projecting it forward
+    // would just re-derive the ribbon's own stage schedule in a different
+    // visual form; only the real (left-of-NOW) beer target line is drawn.
+    // stroke-width='1.5' narrows this to the beer-target line's own weight
+    // -- the real beer_temp_f projection also uses var(--kr-accent) with
+    // this same dash pattern, just at stroke-width 2.
+    expect(
+      container.querySelector("path[stroke='var(--kr-accent)'][stroke-dasharray='2 3'][stroke-width='1.5']"),
+    ).not.toBeInTheDocument();
   });
 
   it("bridges each projected path to start exactly where its solid line ends, no gap", () => {
@@ -157,18 +168,19 @@ describe("FermentationChart", () => {
   it("shows the Gap legend entry and draws a dotted bridge path when the series has a reported gap", () => {
     const { container } = render(<FermentationChart series={series()} stages={[stage({})]} />);
     expect(screen.getByText("Gap (daemon down)")).toBeInTheDocument();
-    // The gap-bridge <path> elements are always present (four, one per
-    // series, all sharing styles.gapPath -- deliberately one neutral
-    // treatment, not per-series color, so a gap is never confused with a
-    // projection of the same series); only their `d` is conditional on
-    // there being anything to bridge. The fixture's one gap
+    // The gap-bridge <path> elements are always present (five, one per
+    // series -- beer temp, chamber temp, chamber target (Setpoint), beer
+    // target, gravity -- all sharing styles.gapPath -- deliberately one
+    // neutral treatment, not per-series color, so a gap is never confused
+    // with a projection of the same series); only their `d` is conditional
+    // on there being anything to bridge. The fixture's one gap
     // (2026-01-02 -> 2026-01-04) has a non-null value at both ends for at
     // least chamber_temp_f and effective_target_f, so at least one of the
-    // four must draw a real M...L... segment (exact pixel placement is
+    // five must draw a real M...L... segment (exact pixel placement is
     // geometry.test.ts's job, via buildGapPaths directly -- this just pins
     // that the chart actually wires gaps through to a real path).
     const gapPaths = Array.from(container.getElementsByClassName(styles.gapPath));
-    expect(gapPaths).toHaveLength(4);
+    expect(gapPaths).toHaveLength(5);
     expect(gapPaths.some((p) => /^M[\d.]+,[\d.]+ L[\d.]+,[\d.]+$/.test(p.getAttribute("d") ?? ""))).toBe(true);
   });
 
@@ -198,11 +210,32 @@ describe("FermentationChart", () => {
     expect(targetPathD(distinct)).not.toEqual(targetPathD(matchingBeerTarget));
   });
 
+  it("draws a Beer target line from effective_target_f, styled subtly like Setpoint but in the beer color family", () => {
+    const beerTargetPathD = (container: HTMLElement) =>
+      container.querySelector("path[stroke='var(--kr-accent)'][stroke-dasharray='4 3']")?.getAttribute("d");
+
+    const { container: low } = render(
+      <FermentationChart series={series({ effective_target_f: [60, 60, 60, 60] })} stages={[stage({})]} />,
+    );
+    const { container: high } = render(
+      <FermentationChart series={series({ effective_target_f: [70, 70, 70, 70] })} stages={[stage({})]} />,
+    );
+    expect(beerTargetPathD(low)).toBeTruthy();
+    expect(beerTargetPathD(low)).not.toEqual(beerTargetPathD(high));
+
+    // Same dashed rhythm and stroke width as Setpoint (its beer-side
+    // equivalent), distinguished by color/opacity, not by a different dash.
+    const beerTarget = low.querySelector("path[stroke='var(--kr-accent)'][stroke-dasharray='4 3']");
+    expect(beerTarget?.getAttribute("stroke-width")).toBe("1.5");
+    expect(beerTarget?.getAttribute("opacity")).toBe("0.45");
+    expect(screen.getAllByText("Beer target")[0]).toBeInTheDocument();
+  });
+
   it("draws no gap-bridge path (empty d) when the series has no reported gaps", () => {
     const { container } = render(<FermentationChart series={series({ gaps: [] })} stages={[stage({})]} />);
     expect(screen.queryByText("Gap (daemon down)")).not.toBeInTheDocument();
     const gapPaths = Array.from(container.getElementsByClassName(styles.gapPath));
-    expect(gapPaths).toHaveLength(4);
+    expect(gapPaths).toHaveLength(5);
     gapPaths.forEach((p) => expect(p.getAttribute("d")).toBe(""));
   });
 });

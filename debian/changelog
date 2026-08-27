@@ -1,3 +1,17 @@
+krauken (0.1.31) stable; urgency=medium
+
+  * Chart: added a Beer target line (effective_target_f) -- the beer-side
+    equivalent of the existing Setpoint (chamber target) line, styled to
+    match it (same dashed rhythm and stroke width) but tinted with the
+    beer series' own accent color at reduced opacity, so it reads as
+    paired with the beer temp line rather than a second chamber setpoint.
+    Deliberately real-data-only, no forward-projection continuation past
+    "NOW" -- it's already exactly what the authored stage wants right now,
+    current or future stage alike, so projecting it forward would just
+    re-derive the ribbon's own stage schedule in a different visual form.
+
+ -- The Krauken Project <dneumann@arpio.io>  Wed, 26 Aug 2026 21:15:00 -0400
+
 krauken (0.1.30) stable; urgency=medium
 
   * Added a derivative term to the beer-temp cascade -- genuinely PID now,
