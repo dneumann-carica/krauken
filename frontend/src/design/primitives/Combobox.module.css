@@ -62,7 +62,7 @@
 }
 .option:hover,
 .optionHighlighted {
-  background: var(--kr-accent-faint);
+  background: var(--kr-accent-wash);
 }
 
 .empty {

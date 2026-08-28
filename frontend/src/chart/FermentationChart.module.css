@@ -90,7 +90,7 @@
   border-top-color: var(--kr-cool);
 }
 .ribbonActive {
-  background: var(--kr-accent-faint);
+  background: var(--kr-accent-wash);
   border-top-color: var(--kr-accent);
 }
 .ribbonActive .ribbonName { color: var(--kr-ink); }

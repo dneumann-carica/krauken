@@ -14,6 +14,11 @@ on Arpio's marketing site. */
   --kr-accent-tint:  #FFE7DF;
   --kr-accent-faint: #FFF3EF;
   --kr-accent-ink:   #A32A02;
+  /* Adaptive "selected" wash -- for surfaces paired with ink-family text
+     (--kr-ink/--kr-ink-body), unlike --kr-accent-faint which is a *fixed*
+     tint always paired with the fixed --kr-accent-ink (status chips). This
+     one needs to darken in dark mode so ink text stays legible on it. */
+  --kr-accent-wash:  #FFF3EF;
 
   /* ---- Series semantics -------------------------------------
      Chamber/cooling series (was Arpio's --light-blue) */
@@ -69,5 +74,6 @@ on Arpio's marketing site. */
     --kr-plot-bg:        #171B30;
     --kr-border:         #2A2E45;
     --kr-border-strong:  #3B4059;
+    --kr-accent-wash:    #33201A;
   }
 }

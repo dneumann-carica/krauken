@@ -170,7 +170,7 @@
 }
 .probeRowMoved {
   border-color: var(--kr-accent);
-  background: var(--kr-accent-faint);
+  background: var(--kr-accent-wash);
 }
 .probeDelta {
   font: var(--kr-type-small);
@@ -206,7 +206,7 @@
 }
 .probeCardSelected {
   border-color: var(--kr-accent);
-  background: var(--kr-accent-faint);
+  background: var(--kr-accent-wash);
 }
 .probeCardMain {
   display: flex;

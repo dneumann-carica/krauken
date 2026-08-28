@@ -155,7 +155,7 @@ button.iconButton {
 }
 .stageNameButton:hover:not(:disabled) {
   border-color: var(--kr-border);
-  background: var(--kr-accent-faint);
+  background: var(--kr-accent-wash);
 }
 .stageNameButton:disabled {
   cursor: default;

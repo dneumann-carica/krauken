@@ -1,3 +1,20 @@
+krauken (0.1.32) stable; urgency=medium
+
+  * Fixed unreadable text in dark mode on accent-tinted "selected" surfaces
+    (the active-stage ribbon badge, Combobox's hovered/highlighted option,
+    HardwareWizard's selected probe row/card, and the plan dialog's stage
+    name hover) -- they all painted --kr-ink/--kr-ink-body text over
+    --kr-accent-faint, a background fixed at a near-white tint in both
+    themes, which washed out once the ink tokens flipped to light colors
+    for dark mode. Split a new --kr-accent-wash token off of
+    --kr-accent-faint for this "selected wash" pattern (adaptive: darkens
+    in dark mode) and left --kr-accent-faint alone for the fixed-tint
+    status-chip pattern (paired with the fixed --kr-accent-ink text, by
+    design theme-invariant, e.g. HardwareSetupView's chipOn and
+    GettingStartedView's titleMenuAction).
+
+ -- The Krauken Project <dneumann@arpio.io>  Thu, 27 Aug 2026 10:00:00 -0400
+
 krauken (0.1.31) stable; urgency=medium
 
   * Chart: added a Beer target line (effective_target_f) -- the beer-side
