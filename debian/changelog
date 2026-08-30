@@ -1,3 +1,32 @@
+krauken (0.1.33) stable; urgency=medium
+
+  * Beer-temp cascade: added a proximity taper on the derivative term's
+    BRAKING contribution -- confirmed live (fermentation 4, 2026-08-28,
+    Primary fermentation) that D's braking could cancel almost the entire
+    P+I push while beer was still 5.65F short of a held target (commanded
+    chamber target 63.83F, barely above beer's own current temp), because
+    a real closing rate built up during an earlier, legitimate full-heat
+    recovery from a 21F starting gap. D is supposed to brake in
+    anticipation of overshoot; there was nothing to anticipate 5.65F short
+    of target. Chamber_target_for() now scales D's contribution down to
+    zero as |error| grows from 2.0F to 4.0F, but ONLY when D is acting as
+    a brake (opposing the correction P+I already ask for) -- never when
+    it's acting as a boost (reinforcing it, i.e. beer falling further
+    behind a moving target), since that's fermentation 3's original Free
+    Rise incident this term was added for in 0.1.30, and tapering it too
+    would have silently reintroduced it. Confirmed via closed-loop
+    resimulation against the Simulator's own plant physics that the brake
+    genuinely earns its keep at a real overshoot-risk point (the Free
+    Rise -> Diacetyl rest handoff) -- weakening Kd there measurably
+    increased peak overshoot in every variant tried, so the fix tapers
+    proximity, not Kd itself. Deliberately a LINEAR taper, not a hard
+    on/off gate: a bare cutoff at the same thresholds produced ~1400
+    demand toggles over a simulated 24h under this project's own standard
+    noise level -- the same chatter class of failure the original
+    bang-bang cascade was replaced for. The linear taper produced zero.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 30 Aug 2026 14:00:00 -0400
+
 krauken (0.1.32) stable; urgency=medium
 
   * Fixed unreadable text in dark mode on accent-tinted "selected" surfaces

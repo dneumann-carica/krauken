@@ -147,6 +147,46 @@ CLOSING_RATE_FILTER_TAU_H: Final[float] = 4.0
 # well below the artifact's implied rate.
 MAX_PLAUSIBLE_BEER_RATE_F_PER_H: Final[float] = 5.0
 
+# BEER_D_TAPER_FULL_F / BEER_D_TAPER_OFF_F: the derivative term's own
+# proximity taper -- chamber_target_for() scales the D term's contribution
+# by 1.0 at/inside BEER_D_TAPER_FULL_F, linearly down to 0.0 at/beyond
+# BEER_D_TAPER_OFF_F. Added after a real incident (fermentation 4,
+# 2026-08-28, Primary fermentation): beer started at 44.9F against a 66F
+# constant target (a 21F gap), and by the time the gap had narrowed to a
+# still-substantial 5.65F, the beer's OWN recovery-driven closing rate
+# (~0.9F/h, built up from the chamber's earlier legitimate full-heat
+# response to that same 21F gap) had grown large enough that D alone
+# (-24.0 * 0.9 = -21.5F) cancelled almost the entire P+I push (+19.4F
+# combined), commanding a chamber target barely above the beer's own
+# current temp -- 63.83F, with 5.65F of real error still unaddressed.
+# D's job is to brake in anticipation of OVERSHOOT; there was no overshoot
+# to anticipate 5.65F short of target, only a genuine, still-substantial
+# gap that P+I were both correctly asking to close aggressively.
+#
+# The taper's band was grounded against this fermentation's own two real,
+# clearly-separated error clusters -- not guessed: points where D braking
+# was later confirmed (by closed-loop resimulation against the Simulator's
+# own plant physics, platforms/simulator/plant.py) to be genuinely
+# necessary sat at |error| <= 1.4F (e.g. the Free Rise -> Diacetyl rest
+# handoff, beer at 70.02F against a 70.0F target but still carrying a real
+# +1.42F/h closing rate from the ramp -- weakening Kd there measurably
+# increased peak overshoot, from +0.02F at Kd=24 up to +0.80-1.32F for
+# every weaker Kd tried); every confirmed-inappropriate over-braking point
+# sat at |error| >= 5.65F. 2.0F/4.0F sits with margin inside that gap on
+# both sides.
+#
+# A LINEAR TAPER, not a hard on/off cutoff, and that choice is load-
+# bearing, not stylistic: a bare `abs(error) <= 3.0` gate, tested against
+# this project's own standard noise level (sigma=0.03F/tick, the same
+# level CLOSING_RATE_FILTER_TAU_H was validated against), produced ~1400
+# D on/off toggles over a simulated 24h with beer parked at the boundary --
+# exactly the "long idle then a spike" chatter class of failure the
+# original bang-bang cascade was replaced for (see cascade.py's own module
+# docstring). The linear taper produced zero direction reversals under the
+# same test, because there is no discrete threshold left to cross.
+BEER_D_TAPER_FULL_F: Final[float] = 2.0
+BEER_D_TAPER_OFF_F: Final[float] = 4.0
+
 # --- chamber/actuator side (enforced in the Hardware Supervisor) ---
 CHAMBER_DEADBAND_F: Final[float] = 0.5  # NOT from the mock -- see module docstring; the
 # mock's simulated fridge asymptotically approaches the clamp and never arrives, so it

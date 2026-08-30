@@ -35,11 +35,25 @@ too, via _replay()'s own threading -- Section E specifically validates
 the NEW behaviors it was added for (real ramp-lag reduction, noise
 robustness, sensor-artifact robustness) against the real, live production
 constants, not hand-picked values.
+
+Section F adds the derivative term's proximity taper (cascade.py's
+_d_taper(), added after a real incident on fermentation 4, 2026-08-28 --
+D's braking cancelled almost the entire P+I push while beer was still
+5.65F short of a held target, with nothing to actually overshoot). See
+cascade.py's module docstring and control_constants.py's
+BEER_D_TAPER_FULL_F/BEER_D_TAPER_OFF_F comment for the full incident, the
+closed-loop resimulation that confirmed the fix doesn't cost anything at
+a genuine overshoot-risk point, and why the taper is one-sided (never
+suppresses a BOOST) and linear (never a hard cutoff).
 """
 from __future__ import annotations
 
+import random
+
 from krauken.contracts.cascade import chamber_target_for, update_beer_error_integral, update_closing_rate_filter
 from krauken.contracts.control_constants import (
+    BEER_D_TAPER_FULL_F,
+    BEER_D_TAPER_OFF_F,
     CHAMBER_TARGET_MAX_F,
     CHAMBER_TARGET_MIN_F,
     MAX_PLAUSIBLE_BEER_RATE_F_PER_H,
@@ -447,3 +461,116 @@ def test_closing_rate_filter_rejects_a_rate_faster_than_any_real_beer_could_prod
     alpha = dt_h / (4.0 + dt_h)  # CLOSING_RATE_FILTER_TAU_H
     max_possible_magnitude = alpha * MAX_PLAUSIBLE_BEER_RATE_F_PER_H
     assert abs(rate) <= max_possible_magnitude + 1e-9
+
+
+# --- F. Derivative proximity taper (real incident: fermentation 4, --------
+#        2026-08-28, Primary fermentation) --------------------------------
+
+# Exact real values from fermentation 4's `samples` table (via a full,
+# restart-aware replay from the batch's own start -- krauken-daemon
+# restarted mid-batch for an unrelated package upgrade, which resets its
+# in-memory integral/closing-rate state; the values below already account
+# for that, they're not a naive from-t0 replay). Two real moments, same
+# closing rate ballpark (~0.9-1.4F/h), opposite conclusions about whether
+# D should be braking:
+#   2026-08-28T10:30:56Z: beer=60.32F, target=66.0F (Primary, held) --
+#     21F away nine hours earlier, still 5.65F short. D braked so hard it
+#     cancelled almost the entire P+I push (baseline: 63.83F, barely above
+#     beer's own current temp).
+#   2026-08-28T18:06:00Z: beer=70.02F, target=70.0F (Diacetyl rest, just
+#     entered from Free Rise's ramp) -- essentially AT target, but still
+#     carrying real momentum from the ramp. The real recorded chamber
+#     target here was 44.10F (hard cooling) -- confirmed by closed-loop
+#     resimulation against the Simulator's own plant physics
+#     (platforms/simulator/plant.py) to be genuinely necessary: weakening
+#     Kd here measurably increased peak overshoot in every variant tried.
+_PRIMARY_OVER_BRAKED = dict(beer_temp_f=60.32, beer_target_f=66.0, integral=4.000, closing=0.897)
+_DIACETYL_CORRECT_BRAKE = dict(beer_temp_f=70.02, beer_target_f=70.0, integral=3.999, closing=1.415)
+
+
+def test_taper_restores_an_aggressive_setpoint_during_a_genuine_still_large_gap():
+    out = chamber_target_for(
+        _PRIMARY_OVER_BRAKED['beer_temp_f'], _PRIMARY_OVER_BRAKED['beer_target_f'],
+        _PRIMARY_OVER_BRAKED['integral'], _PRIMARY_OVER_BRAKED['closing'],
+    )
+    # Real recorded (pre-fix) output was 63.83F -- barely above beer's own
+    # 60.32F despite 5.65F of real error. P+I alone would ask for ~85.4F;
+    # the taper should recover most of that, not just nudge off the floor.
+    assert out > 80.0, (
+        f"a 5.65F gap with nothing to overshoot should get an aggressive setpoint, got {out:.2f}F "
+        f"(pre-fix production code gave 63.83F here)"
+    )
+
+
+def test_taper_preserves_the_brake_at_a_genuine_overshoot_risk_point():
+    out = chamber_target_for(
+        _DIACETYL_CORRECT_BRAKE['beer_temp_f'], _DIACETYL_CORRECT_BRAKE['beer_target_f'],
+        _DIACETYL_CORRECT_BRAKE['integral'], _DIACETYL_CORRECT_BRAKE['closing'],
+    )
+    # Real recorded output was 44.10F. This must stay a hard brake -- the
+    # taper is proximity-based and this point is essentially AT target.
+    assert out < 50.0, (
+        f"beer at target with a real +1.42F/h closing rate needs a real brake, got {out:.2f}F "
+        f"(real recorded value was 44.10F)"
+    )
+
+
+def test_taper_never_suppresses_a_boost_no_matter_how_large_the_error():
+    # The failure mode almost shipped: a taper keyed on |error| alone also
+    # suppresses D when it's BOOSTING (beer falling further behind a moving
+    # target) -- fermentation 3's original Free Rise incident this term
+    # was added for in 0.1.30. Falling behind is more urgent at a large
+    # error, not less; boosting must never be tapered. error=5F here is
+    # already beyond BEER_D_TAPER_OFF_F, so a naive taper would zero this.
+    # (Deliberately modest closing_rate, not the 1.5F/h from the original
+    # incident -- at Kd=24 that alone saturates CHAMBER_TARGET_MAX_F for
+    # BOTH the boosted and unboosted call here, masking the comparison
+    # this test exists to make.)
+    closing_rate = -0.3  # beer falling behind a moving target by 0.3F/h
+    boosted = chamber_target_for(65.0, 70.0, 0.0, closing_rate)
+    unboosted = chamber_target_for(65.0, 70.0, 0.0, 0.0)
+    assert boosted > unboosted + 5.0, (
+        f"a boost must apply at full strength regardless of distance from target, "
+        f"got boosted={boosted:.2f} vs unboosted={unboosted:.2f}"
+    )
+
+
+def test_taper_band_edges_match_the_documented_constants():
+    # Direct pin on the taper's own shape, independent of any scenario --
+    # full brake strength at/inside BEER_D_TAPER_FULL_F, fully suppressed
+    # at/beyond BEER_D_TAPER_OFF_F, strictly between at the midpoint.
+    closing_rate = 1.0  # arbitrary nonzero braking rate (error and closing_rate same sign below)
+    full = chamber_target_for(66.0 - BEER_D_TAPER_FULL_F, 66.0, 0.0, closing_rate)
+    off = chamber_target_for(66.0 - BEER_D_TAPER_OFF_F, 66.0, 0.0, closing_rate)
+    mid_error = (BEER_D_TAPER_FULL_F + BEER_D_TAPER_OFF_F) / 2
+    mid = chamber_target_for(66.0 - mid_error, 66.0, 0.0, closing_rate)
+    no_brake = chamber_target_for(66.0 - BEER_D_TAPER_OFF_F, 66.0, 0.0, 0.0)
+    assert off == no_brake, "at/beyond BEER_D_TAPER_OFF_F, D should be fully suppressed"
+    assert full < off, "full-strength braking should push the setpoint further down than a suppressed brake"
+    assert full < mid < off, "the midpoint should sit strictly between full and suppressed strength"
+
+
+def test_taper_boundary_produces_no_chatter_under_realistic_sensor_noise():
+    # The reason this is a LINEAR taper and not a hard on/off gate: a bare
+    # `abs(error) <= 3.0` cutoff, tested against this exact noise level,
+    # produced ~1400 D on/off toggles over a simulated 24h with beer
+    # parked at the boundary -- the same "long idle then a spike" chatter
+    # class of failure the original bang-bang cascade was replaced for
+    # (see cascade.py's own module docstring). This pins that the LINEAR
+    # taper doesn't regress back to that failure mode.
+    rng = random.Random(0)
+    dt_h = 30 / 3600.0
+    n_ticks = int(24.0 / dt_h)
+    mid_error = (BEER_D_TAPER_FULL_F + BEER_D_TAPER_OFF_F) / 2
+    beer_target = 66.0
+    beer = beer_target - mid_error
+    closing = 1.0  # representative real braking rate (same sign as error)
+    directions = []
+    for _ in range(n_ticks):
+        noisy_beer = beer + rng.gauss(0, 0.03)  # this project's own standard noise level
+        out = chamber_target_for(noisy_beer, beer_target, 0.0, closing)
+        diff = out - beer_target
+        directions.append(1 if diff > 1.0 else (-1 if diff < -1.0 else 0))
+    nonzero = [d for d in directions if d != 0]
+    reversals = sum(1 for a, b in zip(nonzero, nonzero[1:]) if a != b)
+    assert reversals == 0, f"expected zero direction reversals from the linear taper, got {reversals}"

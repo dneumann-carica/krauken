@@ -122,10 +122,43 @@ constant-setpoint case every PID tutorial assumes:
 See control_constants.py's BEER_KD_F_PER_F_PER_H/
 CLOSING_RATE_FILTER_TAU_H/MAX_PLAUSIBLE_BEER_RATE_F_PER_H for the tuned
 values and how they were chosen.
-"""
+
+Added a proximity taper on the D term (chamber_target_for()'s own
+_d_taper() call) after a real incident (fermentation 4, 2026-08-28,
+Primary fermentation): a 21F starting gap correctly drove the chamber to
+full heat for hours, which built up a real, substantial closing rate
+(~0.9F/h) in the beer's own recovery -- and once the gap had merely
+narrowed to a still-substantial 5.65F, that closing rate alone was enough
+for D to cancel almost the ENTIRE P+I push, commanding a chamber target
+barely above the beer's current temp. D is supposed to brake in
+anticipation of overshoot; there was nothing to anticipate 5.65F short of
+target. Confirmed via closed-loop resimulation (against the Simulator's
+own plant physics, platforms/simulator/plant.py) that this was a real
+defect, not a hypothetical one, and that the SAME real closing rate,
+encountered instead at a genuinely small error (the Free Rise -> Diacetyl
+rest handoff, beer at 70.02F against a 70.0F target but still carrying a
+real +1.42F/h closing rate from the ramp), earns its keep: weakening Kd
+there measurably increased peak overshoot (from +0.02F at Kd=24 up to
++0.80-1.32F for every weaker Kd tried). So the defect was never Kd's
+magnitude -- it was applying D's full BRAKING strength regardless of how
+much real error remains to close. The taper is deliberately one-sided --
+chamber_target_for() only ever tapers D when it's acting as a brake
+(opposing the correction error alone asks for), never when it's acting as
+a boost (reinforcing it, i.e. beer falling further behind) -- a large
+error with beer genuinely falling further behind is exactly fermentation
+3's original Free Rise incident this term was added for in the first
+place, and tapering that case away too would have silently reintroduced
+it. See control_constants.py's BEER_D_TAPER_FULL_F/BEER_D_TAPER_OFF_F for
+the taper band and how it was grounded against this fermentation's own two
+real, clearly-separated error clusters, and for why it's a LINEAR taper
+rather than a hard cutoff (a hard gate, tested against this project's own
+standard noise level, produced real chatter -- ~1400 D on/off toggles over
+a simulated 24h; the taper produced zero)."""
 from __future__ import annotations
 
 from krauken.contracts.control_constants import (
+    BEER_D_TAPER_FULL_F,
+    BEER_D_TAPER_OFF_F,
     BEER_KD_F_PER_F_PER_H,
     BEER_KI_F_PER_F_H,
     BEER_KP_F_PER_F,
@@ -195,6 +228,26 @@ def update_closing_rate_filter(
     return current_filtered_rate_f_per_h + alpha * (closing_rate - current_filtered_rate_f_per_h)
 
 
+def _d_taper(abs_error_f: float) -> float:
+    """Scales D's BRAKING contribution (see chamber_target_for()'s own
+    brake-vs-boost split -- this is never applied to a boost) by how close
+    beer already is to target -- 1.0 (full strength) at/inside
+    BEER_D_TAPER_FULL_F, linearly down to 0.0 (fully suppressed) at/beyond
+    BEER_D_TAPER_OFF_F. See control_constants.py's own comment on those
+    two for how the band was grounded, and cascade.py's module docstring
+    for the real incident that motivated it (D braking against a still-
+    substantial, genuine error with nothing to actually overshoot). A
+    LINEAR ramp, not a hard cutoff, is load-bearing, not stylistic -- a
+    bare on/off gate at the same values produced real chatter under this
+    project's own standard noise test; the linear ramp has no discrete
+    threshold left to trigger it."""
+    if abs_error_f <= BEER_D_TAPER_FULL_F:
+        return 1.0
+    if abs_error_f >= BEER_D_TAPER_OFF_F:
+        return 0.0
+    return (BEER_D_TAPER_OFF_F - abs_error_f) / (BEER_D_TAPER_OFF_F - BEER_D_TAPER_FULL_F)
+
+
 def chamber_target_for(
     beer_temp_f: float, beer_target_f: float, beer_error_integral_f_h: float, closing_rate_filtered_f_per_h: float,
 ) -> float:
@@ -224,12 +277,33 @@ def chamber_target_for(
     error, accumulated integral, and closing-rate braking/boost -- or a
     badly-authored stage (a huge ramp over very few hours, far faster than
     INTEGRAL_MAX_F_H's own sizing assumes) -- could otherwise ask for a
-    chamber target no real equipment could or should attempt."""
+    chamber target no real equipment could or should attempt.
+
+    D's raw contribution (-BEER_KD_F_PER_F_PER_H * closing_rate) is either a
+    BRAKE (opposes the correction error alone would ask for -- same sign
+    as closing_rate and error) or a BOOST (reinforces it -- opposite
+    signs): error>0 (need warmer) with closing_rate>0 (beer already
+    closing in under its own steam) brakes; error>0 with closing_rate<0
+    (beer falling further behind) boosts, and symmetrically for error<0.
+    Only the BRAKE case is scaled by _d_taper() (proximity-to-target) --
+    see that function and this module's own docstring for why: braking in
+    anticipation of overshoot only makes sense once there's an actual
+    overshoot to anticipate. A boost is never suppressed regardless of
+    distance from target -- falling further behind is exactly what D was
+    originally added to counteract (see this module's own docstring,
+    fermentation 3's Free Rise incident), and that need doesn't go away
+    just because the gap is already large; if anything it's more urgent
+    then, not less. P and I are never tapered either -- they're what's
+    supposed to close a genuine, still-substantial gap; nothing about them
+    assumes proximity to target the way D's braking does."""
     error = beer_target_f - beer_temp_f
+    d_raw = -BEER_KD_F_PER_F_PER_H * closing_rate_filtered_f_per_h
+    braking = error * closing_rate_filtered_f_per_h > 0
+    d_term = d_raw * _d_taper(abs(error)) if braking else d_raw
     target = (
         beer_target_f
         + BEER_KP_F_PER_F * error
         + BEER_KI_F_PER_F_H * beer_error_integral_f_h
-        - BEER_KD_F_PER_F_PER_H * closing_rate_filtered_f_per_h
+        + d_term
     )
     return max(CHAMBER_TARGET_MIN_F, min(CHAMBER_TARGET_MAX_F, target))
