@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyReorder, blankStage, lastTempF, swapAdjacent } from "./FermentationPlanDialog";
+import { applyReorder, blankStage, lastTempF, newLocalStageKey, swapAdjacent } from "./FermentationPlanDialog";
 import type { StageForm } from "./FermentationPlanDialog";
 
 // Minimal, deliberately loose fixture -- only the fields applyReorder/
@@ -70,6 +70,34 @@ describe("swapAdjacent", () => {
     const input = ["a", "b"];
     swapAdjacent(input, 0, 1);
     expect(input).toEqual(["a", "b"]);
+  });
+});
+
+describe("newLocalStageKey", () => {
+  it("never returns the same key twice", () => {
+    const keys = new Set(Array.from({ length: 50 }, () => newLocalStageKey()));
+    expect(keys.size).toBe(50);
+  });
+
+  it("works even when crypto.randomUUID doesn't exist -- the real bug", () => {
+    // A real user hit "Uncaught TypeError: crypto.randomUUID is not a
+    // function" clicking "Add stage" -- crypto.randomUUID() is only
+    // exposed in a secure context (HTTPS, or specifically `localhost`),
+    // and this fired when the vite dev server was reached over a plain-
+    // HTTP LAN address instead. newLocalStageKey() replaced that call
+    // specifically so this key never depends on the Crypto API being
+    // present at all -- delete it entirely here to pin that, not just
+    // exercise the happy path where it happens to exist in this test
+    // environment too.
+    const realCrypto = globalThis.crypto;
+    // @ts-expect-error -- deliberately simulating an insecure context where crypto.randomUUID is absent
+    delete globalThis.crypto;
+    try {
+      expect(() => newLocalStageKey()).not.toThrow();
+      expect(typeof newLocalStageKey()).toBe("string");
+    } finally {
+      globalThis.crypto = realCrypto;
+    }
   });
 });
 

@@ -51,6 +51,22 @@ function num(s: string): number | null {
   return s === "" ? null : Number(s);
 }
 
+// A fresh, not-yet-persisted draft stage needs SOME unique local key to
+// react-key/identify it by before a real DB id exists (see fromStageInput's
+// own comment below) -- crypto.randomUUID() is overkill for that and, worse,
+// unavailable outside a secure context (hit a real user: the vite dev server
+// reached over a plain-HTTP LAN address, not localhost, throws
+// "crypto.randomUUID is not a function" there instead of returning one).
+// This key is never sent to the server and never compared across sessions,
+// so a plain incrementing counter is exactly as unique as this needs to be,
+// with no availability dependency at all -- see this file's own test for a
+// regression pin that calls this with crypto.randomUUID deleted entirely.
+let nextLocalStageKeySeq = 0;
+export function newLocalStageKey(): string {
+  nextLocalStageKeySeq += 1;
+  return `local-${nextLocalStageKeySeq}`;
+}
+
 /** `key`/`index` are only meaningful for a not-yet-created draft stage (the
  * "new fermentation" flow, before there's a real DB id) -- fromStageResponse
  * below overrides both with the stage's real id and its running-state-based
@@ -605,7 +621,7 @@ export function FermentationPlanDialog(props: Props) {
     setError(undefined);
     const stage = blankStage(lastTempF(stages[stages.length - 1]));
     if (props.mode !== "edit") {
-      setStages((prev) => [...prev, fromStageInput(stage, crypto.randomUUID(), prev.length)]);
+      setStages((prev) => [...prev, fromStageInput(stage, newLocalStageKey(), prev.length)]);
       return;
     }
     try {
