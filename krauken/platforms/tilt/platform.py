@@ -51,9 +51,13 @@ class TiltPlatform:
                     detail_line=f"RSSI {reading.rssi} dBm",
                     reading_summary=f"{reading.temp_f:.1f}°F - {reading.gravity_sg:.3f}",
                     readings={"beer_temp_f": reading.temp_f, "gravity_sg": reading.gravity_sg},
-                    identity={"color": color},
+                    # gravity_offset_sg surfaces whatever calibrate_gravity
+                    # last set (0.0 if never calibrated) -- purely for
+                    # Hardware Setup to display "calibrated: +0.009"
+                    # without needing to run a fresh test just to see it.
+                    identity={"color": color, "gravity_offset_sg": self._scanner.gravity_offset(color)},
                     simulated=False,
-                    available_tests=("live_read",),
+                    available_tests=("live_read", "calibrate_gravity"),
                 )
             )
         return candidates

@@ -70,6 +70,13 @@ class _FakeRegistry:
     async def stop_all(self) -> None:
         pass
 
+    def state_for(self, platform_id: str) -> Any | None:
+        # No real platform state behind this fake -- Daemon.start()'s
+        # tilt-calibration reload (app.py) checks this and no-ops for
+        # anything that isn't a TiltScanner, same as production would for
+        # a deployment with Tilt disabled.
+        return None
+
 
 async def test_daemon_stop_cancels_an_outstanding_scan_before_closing_the_db(tmp_path: Path):
     db_path = tmp_path / "krauken.db"

@@ -147,6 +147,10 @@ export type TestAction =
   | "identify_probes"
   | "live_read"
   | "confirm_heater"
+  // Tilt gravity calibration (platforms/tilt/calibration.py) -- params:
+  // {actual_sg: number}. Completes near-instantly (no real countdown),
+  // same shape as live_read/finalize_device_config's own quick jobs.
+  | "calibrate_gravity"
   // BrewPi's device-configuration wizard (platforms/brewpi/device_config.py) --
   // Krauken takes over BrewPi's own classic Device Configuration page
   // entirely, so a user never needs it. identify_relay_pin replaced the

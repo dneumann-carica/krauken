@@ -61,6 +61,7 @@ from krauken.platforms.ipc_driver import (
     ManualIpcConnection,
     SimulatorIpcConnection,
 )
+from krauken.platforms.tilt import calibration as tilt_calibration
 from krauken.platforms.tilt.live import TiltBeerTempSource, TiltGravitySource
 from krauken.platforms.tilt.platform import TiltPlatform
 from krauken.platforms.tilt.scanner import TiltScanner
@@ -146,6 +147,7 @@ PLATFORM_BINDINGS: dict[str, PlatformBinding] = {
         chamber_driver_cls=None,
         beer_temp_source_cls=TiltBeerTempSource,
         gravity_source_cls=TiltGravitySource,
+        test_runners=tilt_calibration.TEST_RUNNERS,
     ),
     # krauken (the GPIO Hardware Supervisor platform) lands in a later
     # milestone -- an unknown platform_id simply has no binding, which

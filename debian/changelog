@@ -1,3 +1,32 @@
+krauken (0.1.35) stable; urgency=medium
+
+  * Added a per-device gravity calibration mechanism for Tilt hydrometers
+    -- a real, confirmed need: a Tilt's own reported gravity commonly
+    drifts from a freshly calibrated reference (a user's own calibrated
+    Tilt app, or a hydrometer/refractometer) by several thousandths of
+    SG, and there was no way to correct that. TiltScanner now holds a
+    per-color gravity-offset table (raw_latest() stays uncalibrated,
+    latest() applies the offset -- recalibrating always corrects from
+    ground truth, never compounds). A new calibrate_gravity hardware-test
+    action (platforms/tilt/calibration.py, registered the same way
+    BrewPi's own device_config.py test runners are) takes what the
+    user's reference reads right now, works out the correction itself
+    against the Tilt's current raw reading, persists it through the
+    existing generic settings table (no schema migration), and pushes it
+    live into the running scanner immediately -- no daemon restart
+    needed, and usable mid-batch. Reloaded at daemon startup so a restart
+    doesn't lose it. Hardware Setup gained a "Calibrate" action on any
+    Tilt device with a dialog for entering the reference reading and
+    seeing the resulting correction.
+  * Kept TiltScanner's concrete class out of the daemon composition root:
+    the calibration reload at startup is a single named call into
+    platforms/tilt/calibration.py, not an isinstance() check in
+    daemon/app.py -- DaemonContext holds no reference to any concrete
+    platform class, same rule PlatformRegistry was already built to
+    enforce.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 05 Sep 2026 15:00:00 -0400
+
 krauken (0.1.34) stable; urgency=medium
 
   * Fixed the "New fermentation profile" dialog crashing on Add stage

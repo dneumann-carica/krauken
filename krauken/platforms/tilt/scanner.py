@@ -33,11 +33,12 @@ same idiom the mock platforms' shared-engine classes use.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from krauken.contracts.clock import Clock
 from krauken.contracts.errors import PlatformUnavailable
@@ -122,6 +123,17 @@ class TiltScanner:
         self.colors = ALL_TILT_COLORS
         self._hci_device = hci_device
         self._readings: dict[str, TiltReading] = {}
+        # color -> additive gravity_sg correction, e.g. {"orange": 0.009}.
+        # Empty until set_calibration() is called -- daemon/app.py's
+        # Daemon.start() loads whatever's persisted under the
+        # "tilt_calibration" setting (see platforms/tilt/calibration.py)
+        # right after the registry starts, and a fresh calibrate_gravity
+        # test pushes an updated map in immediately after that (see
+        # calibration.py's own docstring for why both a settings-table
+        # write and a live push are needed). Never persisted here --
+        # TiltScanner has no DB access at all, by design (see this
+        # module's own docstring on DEFAULT_HCI_DEVICE).
+        self._gravity_offsets: dict[str, float] = {}
         self._conn: Any = None
         self._btctrl: Any = None
         self._decoder: Any = None
@@ -242,13 +254,45 @@ class TiltScanner:
             last_seen_monotonic=self.clock.monotonic(),
         )
 
-    def latest(self, color: str) -> TiltReading | None:
+    def raw_latest(self, color: str) -> TiltReading | None:
+        """Same freshness check as latest(), but with no gravity offset
+        applied -- the true reading straight off the last beacon decoded.
+        Used only by the calibrate_gravity test runner
+        (platforms/tilt/calibration.py) to compute a fresh offset against
+        the actual raw value, never by anything on the live read path
+        (that's latest(), below) -- recalibrating must always correct from
+        ground truth, not from an already-corrected reading, or repeated
+        recalibration would silently compound."""
         reading = self._readings.get(color)
         if reading is None:
             return None
         if self.clock.monotonic() - reading.last_seen_monotonic > DROPOUT_TIMEOUT_S:
             return None
         return reading
+
+    def latest(self, color: str) -> TiltReading | None:
+        reading = self.raw_latest(color)
+        if reading is None:
+            return None
+        offset = self._gravity_offsets.get(color)
+        if not offset:
+            return reading
+        return dataclasses.replace(reading, gravity_sg=reading.gravity_sg + offset)
+
+    def set_calibration(self, offsets: Mapping[str, float]) -> None:
+        """Replaces the whole per-color gravity-offset table in one shot.
+        Called at daemon startup (daemon/app.py, loaded from the
+        persisted "tilt_calibration" setting) and again immediately after
+        every calibrate_gravity test completes (platforms/tilt/
+        calibration.py), so a fresh calibration takes effect on the very
+        next read -- no daemon restart needed."""
+        self._gravity_offsets = dict(offsets)
+
+    def gravity_offset(self, color: str) -> float:
+        """0.0 for an uncalibrated color -- exposed so discover()
+        (platform.py) can surface the active offset in a candidate's own
+        identity, purely for display in Hardware Setup."""
+        return self._gravity_offsets.get(color, 0.0)
 
     def detected_colors(self) -> list[str]:
         """Every color with a live (non-dropped-out) reading right now,

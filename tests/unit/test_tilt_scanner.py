@@ -116,6 +116,31 @@ def test_a_fresh_beacon_before_the_timeout_keeps_it_alive():
     assert s.latest("orange") is not None  # would have expired from the FIRST beacon alone
 
 
+def test_set_calibration_shifts_latest_but_not_raw_latest():
+    s = _scanner()
+    s._on_packet(REAL_TILT_ORANGE_PACKET)
+    s.set_calibration({"orange": 0.009})
+
+    assert s.latest("orange").gravity_sg == pytest.approx(1.017)
+    assert s.raw_latest("orange").gravity_sg == 1.008
+    assert s.gravity_offset("orange") == 0.009
+
+
+def test_calibration_is_a_no_op_for_an_uncalibrated_color():
+    s = _scanner()
+    s._on_packet(REAL_TILT_ORANGE_PACKET)
+    assert s.gravity_offset("orange") == 0.0
+    assert s.latest("orange").gravity_sg == s.raw_latest("orange").gravity_sg == 1.008
+
+
+def test_set_calibration_replaces_the_whole_table_not_merges():
+    s = _scanner()
+    s.set_calibration({"orange": 0.009, "blue": -0.002})
+    s.set_calibration({"blue": -0.002})  # a fresh load with "orange" dropped
+    assert s.gravity_offset("orange") == 0.0
+    assert s.gravity_offset("blue") == -0.002
+
+
 async def test_start_treats_a_hung_hci_device_as_unavailable_instead_of_hanging_forever(
     monkeypatch: pytest.MonkeyPatch,
 ):

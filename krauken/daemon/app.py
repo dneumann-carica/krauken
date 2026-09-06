@@ -21,6 +21,7 @@ from krauken.db.connection import open_ro, open_rw
 from krauken.db.migrate import migrate
 from krauken.ipc.server import IPCServer
 from krauken.platforms.registry import PlatformRegistry
+from krauken.platforms.tilt import calibration as tilt_calibration
 
 # Imported for their @op-decorated side effects (registers hardware.*/
 # settings.*/fermentation.*/manual.* ops into krauken.ipc.server.OPS) -- not
@@ -85,6 +86,15 @@ class Daemon:
         # return quickly (everything else); PlatformRegistry.start_all()
         # itself tolerates any one of them being unreachable.
         await self.ctx.registry.start_all()
+        # Reloads whatever calibrate_gravity last persisted, so a daemon
+        # restart doesn't silently lose it -- a no-op if Tilt isn't the
+        # running platform. Deliberately just this one named call, not an
+        # isinstance/concrete-class check here: DaemonContext holds no
+        # reference to any concrete platform class (see this module's own
+        # docstring); knowledge of TiltScanner stays inside
+        # platforms/tilt/calibration.py, which already owns constructing
+        # and calibrating it.
+        tilt_calibration.reload_calibration(self.ctx)
         await self.server.start()
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._control_task = asyncio.create_task(self._control_loop())

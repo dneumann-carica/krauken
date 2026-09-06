@@ -17,6 +17,7 @@ import { ALL_ROLES, CHAMBER_BUNDLE, REQUIRED_ROLES, Role, resolve } from "../../
 import type { DeviceInfo } from "../../hardware/resolve";
 import { ROLE_LABELS } from "../../hardware/roleLabels";
 import { HardwareWizard } from "./HardwareWizard";
+import { TiltCalibrationDialog } from "./TiltCalibrationDialog";
 import styles from "./HardwareSetupView.module.css";
 
 type Draft = Record<Role, string | null>;
@@ -79,6 +80,7 @@ export function HardwareSetupView() {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [seeded, setSeeded] = useState(false);
   const [wizardDeviceId, setWizardDeviceId] = useState<string>();
+  const [calibrateDeviceId, setCalibrateDeviceId] = useState<string>();
   const [saveResult, setSaveResult] = useState<Awaited<ReturnType<typeof saveMapping.mutateAsync>>>();
   const [saveError, setSaveError] = useState<string>();
 
@@ -211,6 +213,7 @@ export function HardwareSetupView() {
   }
 
   const wizardDevice = wizardDeviceId ? deviceById[wizardDeviceId] : undefined;
+  const calibrateDevice = calibrateDeviceId ? deviceById[calibrateDeviceId] : undefined;
 
   const filledRequired = [...REQUIRED_ROLES].filter((r) => preview.roles[r] != null).length;
   const scanLabel = scanStartError
@@ -354,6 +357,7 @@ export function HardwareSetupView() {
                 });
 
             const canFireOutlets = availableTests.includes("fire_outlet");
+            const canCalibrateGravity = availableTests.includes("calibrate_gravity");
             const chipHint = guided
               ? ownsCore
                 ? canFireOutlets
@@ -416,6 +420,11 @@ export function HardwareSetupView() {
                   {guided && (
                     <Button variant={roles.length > 0 ? "ghost" : "secondary"} size="sm" onClick={() => setWizardDeviceId(d.device_id)}>
                       {roles.length > 0 ? "Reconfigure" : "Set up"}
+                    </Button>
+                  )}
+                  {canCalibrateGravity && (
+                    <Button variant="ghost" size="sm" onClick={() => setCalibrateDeviceId(d.device_id)}>
+                      Calibrate
                     </Button>
                   )}
                 </div>
@@ -507,6 +516,14 @@ export function HardwareSetupView() {
           open={wizardDeviceId !== undefined}
           onCancel={() => setWizardDeviceId(undefined)}
           onFinish={handleWizardFinish}
+        />
+      )}
+
+      {calibrateDevice && (
+        <TiltCalibrationDialog
+          device={calibrateDevice}
+          open={calibrateDeviceId !== undefined}
+          onClose={() => setCalibrateDeviceId(undefined)}
         />
       )}
     </main>
