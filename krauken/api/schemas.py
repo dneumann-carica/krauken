@@ -119,6 +119,9 @@ class TestStartRequest(BaseModel):
         "identify_relay_pin",
         "finalize_device_config",
         "reset_brewpi",
+        # Tilt gravity calibration (platforms/tilt/calibration.py) --
+        # params: {actual_sg: number}.
+        "calibrate_gravity",
     ]
     params: dict[str, Any] = {}
 

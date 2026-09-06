@@ -1,3 +1,23 @@
+krauken (0.1.36) stable; urgency=medium
+
+  * Fixed calibrate_gravity (added in 0.1.35) rejecting every real request
+    with a 422 -- confirmed live: submitting a reference reading in
+    Hardware Setup's new Calibrate dialog failed immediately.
+    TestStartRequest's `action` field (api/schemas.py) is a fixed
+    Literal allowlist, the same shape confirm_heater was once missing
+    from entirely (that exact failure mode is documented in this file's
+    own comment); calibrate_gravity was never added to it, so pydantic
+    rejected the request before it ever reached
+    daemon/tests_runtime.py's dispatch. Added a permanent regression
+    guard (test_test_start_schema_completeness.py) that enumerates every
+    action daemon/tests_runtime.py can actually dispatch -- its fixed
+    actions plus every PLATFORM_BINDINGS test_runners key -- and asserts
+    the schema's Literal is a superset, so this exact class of bug fails
+    at the schema/dispatch boundary for any future action, not just this
+    one.
+
+ -- The Krauken Project <dneumann@arpio.io>  Sat, 05 Sep 2026 18:30:00 -0400
+
 krauken (0.1.35) stable; urgency=medium
 
   * Added a per-device gravity calibration mechanism for Tilt hydrometers
