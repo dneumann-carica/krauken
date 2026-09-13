@@ -1,5 +1,6 @@
 import type { FermentationDetail, StageResponse } from "../../api/types";
 import { Button, Card, Switch, Tag } from "../../design/primitives";
+import { formatGravity } from "../../lib/format";
 import type { StageEndCriteriaFormat } from "../../lib/stageFormat";
 import { describeStageEndCriteria } from "../../lib/stageFormat";
 import styles from "./GettingStartedView.module.css";
@@ -18,7 +19,11 @@ function fmtTemp(v: number | null): string {
 const CRITERIA_FORMAT: StageEndCriteriaFormat = {
   hours: (h) => fmtHours(h ?? 0),
   tempF: (t) => `${t?.toFixed(1)}°F`,
-  gravity: (g) => `${g?.toFixed(3)}`,
+  // g?.toFixed(3) alone would render the literal string "undefined" if
+  // ever called with a null gravity_hi -- matches FORM_CRITERIA_FORMAT's
+  // own "?" fallback (FermentationPlanDialog.tsx), the other real
+  // implementation of this same interface.
+  gravity: (g) => (g != null ? formatGravity(g) : "?"),
 };
 
 function runningLine(stage: StageResponse, target: number | null): string {

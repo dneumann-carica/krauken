@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button, Dialog } from "../../design/primitives";
 import { apiErrorMessage, useStartTest, useTestStatus } from "../../api/queries";
 import type { DeviceResponse } from "../../api/types";
+import { formatGravity } from "../../lib/format";
 import styles from "./TiltCalibrationDialog.module.css";
 
 interface Props {
@@ -84,24 +85,24 @@ export function TiltCalibrationDialog({ device, open, onClose }: Props) {
         <div className={styles.content}>
           <div className={styles.readingRow}>
             <span className={styles.readingLabel}>Tilt reads right now</span>
-            <span className={styles.readingValue}>{typeof currentRawSg === "number" ? currentRawSg.toFixed(3) : "—"}</span>
+            <span className={styles.readingValue}>{typeof currentRawSg === "number" ? formatGravity(currentRawSg) : "—"}</span>
           </div>
           {currentOffset !== 0 && (
             <div className={styles.readingRow}>
               <span className={styles.readingLabel}>Current calibration</span>
               <span className={styles.readingValue}>
                 {currentOffset > 0 ? "+" : ""}
-                {currentOffset.toFixed(3)}
+                {formatGravity(currentOffset)}
               </span>
             </div>
           )}
 
           {done && testStatus.data?.result ? (
             <div className={styles.result}>
-              Calibrated. Raw {Number(testStatus.data.result.raw_sg).toFixed(3)}, correction{" "}
+              Calibrated. Raw {formatGravity(Number(testStatus.data.result.raw_sg))}, correction{" "}
               {Number(testStatus.data.result.offset_sg) > 0 ? "+" : ""}
-              {Number(testStatus.data.result.offset_sg).toFixed(3)} -- The Krauken will now report{" "}
-              {Number(testStatus.data.result.calibrated_sg).toFixed(3)} for this reading.
+              {formatGravity(Number(testStatus.data.result.offset_sg))} -- The Krauken will now report{" "}
+              {formatGravity(Number(testStatus.data.result.calibrated_sg))} for this reading.
             </div>
           ) : (
             <div className={styles.field}>

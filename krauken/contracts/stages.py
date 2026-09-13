@@ -25,18 +25,25 @@ from krauken.contracts.gravity_stability import GravityStabilityWindow
 # genuine decline worth catching (so a fermentation that's still
 # slowly finishing doesn't get called "flat" early).
 #
-# At the simulator's steady-state jitter_sg=0.0002 (uniform, freshly
-# re-rolled every read), a 24h window at typical tick cadence empirically
-# spreads right up against ~0.0004 (its theoretical ceiling, 2*jitter_sg)
-# essentially every time -- there's no meaningful margin below that from
-# noise alone. The OLD value here (0.002) was 5x looser than that ceiling,
-# which is why a real ~24h-window run was observed locking in "flat" while
-# gravity had actually still dropped ~0.0017 over that same window (a real,
-# if slow, continued decline, not noise) -- a stall-safety-worthy case this
-# constant is supposed to help distinguish, not paper over. 0.0006 keeps
-# comfortable margin above the ~0.0004 noise ceiling while sitting well
-# below that kind of still-declining case.
-GRAVITY_STABLE_TOLERANCE_SG = 0.0006
+# Re-derived 2026-09 against a real batch (fermentation 6) that never
+# once auto-advanced out of Primary -- confirmed live that its real Tilt
+# gravity noise floor (~0.001-0.002 SG raw, dominated by the Tilt's own
+# integer-thousandths broadcast resolution, gravity_sg = minor/1000.0)
+# sat ABOVE the previous value here (0.0006, itself only ever validated
+# against the SIMULATOR's much quieter assumed noise, jitter_sg=0.0002)
+# -- the real 24h max-min spread never dropped below ~0.001 even once
+# gravity had gone genuinely flat for 48+ hours, so the gate could
+# structurally never be satisfied on real hardware, at any tolerance
+# tighter than the sensor's own quantization step. TiltScanner's own
+# GRAVITY_SMOOTHING_WINDOW_S (platforms/tilt/scanner.py, added
+# alongside this fix) averages that raw noise away first; replaying the
+# same real batch's gravity through an equivalent smoothing pass showed
+# the smoothed 24h spread never exceeding 0.00125 SG anywhere across
+# 2,378 windows once genuinely flat, and reaching 100% coverage at
+# 0.0015 SG. 0.0015 keeps real margin below the ~0.03 SG spread the same
+# batch showed while still genuinely, slowly declining -- no risk of
+# calling that "flat" early.
+GRAVITY_STABLE_TOLERANCE_SG = 0.0015
 
 
 def target_temp_f(stage: Mapping[str, Any], elapsed_h: float) -> float:

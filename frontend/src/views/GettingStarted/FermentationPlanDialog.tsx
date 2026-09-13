@@ -11,6 +11,7 @@ import {
 import type { StageInput, StageResponse } from "../../api/types";
 import { Button, Combobox, Dialog, Switch, Tag } from "../../design/primitives";
 import type { ComboboxOption } from "../../design/primitives";
+import { formatGravity } from "../../lib/format";
 import type { StageEndCriteriaFields, StageEndCriteriaFormat } from "../../lib/stageFormat";
 import { describeStageEndCriteria } from "../../lib/stageFormat";
 import styles from "./FermentationPlanDialog.module.css";
@@ -22,10 +23,16 @@ export interface StageForm {
   key: string;
   name: string;
   on: boolean;
-  /** Can't be switched off -- the first stage of a new plan (a fermentation
-   * needs at least one stage) or the currently active stage (edit mode).
-   * Position-based, not tied to any particular stage's identity -- stages
-   * are freeform, there's no fixed "primary" slot to key off. */
+  /** Can't be switched off, removed, or reordered -- the currently active
+   * stage of an already-running fermentation (edit mode) only. A NEW
+   * plan's stages are never locked this way: the only structural rule
+   * there is "at least one stage" (see removeStage()), enforced by
+   * disabling removal once a plan is down to its last stage, not by
+   * pinning any particular stage's position -- stages are freeform,
+   * there's no fixed "primary"/first slot to key off. (An earlier design
+   * DID lock a new plan's first stage in place; dropped because it
+   * blocked a perfectly reasonable real plan -- e.g. a chill-to-pitch-
+   * temp stage authored before "Primary fermentation".) */
   locked: boolean;
   /** Already happened -- every control is read-only, informational only. */
   disabled: boolean;
@@ -67,16 +74,17 @@ export function newLocalStageKey(): string {
   return `local-${nextLocalStageKeySeq}`;
 }
 
-/** `key`/`index` are only meaningful for a not-yet-created draft stage (the
- * "new fermentation" flow, before there's a real DB id) -- fromStageResponse
- * below overrides both with the stage's real id and its running-state-based
- * lock once one exists. */
-function fromStageInput(s: StageInput, key: string, index: number): StageForm {
+/** `key` is only meaningful for a not-yet-created draft stage (the "new
+ * fermentation" flow, before there's a real DB id) -- fromStageResponse
+ * below overrides it with the stage's real id, and overrides `locked` with
+ * its own running-state-based lock (never index-based -- see StageForm's
+ * own doc comment on `locked`). */
+export function fromStageInput(s: StageInput, key: string): StageForm {
   return {
     key,
     name: s.name,
     on: true,
-    locked: index === 0,
+    locked: false,
     disabled: false,
     rawState: "pending",
     tempMode: s.temp_mode,
@@ -93,7 +101,7 @@ function fromStageInput(s: StageInput, key: string, index: number): StageForm {
     // String() conversion silently drops it. Gravity is always shown to
     // 3 decimal places elsewhere in this app (see GettingStartedView's
     // criteriaDescription); this is the one spot that wasn't doing that.
-    gravHi: s.gravity_hi != null ? s.gravity_hi.toFixed(3) : "",
+    gravHi: s.gravity_hi != null ? formatGravity(s.gravity_hi) : "",
     gravH: s.gravity_stable_hours != null ? String(s.gravity_stable_hours) : "",
     auto: s.advance_mode === "auto",
   };
@@ -128,7 +136,7 @@ function stageResponseToStageInput(s: StageResponse): StageInput {
 function fromStageResponse(s: StageResponse): StageForm {
   const completed = s.state === "finished" || (s.state === "skipped" && s.started_at !== null);
   return {
-    ...fromStageInput(stageResponseToStageInput(s), String(s.id), -1),
+    ...fromStageInput(stageResponseToStageInput(s), String(s.id)),
     key: String(s.id),
     on: s.state !== "skipped",
     locked: s.state === "running",
@@ -162,7 +170,7 @@ function toStageInput(s: StageForm): StageInput {
 const FORM_CRITERIA_FORMAT: StageEndCriteriaFormat = {
   hours: (h) => (h != null ? `${h}h` : "?h"),
   tempF: (t) => (t != null ? `${t.toFixed(1)}°F` : "?°F"),
-  gravity: (g) => (g != null ? g.toFixed(3) : "?"),
+  gravity: (g) => (g != null ? formatGravity(g) : "?"),
 };
 
 function summaryLine(s: StageForm): string {
@@ -223,6 +231,20 @@ export function swapAdjacent<T>(arr: T[], i: number, j: number): T[] {
   return copy;
 }
 
+/** Removes the stage with this key, unless doing so would leave the plan
+ * with zero stages -- "at least one stage" is the only structural rule a
+ * plan has to satisfy now (see StageForm's own doc comment on `locked` for
+ * why that's no longer enforced by pinning any particular stage's
+ * position). A no-op (returns `stages` unchanged), not a throw, when
+ * asked to remove the last remaining stage -- the caller is only ever
+ * wired to a remove button that's already disabled in that case (see
+ * this dialog's own onRemove computation), so this is the defensive
+ * backstop, not the primary guard. */
+export function removeStage(stages: StageForm[], key: string): StageForm[] {
+  if (stages.length <= 1) return stages;
+  return stages.filter((s) => s.key !== key);
+}
+
 interface StageEditorProps {
   stage: StageForm;
   onChange: (patch: Partial<StageForm>) => void;
@@ -230,10 +252,18 @@ interface StageEditorProps {
    * running-profile editor's not-yet-reached stages (skip/re-enable is
    * that editor's only removal mechanism -- there's no row to delete). */
   onToggle?: (on: boolean) => void;
-  /** Present only in the new-fermentation editor, and only on a non-first
-   * stage -- freeform stages can just be deleted outright before anything
-   * exists to skip. */
+  /** Present only in the new-fermentation editor, and only when the plan
+   * has more than one stage -- freeform stages can just be deleted
+   * outright before anything exists to skip, but the plan always needs
+   * at least one (see removeStage()). Any stage is eligible, not just
+   * non-first ones -- see StageForm's own doc comment on `locked`. */
   onRemove?: () => void;
+  /** True when onRemove is absent specifically because this is the plan's
+   * last remaining stage (new-fermentation editor only) -- shown as a
+   * "Required" tag in its place so the missing remove button reads as
+   * "can't remove this, at least one stage is required" rather than a
+   * silent gap. */
+  onlyStage?: boolean;
   /** Each present iff this stage can move that direction -- absent (not
    * just disabled) at either end of the reorderable run, and always
    * absent on a locked/disabled stage. */
@@ -245,7 +275,7 @@ interface StageEditorProps {
   isLastStage: boolean;
 }
 
-function StageEditor({ stage: s, onChange, onToggle, onRemove, onMoveUp, onMoveDown, isLastStage }: StageEditorProps) {
+function StageEditor({ stage: s, onChange, onToggle, onRemove, onlyStage, onMoveUp, onMoveDown, isLastStage }: StageEditorProps) {
   const fieldsDisabled = s.disabled;
   const canMove = onMoveUp !== undefined || onMoveDown !== undefined;
   // Names are free text and there's no longer a fixed set of stage
@@ -295,22 +325,17 @@ function StageEditor({ stage: s, onChange, onToggle, onRemove, onMoveUp, onMoveD
             </div>
           )}
           {s.locked ? (
-            <Tag tone="navy" size="sm">
-              {/* locked is true for two different reasons (see StageForm's
-                  own doc comment above) -- rawState is what actually tells
-                  them apart: "running" only ever happens on an existing,
-                  already-started fermentation's current stage (fromStageResponse),
-                  never on a new plan's first stage (fromStageInput always
-                  stamps "pending" there, even though it's locked too). Says
-                  "Active" so it reads as "can't remove this, it's currently
-                  executing" rather than the generic "Required" a first-time
-                  planner sees before anything's even started. */}
-              {s.rawState === "running" ? "Active" : "Required"}
-            </Tag>
+            // locked now means exactly one thing -- the running-fermentation
+            // editor's currently-executing stage (see StageForm's own doc
+            // comment on `locked`) -- so there's no longer a second case to
+            // disambiguate here.
+            <Tag tone="navy" size="sm">Active</Tag>
           ) : s.disabled ? (
             <Tag tone="gray" size="sm">
               {s.rawState === "skipped" ? "Skipped" : "Finished"}
             </Tag>
+          ) : onlyStage ? (
+            <Tag tone="navy" size="sm">Required</Tag>
           ) : onRemove ? (
             <Button type="button" variant="outline" size="sm" className={styles.iconButton} onClick={onRemove} aria-label="Remove stage">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -585,10 +610,10 @@ export function FermentationPlanDialog(props: Props) {
     } else if (cloneFrom) {
       setName(`${cloneFrom.name} (copy)`);
       setYeastId(cloneFrom.yeast_id ?? undefined);
-      setStages(cloneFrom.stages.map((s, i) => fromStageInput(stageResponseToStageInput(s), String(i), i)));
+      setStages(cloneFrom.stages.map((s, i) => fromStageInput(stageResponseToStageInput(s), String(i))));
     } else if (selectedYeast) {
       setName("");
-      setStages(selectedYeast.default_stages.map((s, i) => fromStageInput(s, String(i), i)));
+      setStages(selectedYeast.default_stages.map((s, i) => fromStageInput(s, String(i))));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, props.mode, selectedYeast, cloneFrom]);
@@ -613,7 +638,7 @@ export function FermentationPlanDialog(props: Props) {
   }
 
   function handleRemoveStage(key: string) {
-    setStages((prev) => prev.filter((s) => s.key !== key));
+    setStages((prev) => removeStage(prev, key));
     setError(undefined);
   }
 
@@ -621,13 +646,13 @@ export function FermentationPlanDialog(props: Props) {
     setError(undefined);
     const stage = blankStage(lastTempF(stages[stages.length - 1]));
     if (props.mode !== "edit") {
-      setStages((prev) => [...prev, fromStageInput(stage, newLocalStageKey(), prev.length)]);
+      setStages((prev) => [...prev, fromStageInput(stage, newLocalStageKey())]);
       return;
     }
     try {
       const afterStageId = stages.length > 0 ? Number(stages[stages.length - 1].key) : undefined;
       const result = await insertStage.mutateAsync({ fermentationId: props.fermentationId, stage, afterStageId });
-      setStages((prev) => [...prev, fromStageInput(stage, String(result.stage_id), prev.length)]);
+      setStages((prev) => [...prev, fromStageInput(stage, String(result.stage_id))]);
     } catch (err) {
       setError(apiErrorMessage(err, "Could not add a stage."));
     }
@@ -702,7 +727,7 @@ export function FermentationPlanDialog(props: Props) {
           </div>
           <div className={styles.subtitle}>
             {props.mode === "new"
-              ? "The first stage is required. Add, remove, or reorder any stage after it."
+              ? "At least one stage is required. Add, remove, or reorder stages freely."
               : props.mode === "view"
                 ? "Read-only -- this batch has already finished."
                 : "Edit, add, reorder, or switch off stages that haven't finished yet. Completed stages are shown for reference."}
@@ -752,7 +777,8 @@ export function FermentationPlanDialog(props: Props) {
                     stage={s}
                     onChange={(patch) => patchStage(s.key, patch)}
                     onToggle={props.mode === "edit" ? (on) => handleToggleStage(s.key, on) : undefined}
-                    onRemove={props.mode === "new" && !s.locked ? () => handleRemoveStage(s.key) : undefined}
+                    onRemove={props.mode === "new" && stages.length > 1 ? () => handleRemoveStage(s.key) : undefined}
+                    onlyStage={props.mode === "new" && stages.length === 1}
                     onMoveUp={canReorder && rIdx > 0 ? () => handleMoveStage(s.key, -1) : undefined}
                     onMoveDown={
                       canReorder && rIdx < reorderableKeys.length - 1 ? () => handleMoveStage(s.key, 1) : undefined

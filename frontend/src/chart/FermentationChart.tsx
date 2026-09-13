@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { SeriesResponse, StageResponse } from "../api/types";
-import { formatDateTime } from "../lib/format";
+import { formatDateTime, formatGravity } from "../lib/format";
 import { useMeasuredWidth } from "../lib/useMeasuredWidth";
 import {
   buildGapPaths,
@@ -558,7 +558,7 @@ export function FermentationChart({ series, stages, complete = false, onScrub }:
               <g transform={`translate(0,${insets.top})`}>
                 {gravityTicks().map((g) => (
                   <text key={g} x={8} y={model.toGravityY(g)} dy="0.32em" className={styles.axisLabel}>
-                    {g.toFixed(3)}
+                    {formatGravity(g)}
                   </text>
                 ))}
               </g>

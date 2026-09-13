@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { applyReorder, blankStage, lastTempF, newLocalStageKey, swapAdjacent } from "./FermentationPlanDialog";
+import {
+  applyReorder,
+  blankStage,
+  fromStageInput,
+  lastTempF,
+  newLocalStageKey,
+  removeStage,
+  swapAdjacent,
+} from "./FermentationPlanDialog";
 import type { StageForm } from "./FermentationPlanDialog";
 
 // Minimal, deliberately loose fixture -- only the fields applyReorder/
@@ -98,6 +106,37 @@ describe("newLocalStageKey", () => {
     } finally {
       globalThis.crypto = realCrypto;
     }
+  });
+});
+
+describe("fromStageInput", () => {
+  it("never locks a draft stage, regardless of position -- a new plan's first stage must stay movable/removable", () => {
+    // The regression this guards: an earlier design locked whichever
+    // stage happened to occupy position 0, which blocked a perfectly
+    // reasonable real plan (e.g. a chill-to-pitch-temp stage authored
+    // before "Primary fermentation"). The only structural rule now is
+    // "at least one stage" (see removeStage below), enforced by disabling
+    // removal at the call site, never by pinning a stage's position.
+    const draft = fromStageInput(blankStage(68), "any-key");
+    expect(draft.locked).toBe(false);
+  });
+});
+
+describe("removeStage", () => {
+  it("removes the named stage when more than one remain", () => {
+    const all = [stage("a"), stage("b"), stage("c")];
+    expect(removeStage(all, "b").map((s) => s.key)).toEqual(["a", "c"]);
+  });
+
+  it("refuses to remove the plan's last remaining stage", () => {
+    const all = [stage("only")];
+    const result = removeStage(all, "only");
+    expect(result).toEqual(all);
+  });
+
+  it("leaves the array unchanged (same reference) when it's a no-op, not just equal by value", () => {
+    const all = [stage("only")];
+    expect(removeStage(all, "only")).toBe(all);
   });
 });
 

@@ -7,6 +7,7 @@ import { useAdvanceStage, useChamberStatus, useStopChamber, useTerminateFermenta
 import type { RoleStatus, SeriesResponse, StageResponse } from "../../api/types";
 import type { Role } from "../../hardware/resolve";
 import { ROLE_LABELS } from "../../hardware/roleLabels";
+import { formatGravity } from "../../lib/format";
 import { BatchTitleMenu } from "./BatchTitleMenu";
 import type { CloneSource } from "./FermentationPlanDialog";
 import { FermentationPlanDialog } from "./FermentationPlanDialog";
@@ -385,11 +386,11 @@ export function GettingStartedView() {
             {scrubbed.hasGravity && (
               <Card padding="sm">
                 <MetricStat
-                  value={scrubbed.gravity !== null ? scrubbed.gravity.toFixed(3) : "--"}
+                  value={scrubbed.gravity !== null ? formatGravity(scrubbed.gravity) : "--"}
                   label={showFinalLabels ? "Final gravity" : "Gravity"}
                   sublabel={
                     batch.og != null
-                      ? `OG ${batch.og.toFixed(3)}${batch.abv_pct != null ? ` · ${batch.abv_pct.toFixed(1)}% ABV` : ""}`
+                      ? `OG ${formatGravity(batch.og)}${batch.abv_pct != null ? ` · ${batch.abv_pct.toFixed(1)}% ABV` : ""}`
                       : !isComplete
                         ? "Detecting OG…" // auto-detection hasn't settled yet -- see contracts/og_detection.py
                         : undefined

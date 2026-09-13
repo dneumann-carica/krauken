@@ -1,3 +1,40 @@
+krauken (0.1.37) stable; urgency=medium
+
+  * Added 2-minute rolling-mean smoothing to Tilt gravity readings
+    (platforms/tilt/scanner.py, GRAVITY_SMOOTHING_WINDOW_S) -- a real,
+    confirmed need: the Tilt is a tilt-angle sensor, not a direct density
+    sensor, and its raw broadcast is only integer-thousandths resolution
+    to begin with, both of which showed up as real, confirmed noise on a
+    live batch (fermentation 6) large enough to keep its 24h
+    gravity-stability gate from ever being satisfied, so it never
+    auto-advanced out of Primary fermentation. Every raw ~1Hz beacon
+    decode is now averaged over a trailing 2-minute buffer before
+    calibration/dropout logic sees it; a real dropout gap still clears
+    the buffer so pre/post-gap readings never blend together.
+  * Re-derived GRAVITY_STABLE_TOLERANCE_SG (contracts/stages.py) from
+    that same real batch's data -- 0.0006 (only ever validated against
+    the simulator's much quieter assumed noise) raised to 0.0015, which
+    reached 100% reliable satisfaction across the batch's entire
+    genuinely-flat tail once smoothed, with ~20x margin below the spread
+    seen while gravity was still genuinely, slowly declining.
+  * Centralized gravity-value rounding into a single formatGravity()
+    helper (frontend/src/lib/format.ts) and pointed every display site at
+    it, so a smoothed/averaged reading -- which now carries far more
+    floating-point digits than a raw single Tilt decode ever did -- can
+    never leak that extra, meaningless precision into the UI. Every site
+    already rounded to 3 decimals before this; this just guarantees it
+    stays that way instead of relying on each site remembering to. Also
+    fixed a latent bug turned up along the way: LiveStageBar's own
+    gravity formatter had no null guard and would have rendered the
+    literal string "undefined" for a null gravity_hi.
+  * New-fermentation plan editor: any stage can now be removed or
+    reordered as long as at least one remains, not just every stage after
+    the first -- the earlier "first stage is locked" rule blocked a
+    perfectly reasonable real plan (e.g. authoring a chill-to-pitch-temp
+    stage before "Primary fermentation").
+
+ -- The Krauken Project <dneumann@arpio.io>  Sun, 13 Sep 2026 14:00:00 -0400
+
 krauken (0.1.36) stable; urgency=medium
 
   * Fixed calibrate_gravity (added in 0.1.35) rejecting every real request

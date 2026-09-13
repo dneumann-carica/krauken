@@ -21,7 +21,12 @@ pytest.importorskip("aioblescan")
 from krauken.contracts.clock import SimulatorClock  # noqa: E402
 from krauken.contracts.errors import PlatformUnavailable  # noqa: E402
 from krauken.platforms.tilt import scanner as scanner_module  # noqa: E402
-from krauken.platforms.tilt.scanner import ALL_TILT_COLORS, DROPOUT_TIMEOUT_S, TiltScanner  # noqa: E402
+from krauken.platforms.tilt.scanner import (  # noqa: E402
+    ALL_TILT_COLORS,
+    DROPOUT_TIMEOUT_S,
+    GRAVITY_SMOOTHING_WINDOW_S,
+    TiltScanner,
+)
 
 # Verbatim raw HCI event bytes captured 2026-08-11 -- a real Tilt Orange
 # advertisement, decoded live to major=39 (temp F), minor=1008 (SG x1000).
@@ -114,6 +119,63 @@ def test_a_fresh_beacon_before_the_timeout_keeps_it_alive():
     s._on_packet(REAL_TILT_ORANGE_PACKET)  # a fresh beacon resets the clock
     clock.advance(DROPOUT_TIMEOUT_S - 1)
     assert s.latest("orange") is not None  # would have expired from the FIRST beacon alone
+
+
+def test_raw_latest_returns_the_mean_of_the_smoothing_window():
+    # Directly seeded (not decoded from real packets, which always carry
+    # the same fixed value in this fixture) -- exercises _smoothed_gravity's
+    # math specifically, same "seed the internal cache directly" idiom
+    # test_tilt_platform.py's _running_scanner_with already uses.
+    clock = SimulatorClock()
+    s = _scanner(clock)
+    s._on_packet(REAL_TILT_ORANGE_PACKET)  # seeds a real TiltReading + history entry
+    s._gravity_history["orange"].clear()
+    s._gravity_history["orange"].extend([
+        (clock.monotonic() - 60.0, 1.010),
+        (clock.monotonic() - 30.0, 1.011),
+        (clock.monotonic(), 1.012),
+    ])
+    reading = s.raw_latest("orange")
+    assert reading.gravity_sg == pytest.approx((1.010 + 1.011 + 1.012) / 3)
+
+
+def test_gravity_smoothing_prunes_entries_older_than_the_window():
+    clock = SimulatorClock()
+    s = _scanner(clock)
+    tick_s = 10.0  # well under DROPOUT_TIMEOUT_S -- never triggers a dropout reset
+    for _ in range(20):  # 200s of continuous packets
+        s._on_packet(REAL_TILT_ORANGE_PACKET)
+        clock.advance(tick_s)
+
+    history = s._gravity_history["orange"]
+    # window/tick = 120/10 = 12 -- pruning should cap it near there, not
+    # let it grow to all 20 calls.
+    assert len(history) <= 13
+    span = history[-1][0] - history[0][0]  # newest vs. oldest reading actually kept
+    assert span <= GRAVITY_SMOOTHING_WINDOW_S
+
+
+def test_a_real_dropout_gap_clears_the_smoothing_history_not_just_readings():
+    clock = SimulatorClock()
+    s = _scanner(clock)
+    s._on_packet(REAL_TILT_ORANGE_PACKET)
+    assert len(s._gravity_history["orange"]) == 1
+
+    clock.advance(DROPOUT_TIMEOUT_S + 1)  # a real gap -- reads as dropped-out in between
+    s._on_packet(REAL_TILT_ORANGE_PACKET)
+
+    history = s._gravity_history["orange"]
+    assert len(history) == 1  # the pre-gap entry must not survive alongside the new one
+    assert history[0][0] == pytest.approx(DROPOUT_TIMEOUT_S + 1)
+
+
+def test_a_short_gap_within_dropout_timeout_does_not_reset_history():
+    clock = SimulatorClock()
+    s = _scanner(clock)
+    s._on_packet(REAL_TILT_ORANGE_PACKET)
+    clock.advance(DROPOUT_TIMEOUT_S - 1)  # still within the dropout window
+    s._on_packet(REAL_TILT_ORANGE_PACKET)
+    assert len(s._gravity_history["orange"]) == 2
 
 
 def test_set_calibration_shifts_latest_but_not_raw_latest():

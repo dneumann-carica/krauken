@@ -37,6 +37,7 @@ import dataclasses
 import json
 import logging
 import os
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -78,6 +79,26 @@ DEFAULT_HCI_DEVICE = 0
 # seconds, so this is generous padding, not a tight tolerance tuned to
 # barely work.
 DROPOUT_TIMEOUT_S = 30.0
+
+# Gravity_sg is smoothed by averaging every raw ~1Hz beacon decode over
+# this trailing window before it's exposed through raw_latest()/latest()
+# -- a real, confirmed need: the Tilt is a tilt-ANGLE sensor, not a direct
+# density sensor, so it's inherently sensitive to CO2 bubbles/convection
+# physically jostling the float during active fermentation, and its raw
+# broadcast is only integer-thousandths (gravity_sg = minor/1000.0) to
+# begin with. Sized and validated against a real batch's actual
+# 24h-stability-gate data (contracts/stages.py's GravityGate,
+# GRAVITY_STABLE_TOLERANCE_SG -- see that constant's own comment for the
+# full numbers): at only 4 samples per window (a coarse stand-in, sampled
+# at the ~30s control-tick cadence, for what this real ~1Hz-fed 120s
+# window will see -- roughly 120 samples), the trailing-24h gravity
+# spread during a genuinely flat stretch of real fermentation data never
+# exceeded 0.00125 SG, vs. 0.002 unsmoothed -- averaging over the FULL
+# ~1Hz stream (30x more samples per window) should smooth at least that
+# well, plausibly better. 2 minutes specifically: long enough to average
+# away single-beacon jitter, short enough not to meaningfully lag a
+# genuine decline against a 24h stability window.
+GRAVITY_SMOOTHING_WINDOW_S = 120.0
 
 # Confirmed live 2026-08-22: aioblescan's create_bt_socket() is a
 # synchronous, blocking syscall against the hci device, and it doesn't
@@ -134,6 +155,14 @@ class TiltScanner:
         # TiltScanner has no DB access at all, by design (see this
         # module's own docstring on DEFAULT_HCI_DEVICE).
         self._gravity_offsets: dict[str, float] = {}
+        # color -> trailing GRAVITY_SMOOTHING_WINDOW_S of (monotonic_ts,
+        # gravity_sg) pairs, one per raw beacon decode -- see that
+        # constant's own comment. _on_packet() appends to and prunes this
+        # every packet; raw_latest()/latest() read its mean, never the
+        # single latest packet's own gravity_sg directly (that field is
+        # still populated on TiltReading for reference/diagnostics, but
+        # never returned as-is any more).
+        self._gravity_history: dict[str, deque[tuple[float, float]]] = {}
         self._conn: Any = None
         self._btctrl: Any = None
         self._decoder: Any = None
@@ -247,28 +276,65 @@ class TiltScanner:
         color = TILT_COLOR_BY_UUID.get(parsed.get("uuid", ""))
         if color is None:
             return
+        gravity_sg = parsed["minor"] / 1000.0
+        now_monotonic = self.clock.monotonic()
+
+        previous = self._readings.get(color)
+        history = self._gravity_history.setdefault(color, deque())
+        if previous is not None and (now_monotonic - previous.last_seen_monotonic) > DROPOUT_TIMEOUT_S:
+            # A real gap -- this color was already reading as dropped-out
+            # (latest()/raw_latest() would have returned None) before this
+            # packet arrived. Never let a pre-gap and post-gap reading get
+            # averaged together as if continuous -- same "a dropout must
+            # not stitch readings across it" discipline
+            # contracts/gravity_stability.py's own reset() documents.
+            history.clear()
+        history.append((now_monotonic, gravity_sg))
+        cutoff = now_monotonic - GRAVITY_SMOOTHING_WINDOW_S
+        while history and history[0][0] < cutoff:
+            history.popleft()
+
         self._readings[color] = TiltReading(
             temp_f=float(parsed["major"]),
-            gravity_sg=parsed["minor"] / 1000.0,
+            gravity_sg=gravity_sg,
             rssi=int(parsed.get("rssi", 0)),
-            last_seen_monotonic=self.clock.monotonic(),
+            last_seen_monotonic=now_monotonic,
         )
+
+    def _smoothed_gravity(self, color: str) -> float | None:
+        history = self._gravity_history.get(color)
+        if not history:
+            return None
+        values = [g for _, g in history]
+        return sum(values) / len(values)
 
     def raw_latest(self, color: str) -> TiltReading | None:
         """Same freshness check as latest(), but with no gravity offset
-        applied -- the true reading straight off the last beacon decoded.
-        Used only by the calibrate_gravity test runner
+        applied -- the reading before calibration, though (since
+        GRAVITY_SMOOTHING_WINDOW_S's own comment) not before smoothing:
+        gravity_sg here is the mean of every raw beacon decode over the
+        trailing smoothing window, not the single latest packet's own
+        value. Used by the calibrate_gravity test runner
         (platforms/tilt/calibration.py) to compute a fresh offset against
-        the actual raw value, never by anything on the live read path
-        (that's latest(), below) -- recalibrating must always correct from
-        ground truth, not from an already-corrected reading, or repeated
-        recalibration would silently compound."""
+        that smoothed value -- calibrating off a single noisy instant
+        would be exactly the mistake smoothing exists to avoid -- never by
+        anything on the live read path (that's latest(), below);
+        recalibrating must always correct from ground truth, not from an
+        already-corrected reading, or repeated recalibration would
+        silently compound. Falls back to the single latest packet's own
+        gravity_sg if the smoothing history is empty (e.g. a TiltReading
+        seeded directly in a test, bypassing _on_packet entirely) --
+        production always populates both together, so this only matters
+        for test scaffolding."""
         reading = self._readings.get(color)
         if reading is None:
             return None
         if self.clock.monotonic() - reading.last_seen_monotonic > DROPOUT_TIMEOUT_S:
             return None
-        return reading
+        smoothed = self._smoothed_gravity(color)
+        if smoothed is None:
+            return reading
+        return dataclasses.replace(reading, gravity_sg=smoothed)
 
     def latest(self, color: str) -> TiltReading | None:
         reading = self.raw_latest(color)

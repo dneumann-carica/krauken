@@ -16,6 +16,7 @@ import type { DeviceResponse } from "../../api/types";
 import { ALL_ROLES, CHAMBER_BUNDLE, REQUIRED_ROLES, Role, resolve } from "../../hardware/resolve";
 import type { DeviceInfo } from "../../hardware/resolve";
 import { ROLE_LABELS } from "../../hardware/roleLabels";
+import { formatGravity } from "../../lib/format";
 import { HardwareWizard } from "./HardwareWizard";
 import { TiltCalibrationDialog } from "./TiltCalibrationDialog";
 import styles from "./HardwareSetupView.module.css";
@@ -51,7 +52,7 @@ function readingFor(role: Role, device: DeviceResponse | undefined): string {
   if (role === Role.CHAMBER_COOLING || role === Role.CHAMBER_HEATING) return "outlet off";
   if (role === Role.BEER_GRAVITY) {
     const g = device.last_reading.gravity_sg;
-    return typeof g === "number" ? g.toFixed(3) : "—";
+    return typeof g === "number" ? formatGravity(g) : "—";
   }
   const t = device.last_reading.temp_f;
   return typeof t === "number" ? `${t.toFixed(1)}°F` : "—";
